@@ -13,6 +13,10 @@ struct ReviewGroup: Identifiable {
     /// are perceptually similar but that the user wants to keep in full (e.g.
     /// several poses of the same subject).
     var keepAll = false
+    /// A confident, near-identical burst (members barely differ) → safe to
+    /// pre-mark for deletion. When false the frames differ enough that they may
+    /// be distinct moments, so we don't pre-mark anything (keepAll defaults on).
+    var confidentDupe = true
 
     func isKeeper(_ p: Photo) -> Bool { !keepAll && p.uuid == keeperID }
     func isDelete(_ p: Photo) -> Bool { !keepAll && p.uuid != keeperID && !p.favorite }
@@ -41,6 +45,11 @@ final class LibraryModel: ObservableObject {
     /// scene. Generous enough to keep real bursts (slight motion) together,
     /// tight enough to split unrelated shots.
     var contentMaxDistance = 14
+    /// A cluster whose internal spread is at most this is a confident,
+    /// near-identical burst (pre-marked for deletion). Tuned on real avalanche
+    /// bursts: median spread 3, p75 6 — so ≤6 captures ~86% of genuine
+    /// held-shutter bursts while pose/subject changes (≈12) fall to "you decide".
+    var contentConfidentSpread = 6
     @Published var refiningFaces = false
     /// True once a face-refinement pass has re-picked keepers.
     @Published var facesApplied = false
@@ -57,6 +66,11 @@ final class LibraryModel: ObservableObject {
     private var assetsByID: [String: PHAsset] = [:]
 
     var totalDeletions: Int { groups.reduce(0) { $0 + $1.deletionIDs.count } }
+
+    /// Confident, near-identical bursts (pre-marked) vs groups whose frames vary
+    /// enough that the user should decide (nothing pre-marked).
+    var confidentGroups: [ReviewGroup] { groups.filter(\.confidentDupe) }
+    var pendingGroups: [ReviewGroup] { groups.filter { !$0.confidentDupe } }
 
     /// Total bytes that would be freed by deleting every marked frame (0 if the
     /// quality sidecar — which carries real file sizes — wasn't readable).
@@ -113,20 +127,31 @@ final class LibraryModel: ObservableObject {
         let enriched = assets.map { makePhoto(from: $0, enr: enr) }
 
         progress = t.progClustering(enriched.count)
-        var clustered = cluster(enriched, gapSec: gapSec, sizeTol: sizeTol, maxSpan: maxSpan)
+        let clustered = cluster(enriched, gapSec: gapSec, sizeTol: sizeTol, maxSpan: maxSpan)
 
         // Verify each time-burst actually looks alike (perceptual hash), so two
-        // different shots taken seconds apart aren't grouped on timing alone.
+        // different shots taken seconds apart aren't grouped on timing alone —
+        // and tier by how much the frames differ: near-identical → confident
+        // (pre-marked), more variation → "you decide" (nothing pre-marked).
         if verifyContent {
             progress = t.progVerifying(0, clustered.count)
             let lookup = assetsByID
-            clustered = await LookAlikeScanner.verifyByContent(
+            let verified = await LookAlikeScanner.verifyByContent(
                 clustered, asset: { lookup[$0] }, manager: imageManager,
                 maxDistance: contentMaxDistance, t: t
             ) { [weak self] msg in Task { @MainActor in self?.progress = msg } }
+            groups = verified.map { vc in
+                let confident = vc.spread <= contentConfidentSpread
+                var g = ReviewGroup(photos: vc.photos, keeperID: keeper(vc.photos).uuid)
+                g.confidentDupe = confident
+                g.keepAll = !confident        // uncertain groups: keep all, pre-mark nothing
+                return g
+            }
+        } else {
+            // No content check → can't gauge variation; fall back to the legacy
+            // aggressive behaviour (treat every cluster as a confident dupe).
+            groups = clustered.map { ReviewGroup(photos: $0, keeperID: keeper($0).uuid) }
         }
-
-        groups = clustered.map { ReviewGroup(photos: $0, keeperID: keeper($0).uuid) }
     }
 
     /// Build a Core Photo from a PHAsset, enriched with Apple quality + size.

@@ -62,31 +62,18 @@ struct ContentView: View {
 
     private var sidebar: some View {
         // Manual selection (no List(selection:)) so the system accent highlight
-        // never flashes orange behind our teal row background.
+        // never flashes orange behind our teal row background. Two sections:
+        // confident duplicates (pre-marked) and "similar — you decide".
         List {
-            ForEach(model.groups) { g in
-                let sel = g.id == selection
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(t.frames(g.photos.count))
-                            .font(.headline)
-                            .foregroundStyle(sel ? .white : Color.reefMint)
-                        if g.hasFavorite { Text("★").foregroundStyle(Color.reefAmber) }
-                        if g.hasVideo { Image(systemName: "video.fill").font(.caption2).foregroundStyle(Color.reefAmber) }
-                    }
-                    Text(t.sidebarSubtitle(span: g.spanSec, delete: g.deletionIDs.count))
-                        .font(.caption)
-                        .foregroundStyle(sel ? Color.white.opacity(0.85) : Color.reefTextDim)
+            if !model.confidentGroups.isEmpty {
+                Section(t.sectionConfident(model.confidentGroups.count)) {
+                    ForEach(model.confidentGroups) { sidebarRow($0) }
                 }
-                .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture { selection = g.id }
-                .listRowBackground(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(sel ? Color.reefTeal : Color.clear)
-                        .padding(.vertical, 1)
-                )
+            }
+            if !model.pendingGroups.isEmpty {
+                Section(t.sectionPending(model.pendingGroups.count)) {
+                    ForEach(model.pendingGroups) { sidebarRow($0) }
+                }
             }
         }
         .listStyle(.sidebar)
@@ -95,6 +82,32 @@ struct ContentView: View {
         .navigationTitle("snapsift")
         .frame(minWidth: 240)
         .overlay { if model.groups.isEmpty { emptyState } }
+    }
+
+    private func sidebarRow(_ g: ReviewGroup) -> some View {
+        let sel = g.id == selection
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(t.frames(g.photos.count))
+                    .font(.headline)
+                    .foregroundStyle(sel ? .white : Color.reefMint)
+                if g.hasFavorite { Text("★").foregroundStyle(Color.reefAmber) }
+                if g.hasVideo { Image(systemName: "video.fill").font(.caption2).foregroundStyle(Color.reefAmber) }
+                if g.keepAll { Image(systemName: "checkmark.circle.fill").font(.caption2).foregroundStyle(Color.reefGreen) }
+            }
+            Text(t.sidebarSubtitle(span: g.spanSec, delete: g.deletionIDs.count))
+                .font(.caption)
+                .foregroundStyle(sel ? Color.white.opacity(0.85) : Color.reefTextDim)
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture { selection = g.id }
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(sel ? Color.reefTeal : Color.clear)
+                .padding(.vertical, 1)
+        )
     }
 
     private var emptyState: some View {

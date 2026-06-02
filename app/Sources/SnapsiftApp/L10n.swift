@@ -240,6 +240,20 @@ struct L10n: Sendable {
         case .zhTW: return "內容驗證"
         }
     }
+    func sectionConfident(_ n: Int) -> String {
+        switch language {
+        case .en: return "Duplicates · \(n)"
+        case .ja: return "重複 · \(n)"
+        case .zhTW: return "確定重複 · \(n)"
+        }
+    }
+    func sectionPending(_ n: Int) -> String {
+        switch language {
+        case .en: return "Similar — you decide · \(n)"
+        case .ja: return "似ている — あなたが選ぶ · \(n)"
+        case .zhTW: return "相似 · 你決定 · \(n)"
+        }
+    }
     func keepAll() -> String {
         switch language {
         case .en: return "Keep all"

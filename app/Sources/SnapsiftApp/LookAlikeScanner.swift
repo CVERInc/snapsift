@@ -64,13 +64,20 @@ enum LookAlikeScanner {
     /// timing + dimensions (e.g. two different shots taken 2s apart). Clusters
     /// where a member's thumbnail can't be read are left untouched (we don't
     /// split on incomplete information).
+    /// A content-verified cluster plus its internal perceptual spread (the max
+    /// pairwise dHash distance among members). Small spread ⇒ near-identical
+    /// frames (a confident, redundant burst); larger spread ⇒ the subject moved
+    /// (a session the user may want to keep). `spread == Int.max` means the
+    /// cluster couldn't be hashed and was left unverified.
+    struct VerifiedCluster { let photos: [Photo]; let spread: Int }
+
     static func verifyByContent(_ clusters: [[Photo]],
                                 asset: (String) -> PHAsset?,
                                 manager: PHCachingImageManager,
                                 maxDistance: Int,
                                 t: L10n,
-                                progress: @escaping (String) -> Void) async -> [[Photo]] {
-        var out: [[Photo]] = []
+                                progress: @escaping (String) -> Void) async -> [VerifiedCluster] {
+        var out: [VerifiedCluster] = []
         var done = 0
         for cluster in clusters {
             done += 1
@@ -87,11 +94,15 @@ enum LookAlikeScanner {
                 }
             }
             if !allHashed {
-                out.append(cluster)                 // can't verify → keep as-is
+                out.append(VerifiedCluster(photos: cluster, spread: Int.max))  // unverified → treat as uncertain
                 continue
             }
+            let hashByUUID = Dictionary(uniqueKeysWithValues: hashed.map { ($0.1.uuid, $0.0) })
             for sub in groupByHash(hashed, maxDistance: maxDistance) where sub.count >= 2 {
-                out.append(sub.sorted { $0.takenAt < $1.takenAt })
+                let hs = sub.compactMap { hashByUUID[$0.uuid] }
+                var spread = 0
+                for i in 0..<hs.count { for j in (i + 1)..<hs.count { spread = max(spread, hamming(hs[i], hs[j])) } }
+                out.append(VerifiedCluster(photos: sub.sorted { $0.takenAt < $1.takenAt }, spread: spread))
             }
         }
         return out
