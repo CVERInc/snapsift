@@ -20,7 +20,9 @@ enum LookAlikeScanner {
                      manager: PHCachingImageManager,
                      t: L10n,
                      dHashDistance: Int = 8,
-                     featureDistance: Float = 0.7,
+                     featureDistance: Float = 0.15,   // ≈0.0 for a true re-saved
+                                                      // copy; 0.15 excludes merely
+                                                      // similar shots (cats ≈0.3)
                      progress: @escaping (String) -> Void) async -> [[String]] {
 
         // Stage 1 — dHash all thumbnails (tiny 9×8 requests, fast).

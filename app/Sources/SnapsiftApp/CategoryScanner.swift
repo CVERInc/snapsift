@@ -18,15 +18,19 @@ enum CategoryScanner {
 
     /// The chosen bucket label for an asset, or nil if nothing is reliable.
     static func category(for asset: PHAsset, manager: PHCachingImageManager) async -> String? {
-        guard let cg = await cgImage(for: asset, manager: manager) else { return nil }
+        await labels(for: asset, manager: manager).first
+    }
+
+    /// Up to `limit` reliable, specific content labels for an asset (most
+    /// specific first; over-generic ancestors dropped). Used to name a set.
+    static func labels(for asset: PHAsset, manager: PHCachingImageManager, limit: Int = 3) async -> [String] {
+        guard let cg = await cgImage(for: asset, manager: manager) else { return [] }
         let request = VNClassifyImageRequest()
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
-        do { try handler.perform([request]) } catch { return nil }
-        let reliable = (request.results ?? []).filter { $0.hasMinimumPrecision(0.3, forRecall: 0) }
-        if let specific = reliable.first(where: { !generic.contains($0.identifier) }) {
-            return specific.identifier
-        }
-        return reliable.first?.identifier
+        do { try handler.perform([request]) } catch { return [] }
+        let reliable = (request.results ?? [])
+            .filter { $0.hasMinimumPrecision(0.3, forRecall: 0) && !generic.contains($0.identifier) }
+        return Array(reliable.prefix(limit).map(\.identifier))
     }
 
     /// A label like "interior_room" → "Interior room" for display.

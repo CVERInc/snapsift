@@ -23,7 +23,7 @@ enum Apfel {
     /// Labels (a subset of `labels`) whose meaning matches `query`, or nil if
     /// apfel can't run (caller should fall back to substring matching).
     static func match(query: String, labels: [String]) async -> [String]? {
-        guard let url else { return nil }
+        guard isInstalled else { return nil }
         let system = """
             You map a photo-search query to category labels. Given a QUERY and a \
             list of LABELS (lowercase taxonomy ids), reply with ONLY a JSON array \
@@ -40,6 +40,23 @@ enum Apfel {
         let valid = Set(labels)
         let matched = decoded.filter { valid.contains($0) }
         return matched.isEmpty ? nil : matched
+    }
+
+    /// A short, friendly album name for a set of photos described by Vision tags
+    /// (e.g. ["cat","basket","indoor"] → "Cat in a basket"). nil if apfel can't
+    /// run — caller falls back to the top tag.
+    static func albumName(tags: [String]) async -> String? {
+        guard url != nil, !tags.isEmpty else { return nil }
+        let system = """
+            You name a photo album in 2–4 words from content tags. Reply with ONLY \
+            the name — no quotes, no punctuation, Title Case. Be natural, not a tag list.
+            """
+        let prompt = "TAGS: \(tags.joined(separator: ", "))"
+        guard let out = await run(["-q", "--temperature", "0.3", "-s", system, prompt]) else { return nil }
+        let name = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\"", with: "")
+        let firstLine = name.split(whereSeparator: \.isNewline).first.map(String.init) ?? name
+        return firstLine.isEmpty || firstLine.count > 40 ? nil : firstLine
     }
 
     private static func run(_ args: [String]) async -> String? {

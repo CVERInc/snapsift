@@ -30,10 +30,10 @@ struct ReviewGroup: Identifiable {
 /// the same content label, across the whole library and across time.
 struct CategoryBucket: Identifiable {
     let id = UUID()
-    let label: String
+    let label: String      // already a display-ready name (apfel or top Vision tag)
     let photos: [Photo]
     var count: Int { photos.count }
-    var display: String { CategoryScanner.displayName(label) }
+    var display: String { label }
 }
 
 /// Drives the whole app: PhotoKit authorization, enumeration → Core clustering,
@@ -254,9 +254,11 @@ final class LibraryModel: ObservableObject {
         }
     }
 
-    /// "Similar sets": classify the whole library on-device (Vision) and bucket
-    /// photos by what's in them — across time, no deletion. Heavier than the
-    /// other passes (one classification per photo); shows progress.
+    /// "Similar sets": find sets of photos you took of the same thing — several
+    /// near-same shots (like three poses of the same cat) — by clustering the
+    /// whole library on visual similarity (looser than Look-alikes), then naming
+    /// each set from its Vision content tags (prettified by apfel if available).
+    /// No deletion — this is for browsing/curation.
     func scanSimilarSets(_ t: L10n) async {
         guard !isScanning else { return }
         isScanning = true
@@ -285,20 +287,36 @@ final class LibraryModel: ObservableObject {
         }
         let enr = enrichment ?? [:]
 
-        var buckets: [String: [Photo]] = [:]
-        var done = 0
-        for asset in assets {
-            if let label = await CategoryScanner.category(for: asset, manager: imageManager) {
-                buckets[label, default: []].append(makePhoto(from: asset, enr: enr))
-            }
-            done += 1
-            if done % 200 == 0 { progress = t.progClassifying(done, assets.count) }
-        }
+        // Cluster the library at the "same scene, different moment" band — looser
+        // than Look-alikes (which is now ≈identical only), so pose/angle changes
+        // still group (cats ≈0.3 feature distance land here, not in Look-alikes).
+        let idGroups = await LookAlikeScanner.scan(
+            assets: assets, manager: imageManager, t: t,
+            dHashDistance: 14, featureDistance: 0.45
+        ) { [weak self] msg in Task { @MainActor in self?.progress = msg } }
 
-        categories = buckets
-            .map { CategoryBucket(label: $0.key, photos: $0.value) }
-            .filter { $0.count >= 2 }
-            .sorted { $0.count > $1.count }
+        var albums: [CategoryBucket] = []
+        var i = 0
+        for ids in idGroups {
+            i += 1
+            if i % 10 == 0 { progress = t.progNaming(i, idGroups.count) }
+            let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0, enr: enr) }
+                .sorted { $0.takenAt < $1.takenAt }
+            guard photos.count >= 2 else { continue }
+            let name = await albumName(for: photos)
+            albums.append(CategoryBucket(label: name, photos: photos))
+        }
+        categories = albums.sorted { $0.count > $1.count }
+    }
+
+    /// Name a set from the Vision tags of its representative frame, prettified by
+    /// apfel when available; otherwise the top tag (or a generic fallback).
+    private func albumName(for photos: [Photo]) async -> String {
+        guard let rep = photos.first, let asset = assetsByID[rep.uuid] else { return "Set" }
+        let tags = await CategoryScanner.labels(for: asset, manager: imageManager)
+        guard let top = tags.first else { return "Set" }
+        if let pretty = await Apfel.albumName(tags: tags) { return pretty }
+        return CategoryScanner.displayName(top)
     }
 
     /// Promote a frame to keeper (favorites stay protected either way).

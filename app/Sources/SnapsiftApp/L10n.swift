@@ -53,9 +53,9 @@ struct L10n: Sendable {
     }
     func tipSimilarSets() -> String {
         switch language {
-        case .en: return "Group your whole library by what's in each photo (neural, on-device) — across time, nothing deleted"
-        case .ja: return "写真の内容でライブラリ全体を分類（オンデバイス・時間をまたぐ・削除しない）"
-        case .zhTW: return "用照片內容把整個圖庫分類（裝置端神經、跨時間、不刪任何東西）"
+        case .en: return "Gathers the sets where you took several shots of the same thing into named albums — nothing deleted"
+        case .ja: return "同じ被写体を何枚も撮ったセットを、名前付きアルバムにまとめる（削除しない）"
+        case .zhTW: return "把你對同一個東西拍了好幾張的成組，整理成有名字的相簿（不刪任何東西）"
         }
     }
     func progClassifying(_ i: Int, _ total: Int) -> String {
@@ -63,6 +63,13 @@ struct L10n: Sendable {
         case .en: return "Classifying \(i)/\(total)…"
         case .ja: return "分類中 \(i)/\(total)…"
         case .zhTW: return "分類中 \(i)/\(total)…"
+        }
+    }
+    func progNaming(_ i: Int, _ total: Int) -> String {
+        switch language {
+        case .en: return "Naming sets \(i)/\(total)…"
+        case .ja: return "セットに名前を付け中 \(i)/\(total)…"
+        case .zhTW: return "為相簿命名 \(i)/\(total)…"
         }
     }
     func categoryHeader(count: Int, shown: Int) -> String {
@@ -138,9 +145,9 @@ struct L10n: Sendable {
     }
     func appleRanked() -> String {
         switch language {
-        case .en: return "Apple-ranked"
-        case .ja: return "Apple 品質順"
-        case .zhTW: return "Apple 品質排序"
+        case .en: return "Apple picked the best"
+        case .ja: return "Apple がベストを選択"
+        case .zhTW: return "Apple 幫你挑最好的"
         }
     }
     func selectCluster() -> String {
@@ -152,9 +159,9 @@ struct L10n: Sendable {
     }
     func scanHint() -> String {
         switch language {
-        case .en: return "Scan to find near-duplicate bursts"
-        case .ja: return "スキャンしてよく似た連写を探します"
-        case .zhTW: return "掃描以找出近乎重複的連拍"
+        case .en: return "Pick what to look for"
+        case .ja: return "何を探すか選んでください"
+        case .zhTW: return "選一個你想找的"
         }
     }
 
@@ -176,44 +183,44 @@ struct L10n: Sendable {
     }
     func tipKeeper() -> String {
         switch language {
-        case .en: return "Keeper"
-        case .ja: return "残す1枚"
-        case .zhTW: return "保留這張"
+        case .en: return "The one we'll keep"
+        case .ja: return "残すのはこの1枚"
+        case .zhTW: return "會留下的就這張"
         }
     }
     func tipDelete() -> String {
         switch language {
-        case .en: return "Will be deleted · click to keep this one"
-        case .ja: return "削除されます · クリックでこれを残す"
-        case .zhTW: return "將被刪除 · 點擊改留這張"
+        case .en: return "This one gets deleted — click it to keep it instead"
+        case .ja: return "これは削除されます — クリックすれば残せます"
+        case .zhTW: return "這張會被刪 — 點一下改成留它"
         }
     }
     func tipFavorite() -> String {
         switch language {
-        case .en: return "Favorite — always kept"
-        case .ja: return "お気に入り — 常に残します"
-        case .zhTW: return "最愛 — 一律保留"
+        case .en: return "Favorite — never deleted"
+        case .ja: return "お気に入り — 絶対に削除しません"
+        case .zhTW: return "最愛 — 絕對不刪"
         }
     }
     func tipScan() -> String {
         switch language {
-        case .en: return "Find near-duplicate burst sequences"
-        case .ja: return "よく似た連写を探す"
-        case .zhTW: return "找出近乎重複的連拍序列"
+        case .en: return "Clears the burst of near-identical shots from holding the shutter — keeps the best one"
+        case .ja: return "シャッターを押し続けて撮れたそっくりな連写を片付け、ベストの1枚を残す"
+        case .zhTW: return "把你按住快門連拍出的一堆幾乎一樣的，留最好一張、清掉其餘"
         }
     }
     func tipLookAlikes() -> String {
         switch language {
-        case .en: return "Find the same photo saved across different days (neural, on-device)"
-        case .ja: return "別の日に保存された同じ写真を探す（オンデバイスのニューラル解析）"
-        case .zhTW: return "找出不同天存下的同一張照片（裝置端神經分析）"
+        case .en: return "Finds the same photo saved more than once — re-downloaded, screenshotted, AirDropped back — even days apart"
+        case .ja: return "同じ写真を何度も保存したもの（再ダウンロード・スクショ・AirDrop）を、別の日でも見つける"
+        case .zhTW: return "找出同一張被存了好幾份的（重新下載、截圖、AirDrop 回來），就算隔了好幾天"
         }
     }
     func tipFaces() -> String {
         switch language {
-        case .en: return "Re-pick keepers using on-device face + open-eyes analysis"
-        case .ja: return "顔と開いた目の解析で残す1枚を選び直す（オンデバイス）"
-        case .zhTW: return "用裝置端人臉與睜眼分析重新挑選保留張"
+        case .en: return "Re-picks the keeper to the frame where faces look best — eyes open"
+        case .ja: return "顔がいちばん良く写った1枚（目が開いている）を残すよう選び直す"
+        case .zhTW: return "改挑大家臉拍得最好、眼睛有張開的那張當保留"
         }
     }
     func tipAppleRanked() -> String {
@@ -284,16 +291,16 @@ struct L10n: Sendable {
     }
     func sectionConfident(_ n: Int) -> String {
         switch language {
-        case .en: return "Duplicates · \(n)"
-        case .ja: return "重複 · \(n)"
-        case .zhTW: return "確定重複 · \(n)"
+        case .en: return "Near-identical · \(n)"
+        case .ja: return "ほぼ同じ · \(n)"
+        case .zhTW: return "幾乎一樣 · \(n)"
         }
     }
     func sectionPending(_ n: Int) -> String {
         switch language {
-        case .en: return "Similar — you decide · \(n)"
-        case .ja: return "似ている — あなたが選ぶ · \(n)"
-        case .zhTW: return "相似 · 你決定 · \(n)"
+        case .en: return "A bit alike — you choose · \(n)"
+        case .ja: return "少し似ている — あなたが選ぶ · \(n)"
+        case .zhTW: return "有點像 · 你決定 · \(n)"
         }
     }
     func keepAll() -> String {
