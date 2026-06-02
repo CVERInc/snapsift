@@ -12,10 +12,20 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "SnapsiftCore", targets: ["SnapsiftCore"]),
+        .executable(name: "SnapsiftApp", targets: ["SnapsiftApp"]),
         .executable(name: "SnapsiftTests", targets: ["SnapsiftTests"]),
     ],
     targets: [
         .target(name: "SnapsiftCore"),
+        // SwiftUI app over the same engine: PhotoKit enumeration + thumbnails +
+        // native deletion, with the reef family theme.
+        .executableTarget(
+            name: "SnapsiftApp",
+            dependencies: ["SnapsiftCore"],
+            // PhotoKit's escaping, non-Sendable callbacks fight Swift 6 strict
+            // concurrency; v5 mode keeps the UI layer pragmatic. Core stays v6.
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .executableTarget(name: "SnapsiftTests", dependencies: ["SnapsiftCore"]),
     ]
 )

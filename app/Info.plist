@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>snapsift</string>
+  <key>CFBundleDisplayName</key><string>snapsift</string>
+  <key>CFBundleIdentifier</key><string>net.cver.snapsift</string>
+  <key>CFBundleExecutable</key><string>SnapsiftApp</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <!-- Required for PhotoKit. snapsift reads your library on-device and never
+       sends anything anywhere; deletions go to Recently Deleted (recoverable). -->
+  <key>NSPhotoLibraryUsageDescription</key>
+  <string>snapsift reads your photo library on your Mac to find near-duplicate burst shots so you can delete the extras. Nothing leaves your device.</string>
+  <key>NSPhotoLibraryAddUsageDescription</key>
+  <string>snapsift modifies your library only to move reviewed near-duplicates to Recently Deleted, where they remain recoverable for 30 days.</string>
+</dict>
+</plist>
