@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var selection: ReviewGroup.ID?
     @State private var categorySelection: CategoryBucket.ID?
     @State private var deleting = false
+    @FocusState private var sidebarFocused: Bool
     @State private var banner: String?
     @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
 
@@ -62,13 +63,46 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
-        sidebarList
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-            .background(Color.reefDeep)
-            .navigationTitle("snapsift")
-            .frame(minWidth: 240)
-            .overlay { if model.groups.isEmpty && model.categories.isEmpty { emptyState } }
+        ScrollViewReader { proxy in
+            sidebarList
+                .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
+                .background(Color.reefDeep)
+                .navigationTitle("snapsift")
+                .frame(minWidth: 240)
+                .overlay { if model.groups.isEmpty && model.categories.isEmpty { emptyState } }
+                .focusable(!model.groups.isEmpty || !model.categories.isEmpty)
+                .focused($sidebarFocused)
+                .onKeyPress(.downArrow) { moveSelection(1, proxy); return .handled }
+                .onKeyPress(.upArrow) { moveSelection(-1, proxy); return .handled }
+                .onChange(of: model.groups.count) { _, n in if n > 0 { sidebarFocused = true } }
+                .onChange(of: model.categories.count) { _, n in if n > 0 { sidebarFocused = true } }
+        }
+    }
+
+    /// Arrow-key navigation through the visible rows (groups, or categories in
+    /// browse mode), scrolling the new selection into view.
+    private func moveSelection(_ delta: Int, _ proxy: ScrollViewProxy) {
+        if model.browseMode {
+            let ids = model.filteredCategories.map(\.id)
+            if let next = step(ids, current: categorySelection, delta: delta) {
+                categorySelection = next
+                withAnimation { proxy.scrollTo(next, anchor: .center) }
+            }
+        } else {
+            let ids = model.confidentGroups.map(\.id) + model.pendingGroups.map(\.id)
+            if let next = step(ids, current: selection, delta: delta) {
+                selection = next
+                withAnimation { proxy.scrollTo(next, anchor: .center) }
+            }
+        }
+    }
+
+    private func step<ID: Hashable>(_ ids: [ID], current: ID?, delta: Int) -> ID? {
+        guard !ids.isEmpty else { return nil }
+        guard let current, let i = ids.firstIndex(of: current) else { return delta > 0 ? ids.first : ids.last }
+        let j = i + delta
+        return (j >= 0 && j < ids.count) ? ids[j] : nil   // clamp at ends
     }
 
     // Manual selection (no List(selection:)) so the system accent highlight never
@@ -142,6 +176,7 @@ struct ContentView: View {
                 .fill(sel ? Color.reefTeal : Color.clear)
                 .padding(.vertical, 1)
         )
+        .id(g.id)
     }
 
     private var emptyState: some View {

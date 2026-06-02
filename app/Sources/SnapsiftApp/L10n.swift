@@ -145,9 +145,9 @@ struct L10n: Sendable {
     }
     func appleRanked() -> String {
         switch language {
-        case .en: return "Apple picked the best"
-        case .ja: return "Apple がベストを選択"
-        case .zhTW: return "Apple 幫你挑最好的"
+        case .en: return "Picked for you with Apple Intelligence"
+        case .ja: return "Apple Intelligence であなたのために選択"
+        case .zhTW: return "我們透過 Apple Intelligence 技術為您挑選"
         }
     }
     func selectCluster() -> String {
