@@ -132,6 +132,13 @@ struct ContentView: View {
         }
         ToolbarItem(placement: .primaryAction) {
             Button {
+                Task { await model.scanLookAlikes() }
+            } label: { Label("Look-alikes", systemImage: "rectangle.on.rectangle") }
+            .help("Find the same photo saved across different days (neural, on-device)")
+            .disabled(model.isScanning)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
                 Task { await model.refineWithFaces() }
             } label: {
                 Label(model.facesApplied ? "Faces ✓" : "Faces", systemImage: "face.smiling")

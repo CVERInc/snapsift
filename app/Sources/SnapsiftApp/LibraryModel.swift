@@ -114,6 +114,61 @@ final class LibraryModel: ObservableObject {
         groups = clustered.map { ReviewGroup(photos: $0, keeperID: keeper($0).uuid) }
     }
 
+    /// Build a Core Photo from a PHAsset, enriched with Apple quality + size.
+    private func makePhoto(from asset: PHAsset, enr: [String: QualitySidecar.Enrichment]) -> Photo {
+        let id = asset.localIdentifier
+        let e = enr[QualitySidecar.zuuid(fromLocalIdentifier: id)]
+        let uti = (asset.value(forKey: "uniformTypeIdentifier") as? String) ?? ""
+        let name = (asset.value(forKey: "filename") as? String) ?? ""
+        return Photo(uuid: id, filename: name,
+                     takenAt: asset.creationDate?.timeIntervalSince1970 ?? 0,
+                     width: asset.pixelWidth, height: asset.pixelHeight,
+                     size: e?.size ?? 0, uti: uti,
+                     kind: asset.mediaType == .video ? 1 : 0,
+                     favorite: asset.isFavorite, quality: e?.quality ?? 0)
+    }
+
+    /// L3 cross-time pass: dHash-candidate + neural feature-print confirmation
+    /// over the whole library. Heavier than the burst scan — shows progress.
+    func scanLookAlikes() async {
+        guard !isScanning else { return }
+        isScanning = true
+        progress = "Fetching library…"
+        groups = []
+        facesApplied = false
+        defer { isScanning = false; progress = "" }
+
+        let opts = PHFetchOptions()
+        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
+        if !includeVideo {
+            opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        }
+        let result = PHAsset.fetchAssets(with: opts)
+        var assets: [PHAsset] = []
+        var map: [String: PHAsset] = [:]
+        assets.reserveCapacity(result.count)
+        result.enumerateObjects { a, _, _ in assets.append(a); map[a.localIdentifier] = a }
+        assetsByID = map
+
+        if enrichment == nil {
+            progress = "Reading Apple quality scores…"
+            enrichment = await Task.detached(priority: .userInitiated) { QualitySidecar.load() }.value
+            qualityAvailable = !(enrichment?.isEmpty ?? true)
+        }
+        let enr = enrichment ?? [:]
+
+        let idGroups = await LookAlikeScanner.scan(assets: assets, manager: imageManager) { [weak self] msg in
+            Task { @MainActor in self?.progress = msg }
+        }
+
+        groups = idGroups.compactMap { ids in
+            let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0, enr: enr) }
+                .sorted { $0.takenAt < $1.takenAt }
+            guard photos.count >= 2 else { return nil }
+            return ReviewGroup(photos: photos, keeperID: keeper(photos).uuid)
+        }
+    }
+
     /// Promote a frame to keeper (favorites stay protected either way).
     func promote(group groupID: ReviewGroup.ID, to photoID: String) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
