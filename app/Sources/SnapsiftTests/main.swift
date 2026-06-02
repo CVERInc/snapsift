@@ -6,7 +6,7 @@ import SnapsiftCore
 // suite case-for-case (tests/test_cluster.py, test_pick.py, test_hash.py).
 
 var failures = 0
-@MainActor func check(_ condition: Bool, _ label: String) {
+func check(_ condition: Bool, _ label: String) {
     print(condition ? "  ✓ \(label)" : "  ✗ \(label)")
     if !condition { failures += 1 }
 }

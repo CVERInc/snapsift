@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 5.9
 import PackageDescription
 
 // The native side of snapsift. SnapsiftCore is pure, dependency-free logic
@@ -19,13 +19,9 @@ let package = Package(
         .target(name: "SnapsiftCore"),
         // SwiftUI app over the same engine: PhotoKit enumeration + thumbnails +
         // native deletion, with the reef family theme.
-        .executableTarget(
-            name: "SnapsiftApp",
-            dependencies: ["SnapsiftCore"],
-            // PhotoKit's escaping, non-Sendable callbacks fight Swift 6 strict
-            // concurrency; v5 mode keeps the UI layer pragmatic. Core stays v6.
-            swiftSettings: [.swiftLanguageMode(.v5)]
-        ),
+        // SwiftUI app: PhotoKit's escaping, non-Sendable callbacks fit the
+        // tools-5.9 default (Swift 5) language mode cleanly.
+        .executableTarget(name: "SnapsiftApp", dependencies: ["SnapsiftCore"]),
         .executableTarget(name: "SnapsiftTests", dependencies: ["SnapsiftCore"]),
     ]
 )
