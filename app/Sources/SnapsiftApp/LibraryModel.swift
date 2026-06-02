@@ -29,8 +29,12 @@ final class LibraryModel: ObservableObject {
     @Published var includeVideo = false
     /// True once Apple's quality scores have been read from the library sidecar.
     @Published var qualityAvailable = false
+    @Published var refiningFaces = false
+    /// True once a face-refinement pass has re-picked keepers.
+    @Published var facesApplied = false
 
     private var enrichment: [String: QualitySidecar.Enrichment]?
+    private var faceScores: [String: Double] = [:]
 
     // Clustering knobs (match the Python defaults).
     var gapSec = 3.0
@@ -114,6 +118,44 @@ final class LibraryModel: ObservableObject {
     func promote(group groupID: ReviewGroup.ID, to photoID: String) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
         groups[i].keeperID = photoID
+    }
+
+    /// Combined keeper key: favorites, then face score, then Apple quality, then
+    /// format / size / earliest — an app-level extension of Core's `rankKey`.
+    private func faceRankKey(_ p: Photo) -> (Int, Int, Int, Int, Int, Double) {
+        (p.favorite ? 1 : 0,
+         Int(((faceScores[p.uuid] ?? 0) * 100).rounded()),
+         Int((p.quality * 10).rounded()),
+         utiPriority[p.uti] ?? 0,
+         p.size,
+         -p.takenAt)
+    }
+
+    /// On-device Vision pass: score the faces in every cluster member, then
+    /// re-pick each keeper to favour the frame where people look their best.
+    /// Bounded to cluster members; favorites stay protected.
+    func refineWithFaces() async {
+        guard !refiningFaces else { return }
+        refiningFaces = true
+        defer { refiningFaces = false }
+
+        let members = Array(Set(groups.flatMap { $0.photos.map(\.uuid) })
+            .subtracting(faceScores.keys))
+        var done = 0
+        for uuid in members {
+            if let asset = assetsByID[uuid] {
+                faceScores[uuid] = await FaceScorer.score(asset: asset, manager: imageManager)
+            }
+            done += 1
+            if done % 25 == 0 { progress = "Analysing faces \(done)/\(members.count)…" }
+        }
+        groups = groups.map { g in
+            var ng = g
+            ng.keeperID = (g.photos.max { faceRankKey($0) < faceRankKey($1) } ?? g.photos[0]).uuid
+            return ng
+        }
+        facesApplied = true
+        progress = ""
     }
 
     /// Delete every reviewed non-keeper, non-favorite frame via PhotoKit. macOS

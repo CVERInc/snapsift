@@ -131,6 +131,15 @@ struct ContentView: View {
             .disabled(model.isScanning)
         }
         ToolbarItem(placement: .primaryAction) {
+            Button {
+                Task { await model.refineWithFaces() }
+            } label: {
+                Label(model.facesApplied ? "Faces ✓" : "Faces", systemImage: "face.smiling")
+            }
+            .help("Re-pick keepers using on-device face + open-eyes analysis")
+            .disabled(model.groups.isEmpty || model.refiningFaces || model.isScanning)
+        }
+        ToolbarItem(placement: .primaryAction) {
             Button(role: .destructive) {
                 Task { await runDelete() }
             } label: {
