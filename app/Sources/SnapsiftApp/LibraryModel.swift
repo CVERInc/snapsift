@@ -45,7 +45,14 @@ final class LibraryModel: ObservableObject {
     private var assetsByID: [String: PHAsset] = [:]
 
     var totalDeletions: Int { groups.reduce(0) { $0 + $1.deletionIDs.count } }
-    var reclaimableCount: Int { totalDeletions }
+
+    /// Total bytes that would be freed by deleting every marked frame (0 if the
+    /// quality sidecar — which carries real file sizes — wasn't readable).
+    var reclaimableBytes: Int {
+        groups.reduce(0) { acc, g in
+            acc + g.photos.filter { g.isDelete($0) }.reduce(0) { $0 + $1.size }
+        }
+    }
 
     func asset(for id: String) -> PHAsset? { assetsByID[id] }
 
@@ -53,12 +60,13 @@ final class LibraryModel: ObservableObject {
         auth = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
     }
 
-    func scan() async {
+    func scan(_ t: L10n) async {
         guard !isScanning else { return }
         isScanning = true
-        progress = "Fetching library…"
+        progress = t.progFetching()
         groups = []
         assetsByID = [:]
+        facesApplied = false
         defer { isScanning = false; progress = "" }
 
         let opts = PHFetchOptions()
@@ -69,24 +77,13 @@ final class LibraryModel: ObservableObject {
         }
         let result = PHAsset.fetchAssets(with: opts)
 
-        var photos: [Photo] = []
-        photos.reserveCapacity(result.count)
+        var assets: [PHAsset] = []
+        assets.reserveCapacity(result.count)
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(result.count)
-
         result.enumerateObjects { asset, _, _ in
-            let id = asset.localIdentifier
-            map[id] = asset
-            let uti = (asset.value(forKey: "uniformTypeIdentifier") as? String) ?? ""
-            let name = (asset.value(forKey: "filename") as? String) ?? ""
-            let taken = asset.creationDate?.timeIntervalSince1970 ?? 0
-            // size is not cheaply available from PhotoKit; 0 makes clustering
-            // size-permissive. The optional SQLite sidecar (Phase D) fills it in.
-            photos.append(Photo(uuid: id, filename: name, takenAt: taken,
-                                width: asset.pixelWidth, height: asset.pixelHeight,
-                                size: 0, uti: uti,
-                                kind: asset.mediaType == .video ? 1 : 0,
-                                favorite: asset.isFavorite, quality: 0))
+            assets.append(asset)
+            map[asset.localIdentifier] = asset
         }
         assetsByID = map
 
@@ -94,22 +91,16 @@ final class LibraryModel: ObservableObject {
         // Photos.sqlite (read-only). Loaded once and cached; degrades silently if
         // the database isn't readable (no Full Disk Access / non-standard path).
         if enrichment == nil {
-            progress = "Reading Apple quality scores…"
+            progress = t.progReadingQuality()
             enrichment = await Task.detached(priority: .userInitiated) {
                 QualitySidecar.load()
             }.value
             qualityAvailable = !(enrichment?.isEmpty ?? true)
         }
         let enr = enrichment ?? [:]
-        let enriched = photos.map { p -> Photo in
-            guard let e = enr[QualitySidecar.zuuid(fromLocalIdentifier: p.uuid)] else { return p }
-            return Photo(uuid: p.uuid, filename: p.filename, takenAt: p.takenAt,
-                         width: p.width, height: p.height, size: e.size,
-                         uti: p.uti, kind: p.kind, favorite: p.favorite,
-                         quality: e.quality)
-        }
+        let enriched = assets.map { makePhoto(from: $0, enr: enr) }
 
-        progress = "Clustering \(enriched.count) photos…"
+        progress = t.progClustering(enriched.count)
         let clustered = cluster(enriched, gapSec: gapSec, sizeTol: sizeTol, maxSpan: maxSpan)
         groups = clustered.map { ReviewGroup(photos: $0, keeperID: keeper($0).uuid) }
     }
@@ -130,10 +121,10 @@ final class LibraryModel: ObservableObject {
 
     /// L3 cross-time pass: dHash-candidate + neural feature-print confirmation
     /// over the whole library. Heavier than the burst scan — shows progress.
-    func scanLookAlikes() async {
+    func scanLookAlikes(_ t: L10n) async {
         guard !isScanning else { return }
         isScanning = true
-        progress = "Fetching library…"
+        progress = t.progFetching()
         groups = []
         facesApplied = false
         defer { isScanning = false; progress = "" }
@@ -151,13 +142,13 @@ final class LibraryModel: ObservableObject {
         assetsByID = map
 
         if enrichment == nil {
-            progress = "Reading Apple quality scores…"
+            progress = t.progReadingQuality()
             enrichment = await Task.detached(priority: .userInitiated) { QualitySidecar.load() }.value
             qualityAvailable = !(enrichment?.isEmpty ?? true)
         }
         let enr = enrichment ?? [:]
 
-        let idGroups = await LookAlikeScanner.scan(assets: assets, manager: imageManager) { [weak self] msg in
+        let idGroups = await LookAlikeScanner.scan(assets: assets, manager: imageManager, t: t) { [weak self] msg in
             Task { @MainActor in self?.progress = msg }
         }
 
@@ -189,7 +180,7 @@ final class LibraryModel: ObservableObject {
     /// On-device Vision pass: score the faces in every cluster member, then
     /// re-pick each keeper to favour the frame where people look their best.
     /// Bounded to cluster members; favorites stay protected.
-    func refineWithFaces() async {
+    func refineWithFaces(_ t: L10n) async {
         guard !refiningFaces else { return }
         refiningFaces = true
         defer { refiningFaces = false }
@@ -202,7 +193,7 @@ final class LibraryModel: ObservableObject {
                 faceScores[uuid] = await FaceScorer.score(asset: asset, manager: imageManager)
             }
             done += 1
-            if done % 25 == 0 { progress = "Analysing faces \(done)/\(members.count)…" }
+            if done % 25 == 0 { progress = t.progFaces(done, members.count) }
         }
         groups = groups.map { g in
             var ng = g

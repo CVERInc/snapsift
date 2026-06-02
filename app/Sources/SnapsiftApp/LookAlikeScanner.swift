@@ -18,6 +18,7 @@ enum LookAlikeScanner {
 
     static func scan(assets: [PHAsset],
                      manager: PHCachingImageManager,
+                     t: L10n,
                      dHashDistance: Int = 8,
                      featureDistance: Float = 0.7,
                      progress: @escaping (String) -> Void) async -> [[String]] {
@@ -31,7 +32,7 @@ enum LookAlikeScanner {
                 items.append((dHash(grayRowMajor: px), a.localIdentifier))
             }
             i += 1
-            if i % 500 == 0 { progress("Hashing \(i)/\(assets.count)…") }
+            if i % 500 == 0 { progress(t.progHashing(i, assets.count)) }
         }
         let candidates = groupByHash(items, maxDistance: dHashDistance)
 
@@ -43,7 +44,7 @@ enum LookAlikeScanner {
         var c = 0
         for cand in candidates {
             c += 1
-            if c % 25 == 0 { progress("Confirming \(c)/\(candidates.count) candidate groups…") }
+            if c % 25 == 0 { progress(t.progConfirming(c, candidates.count)) }
             var prints: [(String, VNFeaturePrintObservation)] = []
             for id in cand {
                 if let a = byID[id], let fp = await featurePrint(a, manager) {

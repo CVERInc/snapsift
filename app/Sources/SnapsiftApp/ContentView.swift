@@ -6,7 +6,11 @@ struct ContentView: View {
     @StateObject private var model = LibraryModel()
     @State private var selection: ReviewGroup.ID?
     @State private var deleting = false
-    @State private var errorText: String?
+    @State private var banner: String?
+    @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
+
+    private var language: Language { Language(rawValue: langRaw) ?? .en }
+    private var t: L10n { L10n(language) }
 
     var body: some View {
         Group {
@@ -14,11 +18,9 @@ struct ContentView: View {
             case .authorized, .limited:
                 main
             case .denied, .restricted:
-                gate(message: "snapsift needs access to your Photos library. Enable it in System Settings ▸ Privacy & Security ▸ Photos.",
-                     button: nil)
+                gate(message: t.gateDeniedBody(), button: nil)
             default:
-                gate(message: "snapsift reads your Photos library on-device to find near-duplicate bursts. Nothing leaves your Mac.",
-                     button: "Grant access")
+                gate(message: t.gateRequestBody(), button: t.gateRequestButton())
             }
         }
         .frame(minWidth: 820, minHeight: 560)
@@ -35,7 +37,7 @@ struct ContentView: View {
             Text(message)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(Color.reefTextDim)
-                .frame(maxWidth: 420)
+                .frame(maxWidth: 440)
             if let button {
                 Button(button) { Task { await model.requestAccess() } }
                     .buttonStyle(.borderedProminent)
@@ -54,6 +56,8 @@ struct ContentView: View {
             detail
         }
         .toolbar { toolbar }
+        .safeAreaInset(edge: .bottom) { statusBar }
+        .overlay(alignment: .top) { bannerView }
     }
 
     private var sidebar: some View {
@@ -62,13 +66,13 @@ struct ContentView: View {
                 let sel = g.id == selection
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
-                        Text("\(g.photos.count) frames")
+                        Text(t.frames(g.photos.count))
                             .font(.headline)
                             .foregroundStyle(sel ? .white : Color.reefMint)
                         if g.hasFavorite { Text("★").foregroundStyle(Color.reefAmber) }
                         if g.hasVideo { Image(systemName: "video.fill").font(.caption2).foregroundStyle(Color.reefAmber) }
                     }
-                    Text("spans \(g.spanSec, specifier: "%.1f")s · delete \(g.deletionIDs.count)")
+                    Text(t.sidebarSubtitle(span: g.spanSec, delete: g.deletionIDs.count))
                         .font(.caption)
                         .foregroundStyle(sel ? Color.white.opacity(0.85) : Color.reefTextDim)
                 }
@@ -86,21 +90,21 @@ struct ContentView: View {
         .background(Color.reefDeep)
         .navigationTitle("snapsift")
         .frame(minWidth: 240)
-        .overlay {
-            if model.groups.isEmpty { emptyState }
-        }
+        .overlay { if model.groups.isEmpty { emptyState } }
     }
 
     private var emptyState: some View {
         VStack(spacing: 10) {
-            if model.isScanning {
+            if model.isScanning || model.refiningFaces {
                 ProgressView().tint(.reefMint)
                 Text(model.progress).font(.caption).foregroundStyle(Color.reefTextDim)
+                    .multilineTextAlignment(.center).padding(.horizontal)
             } else {
                 Image(systemName: "rectangle.stack.badge.minus")
                     .font(.system(size: 34)).foregroundStyle(Color.reefBorder)
-                Text("Scan to find near-duplicate bursts")
+                Text(t.scanHint())
                     .font(.caption).foregroundStyle(Color.reefTextDim)
+                    .multilineTextAlignment(.center)
             }
         }
         .padding()
@@ -108,52 +112,91 @@ struct ContentView: View {
 
     @ViewBuilder private var detail: some View {
         if let id = selection, let g = model.groups.first(where: { $0.id == id }) {
-            GroupReview(group: g, model: model)
+            GroupReview(group: g, model: model, t: t)
         } else {
             VStack(spacing: 8) {
                 Image(systemName: "photo.on.rectangle.angled")
                     .font(.system(size: 40)).foregroundStyle(Color.reefBorder)
-                Text("Select a cluster").foregroundStyle(Color.reefTextDim)
+                Text(t.selectCluster()).foregroundStyle(Color.reefTextDim)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.reefGround)
         }
     }
 
+    // MARK: status bar (reclaim summary)
+
+    private var statusBar: some View {
+        HStack(spacing: 10) {
+            if model.totalDeletions > 0 {
+                Image(systemName: "internaldrive").foregroundStyle(Color.reefMint)
+                Text(t.reclaimSummary(count: model.totalDeletions, bytes: model.reclaimableBytes))
+                    .foregroundStyle(Color.reefText)
+            }
+            Spacer()
+            if model.qualityAvailable {
+                Label(t.appleRanked(), systemImage: "wand.and.stars")
+                    .foregroundStyle(Color.reefMint)
+            }
+        }
+        .font(.caption)
+        .padding(.horizontal, 14).padding(.vertical, 7)
+        .background(.ultraThinMaterial)
+        .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .top)
+        .opacity(model.totalDeletions > 0 || model.qualityAvailable ? 1 : 0)
+    }
+
+    @ViewBuilder private var bannerView: some View {
+        if let banner {
+            Text(banner)
+                .font(.callout).foregroundStyle(.white)
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(Color.reefTeal, in: Capsule())
+                .padding(.top, 10)
+                .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    // MARK: toolbar
+
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
-            Toggle("Videos", isOn: $model.includeVideo).toggleStyle(.switch).tint(.reefTeal)
+            Toggle(t.videos(), isOn: $model.includeVideo).toggleStyle(.switch).tint(.reefTeal)
         }
         ToolbarItem(placement: .primaryAction) {
-            Button {
-                Task { await model.scan() }
-            } label: { Label("Scan", systemImage: "sparkle.magnifyingglass") }
-            .disabled(model.isScanning)
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                Task { await model.scanLookAlikes() }
-            } label: { Label("Look-alikes", systemImage: "rectangle.on.rectangle") }
-            .help("Find the same photo saved across different days (neural, on-device)")
-            .disabled(model.isScanning)
-        }
-        ToolbarItem(placement: .primaryAction) {
-            Button {
-                Task { await model.refineWithFaces() }
-            } label: {
-                Label(model.facesApplied ? "Faces ✓" : "Faces", systemImage: "face.smiling")
+            Button { Task { await model.scan(t) } } label: {
+                Label(t.scan(), systemImage: "sparkle.magnifyingglass")
             }
-            .help("Re-pick keepers using on-device face + open-eyes analysis")
+            .help(t.tipScan())
+            .disabled(model.isScanning)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { Task { await model.scanLookAlikes(t) } } label: {
+                Label(t.lookAlikes(), systemImage: "rectangle.on.rectangle")
+            }
+            .help(t.tipLookAlikes())
+            .disabled(model.isScanning)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { Task { await model.refineWithFaces(t) } } label: {
+                Label(t.faces(model.facesApplied), systemImage: "face.smiling")
+            }
+            .help(t.tipFaces())
             .disabled(model.groups.isEmpty || model.refiningFaces || model.isScanning)
         }
         ToolbarItem(placement: .primaryAction) {
-            Button(role: .destructive) {
-                Task { await runDelete() }
-            } label: {
-                Label("Delete \(model.totalDeletions)", systemImage: "trash")
+            Button(role: .destructive) { Task { await runDelete() } } label: {
+                Label(t.deleteN(model.totalDeletions), systemImage: "trash")
             }
             .tint(.reefRed)
             .disabled(model.totalDeletions == 0 || deleting)
+        }
+        ToolbarItem {
+            Menu {
+                Picker("", selection: $langRaw) {
+                    ForEach(Language.allCases) { l in Text(l.endonym).tag(l.rawValue) }
+                }.pickerStyle(.inline)
+            } label: { Image(systemName: "globe") }
         }
     }
 
@@ -163,9 +206,17 @@ struct ContentView: View {
         do {
             let n = try await model.deleteReviewed()
             if !model.groups.contains(where: { $0.id == selection }) { selection = nil }
-            errorText = n == 0 ? nil : nil
+            if n > 0 { showBanner(t.deletedBanner(n)) }
         } catch {
-            errorText = error.localizedDescription
+            showBanner(error.localizedDescription)
+        }
+    }
+
+    private func showBanner(_ text: String) {
+        withAnimation(.spring(duration: 0.3)) { banner = text }
+        Task {
+            try? await Task.sleep(nanoseconds: 3_200_000_000)
+            withAnimation(.easeOut) { banner = nil }
         }
     }
 }
@@ -174,6 +225,7 @@ struct ContentView: View {
 struct GroupReview: View {
     let group: ReviewGroup
     @ObservedObject var model: LibraryModel
+    let t: L10n
 
     private let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
 
@@ -181,24 +233,23 @@ struct GroupReview: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    Text("\(group.photos.count) frames · spans \(group.spanSec, specifier: "%.1f")s · keep 1, delete \(group.deletionIDs.count)")
+                    Text(t.clusterHeader(count: group.photos.count,
+                                         span: group.spanSec, delete: group.deletionIDs.count))
                         .font(.callout).foregroundStyle(Color.reefTextDim)
                     if model.qualityAvailable {
-                        Label("Apple-ranked", systemImage: "wand.and.stars")
+                        Label(t.appleRanked(), systemImage: "wand.and.stars")
                             .font(.caption2).foregroundStyle(Color.reefMint)
-                            .help("Keeper chosen using Apple's on-device quality scores")
+                            .help(t.tipAppleRanked())
                     }
                 }
                 LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(group.photos) { p in
-                        card(for: p)
-                    }
+                    ForEach(group.photos) { p in card(for: p) }
                 }
             }
             .padding(16)
         }
         .background(Color.reefGround)
-        .navigationTitle("Review")
+        .navigationTitle(t.frames(group.photos.count))
     }
 
     private func card(for p: Photo) -> some View {
@@ -222,13 +273,13 @@ struct GroupReview: View {
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(border, lineWidth: 2))
         .contentShape(Rectangle())
         .onTapGesture { model.promote(group: group.id, to: p.uuid) }
-        .help(p.favorite ? "Favorite — always kept" : (keep ? "Keeper" : "Will be deleted · click to keep this one"))
+        .help(p.favorite ? t.tipFavorite() : (keep ? t.tipKeeper() : t.tipDelete()))
     }
 
     private func badge(keep: Bool, del: Bool, fav: Bool) -> some View {
         HStack(spacing: 4) {
-            if keep { tag("KEEP", .reefGreen, Color(hex: 0x04110a)) }
-            if del { tag("DELETE", .reefRed, .white) }
+            if keep { tag(t.keep(), .reefGreen, Color(hex: 0x04110a)) }
+            if del { tag(t.delete(), .reefRed, .white) }
             if fav { tag("★", .reefAmber, Color(hex: 0x1a1203)) }
         }
         .padding(6)
