@@ -27,6 +27,10 @@ final class LibraryModel: ObservableObject {
     @Published var isScanning = false
     @Published var progress = ""
     @Published var includeVideo = false
+    /// True once Apple's quality scores have been read from the library sidecar.
+    @Published var qualityAvailable = false
+
+    private var enrichment: [String: QualitySidecar.Enrichment]?
 
     // Clustering knobs (match the Python defaults).
     var gapSec = 3.0
@@ -82,8 +86,27 @@ final class LibraryModel: ObservableObject {
         }
         assetsByID = map
 
-        progress = "Clustering \(photos.count) photos…"
-        let clustered = cluster(photos, gapSec: gapSec, sizeTol: sizeTol, maxSpan: maxSpan)
+        // Enrich with Apple's quality scores + real file size from the library's
+        // Photos.sqlite (read-only). Loaded once and cached; degrades silently if
+        // the database isn't readable (no Full Disk Access / non-standard path).
+        if enrichment == nil {
+            progress = "Reading Apple quality scores…"
+            enrichment = await Task.detached(priority: .userInitiated) {
+                QualitySidecar.load()
+            }.value
+            qualityAvailable = !(enrichment?.isEmpty ?? true)
+        }
+        let enr = enrichment ?? [:]
+        let enriched = photos.map { p -> Photo in
+            guard let e = enr[QualitySidecar.zuuid(fromLocalIdentifier: p.uuid)] else { return p }
+            return Photo(uuid: p.uuid, filename: p.filename, takenAt: p.takenAt,
+                         width: p.width, height: p.height, size: e.size,
+                         uti: p.uti, kind: p.kind, favorite: p.favorite,
+                         quality: e.quality)
+        }
+
+        progress = "Clustering \(enriched.count) photos…"
+        let clustered = cluster(enriched, gapSec: gapSec, sizeTol: sizeTol, maxSpan: maxSpan)
         groups = clustered.map { ReviewGroup(photos: $0, keeperID: keeper($0).uuid) }
     }
 

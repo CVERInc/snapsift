@@ -164,8 +164,15 @@ struct GroupReview: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("\(group.photos.count) frames · spans \(group.spanSec, specifier: "%.1f")s · keep 1, delete \(group.deletionIDs.count)")
-                    .font(.callout).foregroundStyle(Color.reefTextDim)
+                HStack(spacing: 8) {
+                    Text("\(group.photos.count) frames · spans \(group.spanSec, specifier: "%.1f")s · keep 1, delete \(group.deletionIDs.count)")
+                        .font(.callout).foregroundStyle(Color.reefTextDim)
+                    if model.qualityAvailable {
+                        Label("Apple-ranked", systemImage: "wand.and.stars")
+                            .font(.caption2).foregroundStyle(Color.reefMint)
+                            .help("Keeper chosen using Apple's on-device quality scores")
+                    }
+                }
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(group.photos) { p in
                         card(for: p)
