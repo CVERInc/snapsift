@@ -98,9 +98,9 @@ struct L10n: Sendable {
 
     func gateRequestBody() -> String {
         switch language {
-        case .en: return "snapsift reads your Photos library on-device to find near-duplicate bursts. Nothing leaves your Mac."
-        case .ja: return "snapsift はこの Mac 上だけで写真ライブラリを読み取り、よく似た連写を見つけます。データは外部に送信されません。"
-        case .zhTW: return "snapsift 只在這台 Mac 上讀取你的照片圖庫，找出近乎重複的連拍。任何資料都不會離開你的裝置。"
+        case .en: return "snapsift is a native Swift app that runs entirely on your Mac. Grant Photos access and every bit of analysis happens on-device and offline — no network, nothing sent anywhere."
+        case .ja: return "snapsift はこの Mac だけで動くネイティブ Swift アプリです。写真へのアクセスを許可すれば、分析はすべて端末上・オフラインで行われます — ネットワーク不要、データ送信なし。"
+        case .zhTW: return "snapsift 是純本機的原生 Swift App。授權相簿後，所有分析都在這台 Mac 上離線完成 —— 不需網路、不收發任何資料。"
         }
     }
     func gateRequestButton() -> String {
@@ -145,9 +145,9 @@ struct L10n: Sendable {
     }
     func appleRanked() -> String {
         switch language {
-        case .en: return "Picked for you with Apple Intelligence"
-        case .ja: return "Apple Intelligence であなたのために選択"
-        case .zhTW: return "我們透過 Apple Intelligence 技術為您挑選"
+        case .en: return "Picked by Apple's quality scores"
+        case .ja: return "Apple 品質スコアで選択"
+        case .zhTW: return "Apple 品質分數挑選"
         }
     }
     func selectCluster() -> String {
@@ -162,6 +162,15 @@ struct L10n: Sendable {
         case .en: return "Pick what to look for"
         case .ja: return "何を探すか選んでください"
         case .zhTW: return "選一個你想找的"
+        }
+    }
+    /// Honest, privacy-forward one-liner — verbs split so each Apple technology is
+    /// credited for what it actually does (scores pick; Apple Intelligence names).
+    func privacyPitch() -> String {
+        switch language {
+        case .en: return "Native, fully offline, nothing ever sent. Picking uses Apple's photo quality scores; naming & search use Apple Intelligence — all on your Mac."
+        case .ja: return "ネイティブ・完全オフライン・データ送信なし。選定は Apple の写真品質スコア、命名と検索は Apple Intelligence — すべて Mac の中で。"
+        case .zhTW: return "純本機原生 App · 全程離線 · 不收發任何資料。挑選靠 Apple 照片品質分數，命名與搜尋靠 Apple Intelligence —— 全部在你的 Mac 上跑。"
         }
     }
 
@@ -225,9 +234,9 @@ struct L10n: Sendable {
     }
     func tipAppleRanked() -> String {
         switch language {
-        case .en: return "Keeper chosen using Apple's on-device quality scores"
-        case .ja: return "Apple のオンデバイス品質スコアで残す1枚を選択"
-        case .zhTW: return "用 Apple 裝置端品質分數挑選保留張"
+        case .en: return "Picks the best frame using Apple's on-device photo quality scores (sharpness, framing…)"
+        case .ja: return "Apple が端末で算出した写真品質スコア（鮮明さ・構図…）でベストの1枚を選択"
+        case .zhTW: return "用 Apple 裝置端算好的照片品質分數（銳利度、構圖…）挑最好的一張"
         }
     }
 

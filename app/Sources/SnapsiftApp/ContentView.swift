@@ -232,9 +232,14 @@ struct ContentView: View {
                 Image(systemName: "rectangle.stack.badge.minus")
                     .font(.system(size: 52)).foregroundStyle(Color.reefMint)
                 Text("snapsift").font(.system(size: 26, weight: .bold)).foregroundStyle(.white)
-                Text(t.scanHint())
+                Text(t.privacyPitch())
+                    .font(.callout)
                     .foregroundStyle(Color.reefTextDim)
-                    .multilineTextAlignment(.center).frame(maxWidth: 380)
+                    .multilineTextAlignment(.center).frame(maxWidth: 520)
+                Text(t.scanHint())
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.reefMint)
+                    .padding(.top, 2)
                 HStack(spacing: 14) {
                     onboardCard(title: t.scan(), icon: "sparkle.magnifyingglass",
                                 caption: t.tipScan(), prominent: true) {
