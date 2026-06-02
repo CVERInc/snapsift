@@ -240,6 +240,27 @@ struct L10n: Sendable {
         case .zhTW: return "內容驗證"
         }
     }
+    func keepAll() -> String {
+        switch language {
+        case .en: return "Keep all"
+        case .ja: return "すべて残す"
+        case .zhTW: return "整群保留"
+        }
+    }
+    func keepingAll() -> String {
+        switch language {
+        case .en: return "Keeping all"
+        case .ja: return "すべて残す"
+        case .zhTW: return "整群保留中"
+        }
+    }
+    func tipKeepAll() -> String {
+        switch language {
+        case .en: return "Keep every frame in this group — delete nothing"
+        case .ja: return "このグループは全て残す（何も削除しない）"
+        case .zhTW: return "這群全部保留 — 不刪任何一張"
+        }
+    }
 
     // MARK: reclaim summary + post-delete banner
 

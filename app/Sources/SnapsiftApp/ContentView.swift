@@ -61,7 +61,9 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
-        List(selection: $selection) {
+        // Manual selection (no List(selection:)) so the system accent highlight
+        // never flashes orange behind our teal row background.
+        List {
             ForEach(model.groups) { g in
                 let sel = g.id == selection
                 VStack(alignment: .leading, spacing: 3) {
@@ -77,7 +79,9 @@ struct ContentView: View {
                         .foregroundStyle(sel ? Color.white.opacity(0.85) : Color.reefTextDim)
                 }
                 .padding(.vertical, 4)
-                .tag(g.id)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { selection = g.id }
                 .listRowBackground(
                     RoundedRectangle(cornerRadius: 6)
                         .fill(sel ? Color.reefTeal : Color.clear)
@@ -299,6 +303,14 @@ struct GroupReview: View {
                             .font(.caption2).foregroundStyle(Color.reefMint)
                             .help(t.tipAppleRanked())
                     }
+                    Spacer()
+                    Button { model.toggleKeepAll(group: group.id) } label: {
+                        Label(group.keepAll ? t.keepingAll() : t.keepAll(),
+                              systemImage: group.keepAll ? "checkmark.circle.fill" : "checkmark.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(group.keepAll ? .reefGreen : .reefTeal)
+                    .help(t.tipKeepAll())
                 }
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(group.photos) { p in card(for: p) }

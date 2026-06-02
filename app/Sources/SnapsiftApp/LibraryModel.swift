@@ -9,13 +9,17 @@ struct ReviewGroup: Identifiable {
     let id = UUID()
     let photos: [Photo]
     var keeperID: String
+    /// When set, the whole group is kept — nothing is deleted. For groups that
+    /// are perceptually similar but that the user wants to keep in full (e.g.
+    /// several poses of the same subject).
+    var keepAll = false
 
-    func isKeeper(_ p: Photo) -> Bool { p.uuid == keeperID }
-    func isDelete(_ p: Photo) -> Bool { p.uuid != keeperID && !p.favorite }
+    func isKeeper(_ p: Photo) -> Bool { !keepAll && p.uuid == keeperID }
+    func isDelete(_ p: Photo) -> Bool { !keepAll && p.uuid != keeperID && !p.favorite }
     var spanSec: Double { (photos.last?.takenAt ?? 0) - (photos.first?.takenAt ?? 0) }
     var hasFavorite: Bool { photos.contains { $0.favorite } }
     var hasVideo: Bool { photos.contains { $0.kind == 1 } }
-    var deletionIDs: [String] { photos.filter(isDelete).map(\.uuid) }
+    var deletionIDs: [String] { keepAll ? [] : photos.filter(isDelete).map(\.uuid) }
 }
 
 /// Drives the whole app: PhotoKit authorization, enumeration → Core clustering,
@@ -183,7 +187,14 @@ final class LibraryModel: ObservableObject {
     /// Promote a frame to keeper (favorites stay protected either way).
     func promote(group groupID: ReviewGroup.ID, to photoID: String) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        groups[i].keepAll = false
         groups[i].keeperID = photoID
+    }
+
+    /// Keep the entire group — exclude it from deletion. Toggles back off.
+    func toggleKeepAll(group groupID: ReviewGroup.ID) {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        groups[i].keepAll.toggle()
     }
 
     /// Combined keeper key: favorites, then face score, then Apple quality, then
