@@ -7,7 +7,38 @@
 Built for a real Photos library of 120K+ photos where Apple's `Duplicates`
 album was already empty, yet thousands of sub-second-apart shots remained.
 
-## How it works
+There are two ways to use snapsift:
+
+- **The macOS app** (`app/`) — a native SwiftUI window. Scan, review each
+  cluster side-by-side, and delete the extras. Recommended for most people.
+- **The Python tools** (repo root) — the original, hackable engine and CLI.
+  Zero-dependency, reads the library directly. Great for scripting and tinkering.
+
+## The macOS app
+
+A native, on-device SwiftUI app built on Apple's own frameworks — nothing ever
+leaves your Mac.
+
+- **PhotoKit** for enumeration, thumbnails (fetched from iCloud on demand, so
+  it works even with "Optimize Mac Storage"), and deletion straight into
+  Recently Deleted (recoverable 30 days) — no AppleScript.
+- **Apple quality ranking** — reads your library's own aesthetic scores so the
+  keeper is the genuinely better frame, not just the biggest file.
+- **Face-aware keeper** (Vision) — re-picks the frame where people's eyes are
+  open and everyone's in shot.
+- **Cross-time look-alikes** (Vision feature prints) — finds the same photo
+  saved on different days, not just time bursts.
+- **Favorites are never deleted; videos are off by default.**
+
+Build it (no Xcode needed):
+
+```bash
+cd app
+./scripts/build-app.sh          # → ~/Desktop/snapsift.app, then double-click
+swift run SnapsiftTests         # run the Core test suite
+```
+
+## How it works (the engine)
 
 Five small tools. The core (scan/pick/delete) has **zero dependencies** beyond
 Python 3 and macOS; the two optional passes use Pillow.
