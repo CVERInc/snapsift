@@ -26,6 +26,16 @@ struct ReviewGroup: Identifiable {
     var deletionIDs: [String] { keepAll ? [] : photos.filter(isDelete).map(\.uuid) }
 }
 
+/// A semantic bucket from the "Similar sets" pass: all photos Vision tagged with
+/// the same content label, across the whole library and across time.
+struct CategoryBucket: Identifiable {
+    let id = UUID()
+    let label: String
+    let photos: [Photo]
+    var count: Int { photos.count }
+    var display: String { CategoryScanner.displayName(label) }
+}
+
 /// Drives the whole app: PhotoKit authorization, enumeration → Core clustering,
 /// thumbnail vending, and native (recoverable) deletion.
 @MainActor
@@ -53,6 +63,10 @@ final class LibraryModel: ObservableObject {
     @Published var refiningFaces = false
     /// True once a face-refinement pass has re-picked keepers.
     @Published var facesApplied = false
+    /// Semantic category buckets from the "Similar sets" pass. When non-empty the
+    /// UI is in browse mode (categories), not cluster-review mode.
+    @Published var categories: [CategoryBucket] = []
+    var browseMode: Bool { !categories.isEmpty }
 
     private var enrichment: [String: QualitySidecar.Enrichment]?
     private var faceScores: [String: Double] = [:]
@@ -91,6 +105,7 @@ final class LibraryModel: ObservableObject {
         isScanning = true
         progress = t.progFetching()
         groups = []
+        categories = []
         assetsByID = [:]
         facesApplied = false
         defer { isScanning = false; progress = "" }
@@ -175,6 +190,7 @@ final class LibraryModel: ObservableObject {
         isScanning = true
         progress = t.progFetching()
         groups = []
+        categories = []
         facesApplied = false
         defer { isScanning = false; progress = "" }
 
@@ -207,6 +223,53 @@ final class LibraryModel: ObservableObject {
             guard photos.count >= 2 else { return nil }
             return ReviewGroup(photos: photos, keeperID: keeper(photos).uuid)
         }
+    }
+
+    /// "Similar sets": classify the whole library on-device (Vision) and bucket
+    /// photos by what's in them — across time, no deletion. Heavier than the
+    /// other passes (one classification per photo); shows progress.
+    func scanSimilarSets(_ t: L10n) async {
+        guard !isScanning else { return }
+        isScanning = true
+        progress = t.progFetching()
+        groups = []
+        categories = []
+        assetsByID = [:]
+        facesApplied = false
+        defer { isScanning = false; progress = "" }
+
+        let opts = PHFetchOptions()
+        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        if !includeVideo {
+            opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        }
+        let result = PHAsset.fetchAssets(with: opts)
+        var assets: [PHAsset] = []
+        var map: [String: PHAsset] = [:]
+        assets.reserveCapacity(result.count)
+        result.enumerateObjects { a, _, _ in assets.append(a); map[a.localIdentifier] = a }
+        assetsByID = map
+
+        if enrichment == nil {
+            enrichment = await Task.detached(priority: .userInitiated) { QualitySidecar.load() }.value
+            qualityAvailable = !(enrichment?.isEmpty ?? true)
+        }
+        let enr = enrichment ?? [:]
+
+        var buckets: [String: [Photo]] = [:]
+        var done = 0
+        for asset in assets {
+            if let label = await CategoryScanner.category(for: asset, manager: imageManager) {
+                buckets[label, default: []].append(makePhoto(from: asset, enr: enr))
+            }
+            done += 1
+            if done % 200 == 0 { progress = t.progClassifying(done, assets.count) }
+        }
+
+        categories = buckets
+            .map { CategoryBucket(label: $0.key, photos: $0.value) }
+            .filter { $0.count >= 2 }
+            .sorted { $0.count > $1.count }
     }
 
     /// Promote a frame to keeper (favorites stay protected either way).

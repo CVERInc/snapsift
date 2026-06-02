@@ -44,6 +44,41 @@ struct L10n: Sendable {
         case .zhTW: return "刪除 \(n)"
         }
     }
+    func similarSets() -> String {
+        switch language {
+        case .en: return "Similar sets"
+        case .ja: return "テーマ別"
+        case .zhTW: return "同主題"
+        }
+    }
+    func tipSimilarSets() -> String {
+        switch language {
+        case .en: return "Group your whole library by what's in each photo (neural, on-device) — across time, nothing deleted"
+        case .ja: return "写真の内容でライブラリ全体を分類（オンデバイス・時間をまたぐ・削除しない）"
+        case .zhTW: return "用照片內容把整個圖庫分類（裝置端神經、跨時間、不刪任何東西）"
+        }
+    }
+    func progClassifying(_ i: Int, _ total: Int) -> String {
+        switch language {
+        case .en: return "Classifying \(i)/\(total)…"
+        case .ja: return "分類中 \(i)/\(total)…"
+        case .zhTW: return "分類中 \(i)/\(total)…"
+        }
+    }
+    func categoryHeader(count: Int, shown: Int) -> String {
+        switch language {
+        case .en: return shown < count ? "\(count) photos · showing first \(shown)" : "\(count) photos"
+        case .ja: return shown < count ? "\(count)枚 · 先頭\(shown)枚を表示" : "\(count)枚"
+        case .zhTW: return shown < count ? "\(count) 張 · 顯示前 \(shown) 張" : "\(count) 張"
+        }
+    }
+    func selectCategory() -> String {
+        switch language {
+        case .en: return "Select a category"
+        case .ja: return "カテゴリを選択"
+        case .zhTW: return "選一個類別"
+        }
+    }
 
     // MARK: permission gate
 

@@ -5,6 +5,7 @@ import SnapsiftCore
 struct ContentView: View {
     @StateObject private var model = LibraryModel()
     @State private var selection: ReviewGroup.ID?
+    @State private var categorySelection: CategoryBucket.ID?
     @State private var deleting = false
     @State private var banner: String?
     @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
@@ -61,27 +62,57 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
-        // Manual selection (no List(selection:)) so the system accent highlight
-        // never flashes orange behind our teal row background. Two sections:
-        // confident duplicates (pre-marked) and "similar — you decide".
-        List {
-            if !model.confidentGroups.isEmpty {
-                Section(t.sectionConfident(model.confidentGroups.count)) {
-                    ForEach(model.confidentGroups) { sidebarRow($0) }
+        sidebarList
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .background(Color.reefDeep)
+            .navigationTitle("snapsift")
+            .frame(minWidth: 240)
+            .overlay { if model.groups.isEmpty && model.categories.isEmpty { emptyState } }
+    }
+
+    // Manual selection (no List(selection:)) so the system accent highlight never
+    // flashes orange behind our teal row background.
+    @ViewBuilder private var sidebarList: some View {
+        if model.browseMode {
+            List {
+                Section(t.similarSets()) {
+                    ForEach(model.categories) { categoryRow($0) }
                 }
             }
-            if !model.pendingGroups.isEmpty {
-                Section(t.sectionPending(model.pendingGroups.count)) {
-                    ForEach(model.pendingGroups) { sidebarRow($0) }
+        } else {
+            List {
+                if !model.confidentGroups.isEmpty {
+                    Section(t.sectionConfident(model.confidentGroups.count)) {
+                        ForEach(model.confidentGroups) { sidebarRow($0) }
+                    }
+                }
+                if !model.pendingGroups.isEmpty {
+                    Section(t.sectionPending(model.pendingGroups.count)) {
+                        ForEach(model.pendingGroups) { sidebarRow($0) }
+                    }
                 }
             }
         }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
-        .background(Color.reefDeep)
-        .navigationTitle("snapsift")
-        .frame(minWidth: 240)
-        .overlay { if model.groups.isEmpty { emptyState } }
+    }
+
+    private func categoryRow(_ c: CategoryBucket) -> some View {
+        let sel = c.id == categorySelection
+        return VStack(alignment: .leading, spacing: 3) {
+            Text(c.display).font(.headline)
+                .foregroundStyle(sel ? .white : Color.reefMint)
+            Text(t.frames(c.count)).font(.caption)
+                .foregroundStyle(sel ? Color.white.opacity(0.85) : Color.reefTextDim)
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture { categorySelection = c.id }
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(sel ? Color.reefTeal : Color.clear)
+                .padding(.vertical, 1)
+        )
     }
 
     private func sidebarRow(_ g: ReviewGroup) -> some View {
@@ -128,19 +159,28 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var detail: some View {
-        if let id = selection, let g = model.groups.first(where: { $0.id == id }) {
+        if model.browseMode {
+            if let id = categorySelection, let c = model.categories.first(where: { $0.id == id }) {
+                CategoryBrowse(category: c, model: model, t: t)
+            } else {
+                placeholder("square.grid.2x2", t.selectCategory())
+            }
+        } else if let id = selection, let g = model.groups.first(where: { $0.id == id }) {
             GroupReview(group: g, model: model, t: t)
         } else if model.groups.isEmpty {
             onboarding
         } else {
-            VStack(spacing: 8) {
-                Image(systemName: "photo.on.rectangle.angled")
-                    .font(.system(size: 40)).foregroundStyle(Color.reefBorder)
-                Text(t.selectCluster()).foregroundStyle(Color.reefTextDim)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.reefGround)
+            placeholder("photo.on.rectangle.angled", t.selectCluster())
         }
+    }
+
+    private func placeholder(_ icon: String, _ text: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 40)).foregroundStyle(Color.reefBorder)
+            Text(text).foregroundStyle(Color.reefTextDim)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.reefGround)
     }
 
     /// First-run call to action in the big detail pane — gives a brand-new user
@@ -165,6 +205,10 @@ struct ContentView: View {
                     onboardCard(title: t.lookAlikes(), icon: "rectangle.on.rectangle",
                                 caption: t.tipLookAlikes(), prominent: false) {
                         Task { await model.scanLookAlikes(t) }
+                    }
+                    onboardCard(title: t.similarSets(), icon: "square.grid.3x3.topleft.filled",
+                                caption: t.tipSimilarSets(), prominent: false) {
+                        Task { await model.scanSimilarSets(t) }
                     }
                 }
                 .padding(.top, 8)
@@ -244,6 +288,13 @@ struct ContentView: View {
                 Label(t.lookAlikes(), systemImage: "rectangle.on.rectangle")
             }
             .help(t.tipLookAlikes())
+            .disabled(model.isScanning)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { Task { await model.scanSimilarSets(t) } } label: {
+                Label(t.similarSets(), systemImage: "square.grid.3x3.topleft.filled")
+            }
+            .help(t.tipSimilarSets())
             .disabled(model.isScanning)
         }
         ToolbarItem(placement: .primaryAction) {
@@ -373,5 +424,46 @@ struct GroupReview: View {
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(bg).foregroundStyle(fg)
             .clipShape(RoundedRectangle(cornerRadius: 5))
+    }
+}
+
+/// Browse one semantic category from the "Similar sets" pass — a plain grid of
+/// the photos Vision tagged with that label. No keeper/delete; this is curation.
+struct CategoryBrowse: View {
+    let category: CategoryBucket
+    @ObservedObject var model: LibraryModel
+    let t: L10n
+
+    private static let cap = 400
+    private let columns = [GridItem(.adaptive(minimum: 130), spacing: 10)]
+
+    var body: some View {
+        let shown = Array(category.photos.prefix(Self.cap))
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Text(category.display).font(.title3.bold()).foregroundStyle(Color.reefMint)
+                    Text(t.categoryHeader(count: category.count, shown: shown.count))
+                        .font(.callout).foregroundStyle(Color.reefTextDim)
+                }
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(shown) { p in
+                        AssetThumbnail(asset: model.asset(for: p.uuid), manager: model.imageManager, side: 130)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(alignment: .topTrailing) {
+                                if p.favorite {
+                                    Text("★").font(.system(size: 10, weight: .bold))
+                                        .padding(3).background(Color.reefAmber)
+                                        .foregroundStyle(Color(hex: 0x1a1203))
+                                        .clipShape(RoundedRectangle(cornerRadius: 4)).padding(4)
+                                }
+                            }
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .background(Color.reefGround)
+        .navigationTitle(category.display)
     }
 }
