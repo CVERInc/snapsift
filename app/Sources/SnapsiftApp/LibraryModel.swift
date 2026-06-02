@@ -45,9 +45,6 @@ final class LibraryModel: ObservableObject {
     @Published var isScanning = false
     @Published var progress = ""
     @Published var includeVideo = false
-    /// Content-verify burst clusters with a perceptual hash so two different
-    /// shots taken seconds apart don't get grouped just by timing + dimensions.
-    @Published var verifyContent = true
     /// True once Apple's quality scores have been read from the library sidecar.
     @Published var qualityAvailable = false
 
@@ -173,28 +170,23 @@ final class LibraryModel: ObservableObject {
         progress = t.progClustering(enriched.count)
         let clustered = cluster(enriched, gapSec: gapSec, sizeTol: sizeTol, maxSpan: maxSpan)
 
-        // Verify each time-burst actually looks alike (perceptual hash), so two
-        // different shots taken seconds apart aren't grouped on timing alone —
-        // and tier by how much the frames differ: near-identical → confident
-        // (pre-marked), more variation → "you decide" (nothing pre-marked).
-        if verifyContent {
-            progress = t.progVerifying(0, clustered.count)
-            let lookup = assetsByID
-            let verified = await LookAlikeScanner.verifyByContent(
-                clustered, asset: { lookup[$0] }, manager: imageManager,
-                maxDistance: contentMaxDistance, t: t
-            ) { [weak self] msg in Task { @MainActor in self?.progress = msg } }
-            groups = verified.map { vc in
-                let confident = vc.spread <= contentConfidentSpread
-                var g = ReviewGroup(photos: vc.photos, keeperID: keeper(vc.photos).uuid)
-                g.confidentDupe = confident
-                g.keepAll = !confident        // uncertain groups: keep all, pre-mark nothing
-                return g
-            }
-        } else {
-            // No content check → can't gauge variation; fall back to the legacy
-            // aggressive behaviour (treat every cluster as a confident dupe).
-            groups = clustered.map { ReviewGroup(photos: $0, keeperID: keeper($0).uuid) }
+        // Always content-verify (no opt-out): a time-burst is only real if the
+        // frames actually look alike, so two different shots taken seconds apart
+        // can never be grouped on timing alone. We tier by how much the frames
+        // differ — near-identical → confident (pre-marked), more variation →
+        // "you decide" (nothing pre-marked). Reliability over speed, always.
+        progress = t.progVerifying(0, clustered.count)
+        let lookup = assetsByID
+        let verified = await LookAlikeScanner.verifyByContent(
+            clustered, asset: { lookup[$0] }, manager: imageManager,
+            maxDistance: contentMaxDistance, t: t
+        ) { [weak self] msg in Task { @MainActor in self?.progress = msg } }
+        groups = verified.map { vc in
+            let confident = vc.spread <= contentConfidentSpread
+            var g = ReviewGroup(photos: vc.photos, keeperID: keeper(vc.photos).uuid)
+            g.confidentDupe = confident
+            g.keepAll = !confident            // uncertain groups: keep all, pre-mark nothing
+            return g
         }
     }
 
