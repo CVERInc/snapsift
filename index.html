@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>snapsift — 留最好的一張，丟掉整串連拍</title>
+  <meta name="description" content="On-device macOS app that finds the near-duplicate burst shots Apple's Duplicates detector misses — quality-aware keeper, face-aware re-pick, cross-time look-alikes — and deletes the extras into Recently Deleted. 完全在裝置上執行的 macOS App。">
+  <meta property="og:title" content="snapsift — keep the best shot, lose the burst">
+  <meta property="og:description" content="On-device · PhotoKit + Vision · Apple-quality keeper · favorites safe · recoverable delete · MIT">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://oss.cver.net/snapsift/">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@500;600;700&family=Nunito:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --teal: #0a8c8e;
+      --dark-teal: #084a4c;
+      --deep: #052f30;
+      --mint: #aceace;
+      --text: #e6f4f3;
+      --text-dim: rgba(230, 244, 243, 0.66);
+      --text-faint: rgba(230, 244, 243, 0.42);
+      --surface: rgba(255, 255, 255, 0.06);
+      --surface-2: rgba(255, 255, 255, 0.09);
+      --border: rgba(172, 234, 206, 0.18);
+      --green: #10b981;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --code-bg: rgba(3, 28, 28, 0.7);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Nunito', system-ui, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1100px 700px at 78% -8%, rgba(172, 234, 206, 0.16), transparent 60%),
+        radial-gradient(900px 800px at 12% 8%, rgba(10, 140, 142, 0.30), transparent 62%),
+        linear-gradient(160deg, var(--dark-teal) 0%, var(--deep) 100%);
+      background-attachment: fixed;
+      min-height: 100vh;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+
+    nav {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 22px 24px; max-width: 960px; margin: 0 auto;
+    }
+    .brand { font-family: 'Comfortaa', cursive; font-weight: 700; font-size: 1.4rem; color: #fff; }
+    .nav-right { display: flex; align-items: center; gap: 8px; }
+    .nav-link {
+      text-decoration: none; color: var(--text-dim); font-weight: 600; font-size: 0.92rem;
+      padding: 8px 14px; border-radius: 999px; transition: all 0.2s ease;
+    }
+    .nav-link:hover { color: #fff; background: var(--surface); }
+    .lang-toggle {
+      cursor: pointer; border: 1px solid var(--border); background: var(--surface); color: var(--text);
+      font-family: inherit; font-weight: 700; font-size: 0.82rem; padding: 7px 14px;
+      border-radius: 999px; transition: all 0.2s ease;
+    }
+    .lang-toggle:hover { background: var(--surface-2); border-color: var(--mint); }
+
+    header.hero { text-align: center; padding: 56px 0 36px; }
+    .wordmark {
+      font-family: 'Comfortaa', cursive; font-weight: 700;
+      font-size: clamp(3rem, 9vw, 5.2rem); line-height: 1; letter-spacing: -0.02em;
+      color: #fff; margin-bottom: 18px; text-shadow: 0 8px 40px rgba(172, 234, 206, 0.25);
+    }
+    .tagline { font-size: clamp(1.15rem, 3.2vw, 1.6rem); font-weight: 700; color: var(--mint); margin-bottom: 14px; }
+    .sub { font-size: 1.05rem; color: var(--text-dim); max-width: 640px; margin: 0 auto 10px; }
+    .intended-use { font-size: 0.86rem; color: var(--text-faint); max-width: 600px; margin: 6px auto 0; }
+    .cta-row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-top: 26px; }
+    .btn {
+      text-decoration: none; font-weight: 700; font-size: 0.98rem; padding: 13px 26px;
+      border-radius: 999px; transition: all 0.2s ease; display: inline-flex; align-items: center; gap: 8px;
+    }
+    .btn-primary { background: var(--mint); color: #04181a; box-shadow: 0 8px 30px rgba(172, 234, 206, 0.25); }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 12px 36px rgba(172, 234, 206, 0.35); }
+    .btn-ghost { border: 1px solid var(--border); color: var(--text); background: var(--surface); }
+    .btn-ghost:hover { background: var(--surface-2); border-color: var(--mint); }
+
+    /* mock review window */
+    .mock-stage { display: flex; justify-content: center; padding: 10px 24px 8px; }
+    .mock {
+      width: 100%; max-width: 620px; background: rgba(5, 24, 26, 0.86);
+      border: 1px solid var(--border); border-radius: 16px; overflow: hidden;
+      box-shadow: 0 30px 80px rgba(0,0,0,0.45); backdrop-filter: blur(8px);
+    }
+    .mock-bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+    .mock-dots span { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+    .r { background: #ff5f57; } .y { background: #febc2e; } .g { background: #28c840; }
+    .mock-title { font-family: 'Comfortaa', cursive; font-weight: 600; color: var(--mint); margin-left: 6px; }
+    .mock-meta { margin-left: auto; font-size: 0.78rem; color: var(--text-faint); }
+    .mock-body { padding: 16px; }
+    .mock-head { font-size: 0.84rem; color: var(--text-dim); margin-bottom: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .frame { aspect-ratio: 1; border-radius: 10px; border: 2px solid transparent; position: relative; overflow: hidden; }
+    .frame .pic { position: absolute; inset: 0; }
+    .frame .lbl {
+      position: absolute; top: 6px; left: 6px; font-size: 0.62rem; font-weight: 800;
+      padding: 2px 6px; border-radius: 5px; letter-spacing: 0.04em;
+    }
+    .keep { border-color: var(--green); } .keep .lbl { background: var(--green); color: #04110a; }
+    .del { border-color: var(--red); } .del .pic { opacity: 0.34; } .del .lbl { background: var(--red); color: #fff; }
+    .fav { border-color: var(--amber); } .fav .lbl { background: var(--amber); color: #1a1203; top: 6px; right: 6px; left: auto; }
+    .p1 { background: linear-gradient(135deg, #2b6f70, #0a8c8e); }
+    .p2 { background: linear-gradient(135deg, #316b58, #10b981); }
+    .p3 { background: linear-gradient(135deg, #6b5a31, #b8923a); }
+
+    section { padding: 40px 0; }
+    .section-title { font-family: 'Comfortaa', cursive; font-weight: 600; font-size: 1.7rem; color: #fff; text-align: center; margin-bottom: 8px; }
+    .section-sub { text-align: center; color: var(--text-dim); margin-bottom: 30px; }
+    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 22px; }
+    .card .ic { font-size: 1.6rem; margin-bottom: 10px; }
+    .card h3 { font-size: 1.05rem; color: var(--mint); margin-bottom: 6px; }
+    .card p { font-size: 0.92rem; color: var(--text-dim); }
+    .steps { display: grid; gap: 14px; max-width: 680px; margin: 0 auto; }
+    .step { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; }
+    .step h3 { font-size: 1rem; color: var(--mint); margin-bottom: 8px; }
+    pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; overflow-x: auto; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86rem; color: var(--text); }
+    footer { text-align: center; padding: 40px 24px 60px; color: var(--text-faint); font-size: 0.88rem; }
+    footer a { color: var(--mint); text-decoration: none; }
+
+    [data-en] { display: none; }
+    html[data-lang="en"] [data-zh] { display: none; }
+    html[data-lang="en"] [data-en] { display: inline; }
+  </style>
+</head>
+<body>
+  <nav>
+    <span class="brand">snapsift</span>
+    <div class="nav-right">
+      <a class="nav-link" href="#get"><span data-zh>安裝</span><span data-en>Get it</span></a>
+      <a class="nav-link" href="https://github.com/CVERInc/snapsift" target="_blank" rel="noopener">GitHub</a>
+      <button class="lang-toggle" id="langBtn">EN</button>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="wrap">
+      <h1 class="wordmark">snapsift</h1>
+      <p class="tagline">
+        <span data-zh>留最好的一張，丟掉整串連拍。</span>
+        <span data-en>Keep the best shot. Lose the burst.</span>
+      </p>
+      <p class="sub">
+        <span data-zh>Apple 的「重複項目」抓不到「手動連拍」——你按住快門連拍十幾張、它認為那是刻意拍的。snapsift 把它們揪出來，幫你只留最好的一張。</span>
+        <span data-en>Apple's Duplicates detector leaves manual bursts alone — hold the shutter, get 15 near-identical frames, and it thinks you meant to. snapsift finds them and keeps just the best one.</span>
+      </p>
+      <p class="intended-use">
+        <span data-zh>完全在你的 Mac 上執行 · 最愛一律保留 · 刪除可在「最近刪除」復原 30 天</span>
+        <span data-en>Runs entirely on your Mac · favorites always kept · deletions recoverable for 30 days</span>
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#get">
+          <span data-zh>取得 App</span><span data-en>Get the app</span>
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/CVERInc/snapsift" target="_blank" rel="noopener">
+          <span data-zh>原始碼</span><span data-en>Source</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <div class="mock-stage">
+    <div class="mock" aria-hidden="true">
+      <div class="mock-bar">
+        <div class="mock-dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <span class="mock-title">snapsift</span>
+        <span class="mock-meta"><span data-zh>5 張 · 跨距 1.8 秒 · 留 1 刪 4</span><span data-en>5 frames · spans 1.8s · keep 1, delete 4</span></span>
+      </div>
+      <div class="mock-body">
+        <div class="mock-head"><span data-zh>點任一張改為保留 · ★ 最愛永遠保留</span><span data-en>Click any frame to keep it · ★ favorites always kept</span></div>
+        <div class="grid">
+          <div class="frame keep"><div class="pic p1"></div><span class="lbl">KEEP</span></div>
+          <div class="frame del"><div class="pic p2"></div><span class="lbl">DELETE</span></div>
+          <div class="frame del"><div class="pic p1"></div><span class="lbl">DELETE</span></div>
+          <div class="frame fav"><div class="pic p3"></div><span class="lbl">★</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <div class="wrap">
+      <h2 class="section-title"><span data-zh>為什麼用 snapsift</span><span data-en>Why snapsift</span></h2>
+      <p class="section-sub"><span data-zh>站在 Apple 自己的框架上，一切都在裝置裡。</span><span data-en>Built on Apple's own frameworks. All on-device.</span></p>
+      <div class="features">
+        <div class="card">
+          <div class="ic">🔒</div>
+          <h3><span data-zh>完全在裝置上</span><span data-en>Fully on-device</span></h3>
+          <p><span data-zh>PhotoKit 讀取、Vision 分析、原生刪除——沒有任何資料離開你的 Mac。</span><span data-en>PhotoKit reads, Vision analyses, native delete — nothing ever leaves your Mac.</span></p>
+        </div>
+        <div class="card">
+          <div class="ic">✨</div>
+          <h3><span data-zh>挑出真正最好的一張</span><span data-en>Keeps the genuinely best frame</span></h3>
+          <p><span data-zh>讀取 Apple 自己算好的品質分數，留下最銳利、構圖最好的，而不只是檔案最大的。</span><span data-en>Reads Apple's own quality scores to keep the sharpest, best-composed frame — not just the biggest file.</span></p>
+        </div>
+        <div class="card">
+          <div class="ic">😊</div>
+          <h3><span data-zh>看臉挑張</span><span data-en>Face-aware</span></h3>
+          <p><span data-zh>用 Vision 偵測臉與睜眼，連拍裡自動選大家都看鏡頭、眼睛張開的那張。</span><span data-en>Vision finds faces and open eyes, picking the frame where everyone looks their best.</span></p>
+        </div>
+        <div class="card">
+          <div class="ic">🕓</div>
+          <h3><span data-zh>跨時間找相似</span><span data-en>Cross-time look-alikes</span></h3>
+          <p><span data-zh>用 Apple 神經 feature print 找出不同天存下的同一張照片，不只是當下的連拍。</span><span data-en>Apple's neural feature prints find the same photo saved on different days, not just time bursts.</span></p>
+        </div>
+        <div class="card">
+          <div class="ic">⭐</div>
+          <h3><span data-zh>最愛一律保留</span><span data-en>Favorites are sacred</span></h3>
+          <p><span data-zh>最愛永遠不會被刪；影片預設略過。安全是預設值。</span><span data-en>Favorites are never deleted; videos are skipped by default. Safe by default.</span></p>
+        </div>
+        <div class="card">
+          <div class="ic">↩️</div>
+          <h3><span data-zh>隨時可復原</span><span data-en>Always recoverable</span></h3>
+          <p><span data-zh>刪除走系統的「最近刪除」，30 天內隨時救回；iCloud 同步到所有裝置。</span><span data-en>Deletions go to Recently Deleted — recoverable for 30 days, synced across your devices.</span></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="get">
+    <div class="wrap">
+      <h2 class="section-title"><span data-zh>開始使用</span><span data-en>Get started</span></h2>
+      <p class="section-sub"><span data-zh>不需要 Xcode，一行指令就有可雙擊的 App。</span><span data-en>No Xcode — one command builds a double-clickable app.</span></p>
+      <div class="steps">
+        <div class="step">
+          <h3><span data-zh>1 · 取得原始碼</span><span data-en>1 · Clone</span></h3>
+          <pre><code>git clone https://github.com/CVERInc/snapsift
+cd snapsift/app</code></pre>
+        </div>
+        <div class="step">
+          <h3><span data-zh>2 · 建出 App</span><span data-en>2 · Build the app</span></h3>
+          <pre><code>./scripts/build-app.sh        # → ~/Desktop/snapsift.app</code></pre>
+        </div>
+        <div class="step">
+          <h3><span data-zh>3 · 掃描、審查、刪除</span><span data-en>3 · Scan, review, delete</span></h3>
+          <p><span data-zh>雙擊 snapsift.app（首次未簽名請右鍵→打開），首次掃描會請求照片存取權。掃描 → 並排審查每群 → 刪除多餘的。</span><span data-en>Double-click snapsift.app (first time: right-click → Open). It asks for Photos access on first scan. Scan → review each cluster → delete the extras.</span></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p><span data-zh>由 <a href="https://cver.net">cver.net</a> 打造 · MIT 授權 · </span><span data-en>By <a href="https://cver.net">cver.net</a> · MIT · </span><a href="https://github.com/CVERInc/snapsift">GitHub</a></p>
+  </footer>
+
+  <script>
+    const btn = document.getElementById('langBtn');
+    btn.addEventListener('click', () => {
+      const en = document.documentElement.getAttribute('data-lang') === 'en';
+      document.documentElement.setAttribute('data-lang', en ? 'zh' : 'en');
+      document.documentElement.setAttribute('lang', en ? 'zh-Hant' : 'en');
+      btn.textContent = en ? 'EN' : '中';
+    });
+  </script>
+</body>
+</html>
