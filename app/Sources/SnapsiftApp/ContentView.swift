@@ -139,23 +139,44 @@ struct ContentView: View {
                 Text("snapsift").font(.system(size: 26, weight: .bold)).foregroundStyle(.white)
                 Text(t.scanHint())
                     .foregroundStyle(Color.reefTextDim)
-                    .multilineTextAlignment(.center).frame(maxWidth: 360)
-                HStack(spacing: 12) {
-                    Button { Task { await model.scan(t) } } label: {
-                        Label(t.scan(), systemImage: "sparkle.magnifyingglass")
-                            .frame(minWidth: 120)
+                    .multilineTextAlignment(.center).frame(maxWidth: 380)
+                HStack(spacing: 14) {
+                    onboardCard(title: t.scan(), icon: "sparkle.magnifyingglass",
+                                caption: t.tipScan(), prominent: true) {
+                        Task { await model.scan(t) }
                     }
-                    .buttonStyle(.borderedProminent).controlSize(.large)
-                    Button { Task { await model.scanLookAlikes(t) } } label: {
-                        Label(t.lookAlikes(), systemImage: "rectangle.on.rectangle")
+                    onboardCard(title: t.lookAlikes(), icon: "rectangle.on.rectangle",
+                                caption: t.tipLookAlikes(), prominent: false) {
+                        Task { await model.scanLookAlikes(t) }
                     }
-                    .buttonStyle(.bordered).controlSize(.large)
                 }
-                .padding(.top, 4)
+                .padding(.top, 8)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.reefGround)
+    }
+
+    private func onboardCard(title: String, icon: String, caption: String,
+                             prominent: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Image(systemName: icon).font(.system(size: 22))
+                    .foregroundStyle(prominent ? Color.reefGround : Color.reefMint)
+                    .frame(height: 26)
+                Text(title).font(.headline)
+                    .foregroundStyle(prominent ? Color.reefGround : .white)
+                Text(caption).font(.caption)
+                    .foregroundStyle(prominent ? Color.reefGround.opacity(0.8) : Color.reefTextDim)
+                    .multilineTextAlignment(.center).lineLimit(3)
+            }
+            .frame(width: 220, height: 140)
+            .padding(12)
+            .background(prominent ? Color.reefMint : Color.reefDeep,
+                        in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.reefBorder, lineWidth: prominent ? 0 : 1))
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: status bar (reclaim summary)
