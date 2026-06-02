@@ -7,7 +7,11 @@ struct ContentView: View {
     @State private var selection: ReviewGroup.ID?
     @State private var categorySelection: CategoryBucket.ID?
     @State private var deleting = false
+    @State private var focusedFrame: String?     // uuid of the focused grid cell
+    @State private var previewID: String?        // big-preview overlay
+    @State private var showHelp = false
     @FocusState private var sidebarFocused: Bool
+    @FocusState private var gridFocused: Bool
     @State private var banner: String?
     @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
 
@@ -60,6 +64,43 @@ struct ContentView: View {
         .toolbar { toolbar }
         .safeAreaInset(edge: .bottom) { statusBar }
         .overlay(alignment: .top) { bannerView }
+        .overlay { if previewID != nil { previewOverlay } }
+        .overlay { if showHelp { helpOverlay } }
+    }
+
+    @ViewBuilder private var previewOverlay: some View {
+        if let previewID {
+            ZStack {
+                Color.black.opacity(0.82).ignoresSafeArea()
+                AssetThumbnail(asset: model.asset(for: previewID), manager: model.imageManager, side: 760)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .shadow(radius: 30)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { self.previewID = nil }
+            .onKeyPress { _ in self.previewID = nil; return .handled }
+            .focusable()
+        }
+    }
+
+    private var helpOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.78).ignoresSafeArea().onTapGesture { showHelp = false }
+            VStack(alignment: .leading, spacing: 10) {
+                Text(t.helpTitle()).font(.title3.bold()).foregroundStyle(Color.reefMint)
+                ForEach(t.helpRows(), id: \.0) { row in
+                    HStack(alignment: .top, spacing: 14) {
+                        Text(row.0).font(.system(.callout, design: .monospaced).weight(.semibold))
+                            .foregroundStyle(.white).frame(width: 140, alignment: .leading)
+                        Text(row.1).foregroundStyle(Color.reefText)
+                    }
+                }
+            }
+            .padding(26)
+            .background(Color.reefDeep, in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.reefBorder))
+        }
+        .onKeyPress(.escape) { showHelp = false; return .handled }
     }
 
     private var sidebar: some View {
@@ -73,8 +114,7 @@ struct ContentView: View {
                 .overlay { if model.groups.isEmpty && model.categories.isEmpty { emptyState } }
                 .focusable(!model.groups.isEmpty || !model.categories.isEmpty)
                 .focused($sidebarFocused)
-                .onKeyPress(.downArrow) { moveSelection(1, proxy); return .handled }
-                .onKeyPress(.upArrow) { moveSelection(-1, proxy); return .handled }
+                .onKeyPress { handleListKey($0, proxy) }
                 .onChange(of: model.groups.count) { _, n in if n > 0 { sidebarFocused = true } }
                 .onChange(of: model.categories.count) { _, n in if n > 0 { sidebarFocused = true } }
         }
@@ -103,6 +143,66 @@ struct ContentView: View {
         guard let current, let i = ids.firstIndex(of: current) else { return delta > 0 ? ids.first : ids.last }
         let j = i + delta
         return (j >= 0 && j < ids.count) ? ids[j] : nil   // clamp at ends
+    }
+
+    private var selectedGroup: ReviewGroup? { model.groups.first { $0.id == selection } }
+
+    // MARK: keyboard — list zone
+
+    private func handleListKey(_ kp: KeyPress, _ proxy: ScrollViewProxy) -> KeyPress.Result {
+        if kp.characters == "?" { showHelp.toggle(); return .handled }
+        switch kp.key {
+        case .upArrow:    moveSelection(-1, proxy); return .handled
+        case .downArrow:  moveSelection(1, proxy);  return .handled
+        case .rightArrow, .return: enterGrid(); return .handled
+        default: break
+        }
+        switch kp.characters {
+        case "k": moveSelection(-1, proxy); return .handled
+        case "j": moveSelection(1, proxy);  return .handled
+        case "l": enterGrid(); return .handled
+        case "a": if let id = selection { model.toggleKeepAll(group: id) }; return .handled
+        case let c where c.count == 1 && c.first!.isNumber:
+            if let n = Int(c), n >= 1 { pickNth(n - 1) }; return .handled
+        default: return .ignored
+        }
+    }
+
+    private func pickNth(_ i: Int) {
+        guard let g = selectedGroup, i >= 0, i < g.photos.count else { return }
+        model.promote(group: g.id, to: g.photos[i].uuid)
+    }
+
+    private func enterGrid() {
+        guard !model.browseMode, let g = selectedGroup, !g.photos.isEmpty else { return }
+        focusedFrame = g.keeperID
+        gridFocused = true
+    }
+
+    // MARK: keyboard — grid zone
+
+    private func handleGridKey(_ kp: KeyPress) -> KeyPress.Result {
+        if kp.characters == "?" { showHelp.toggle(); return .handled }
+        guard let g = selectedGroup else { return .ignored }
+        switch kp.key {
+        case .leftArrow, .upArrow:   moveFrame(-1, g); return .handled
+        case .rightArrow, .downArrow: moveFrame(1, g); return .handled
+        case .escape:  sidebarFocused = true; return .handled
+        case .return:  if let f = focusedFrame { model.promote(group: g.id, to: f) }; return .handled
+        default: break
+        }
+        switch kp.characters {
+        case "h", "k": moveFrame(-1, g); return .handled
+        case "l", "j": moveFrame(1, g);  return .handled
+        case " ":      previewID = focusedFrame; return .handled
+        case "a":      model.toggleKeepAll(group: g.id); return .handled
+        default: return .ignored
+        }
+    }
+
+    private func moveFrame(_ delta: Int, _ g: ReviewGroup) {
+        let ids = g.photos.map(\.uuid)
+        if let next = step(ids, current: focusedFrame, delta: delta) { focusedFrame = next }
     }
 
     // Manual selection (no List(selection:)) so the system accent highlight never
@@ -204,7 +304,10 @@ struct ContentView: View {
                 placeholder("square.grid.2x2", t.selectCategory())
             }
         } else if let id = selection, let g = model.groups.first(where: { $0.id == id }) {
-            GroupReview(group: g, model: model, t: t)
+            GroupReview(group: g, model: model, t: t, focusedFrame: gridFocused ? focusedFrame : nil)
+                .focusable()
+                .focused($gridFocused)
+                .onKeyPress { handleGridKey($0) }
         } else if model.groups.isEmpty {
             onboarding
         } else {
@@ -325,6 +428,7 @@ struct ContentView: View {
             }
             .help(t.tipScan())
             .disabled(model.isScanning)
+            .keyboardShortcut("1", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
             Button { Task { await model.scanLookAlikes(t) } } label: {
@@ -332,6 +436,7 @@ struct ContentView: View {
             }
             .help(t.tipLookAlikes())
             .disabled(model.isScanning)
+            .keyboardShortcut("2", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
             Button { Task { await model.scanSimilarSets(t) } } label: {
@@ -339,6 +444,7 @@ struct ContentView: View {
             }
             .help(t.tipSimilarSets())
             .disabled(model.isScanning)
+            .keyboardShortcut("3", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
             Button { Task { await model.refineWithFaces(t) } } label: {
@@ -346,6 +452,7 @@ struct ContentView: View {
             }
             .help(t.tipFaces())
             .disabled(model.groups.isEmpty || model.refiningFaces || model.isScanning)
+            .keyboardShortcut("4", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
             Button(role: .destructive) { Task { await runDelete() } } label: {
@@ -353,6 +460,7 @@ struct ContentView: View {
             }
             .tint(.reefRed)
             .disabled(model.totalDeletions == 0 || deleting)
+            .keyboardShortcut(.delete, modifiers: .command)
         }
         ToolbarItem {
             Menu {
@@ -395,6 +503,7 @@ struct GroupReview: View {
     let group: ReviewGroup
     @ObservedObject var model: LibraryModel
     let t: L10n
+    var focusedFrame: String? = nil
 
     private let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
 
@@ -420,7 +529,9 @@ struct GroupReview: View {
                     .help(t.tipKeepAll())
                 }
                 LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(group.photos) { p in card(for: p) }
+                    ForEach(Array(group.photos.enumerated()), id: \.element.id) { idx, p in
+                        card(for: p, index: idx)
+                    }
                 }
             }
             .padding(16)
@@ -429,15 +540,25 @@ struct GroupReview: View {
         .navigationTitle(t.frames(group.photos.count))
     }
 
-    private func card(for p: Photo) -> some View {
+    private func card(for p: Photo, index: Int) -> some View {
         let keep = group.isKeeper(p)
         let del = group.isDelete(p)
+        let focused = p.uuid == focusedFrame
         let border: Color = keep ? .reefGreen : (p.favorite ? .reefAmber : (del ? .reefRed : .clear))
         return VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 AssetThumbnail(asset: model.asset(for: p.uuid), manager: model.imageManager, side: 160)
                     .opacity(del ? 0.34 : 1)
                 badge(keep: keep, del: del, fav: p.favorite)
+                if index < 9 {
+                    Text("\(index + 1)")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .frame(width: 18, height: 18)
+                        .background(Color.reefGround.opacity(0.75), in: Circle())
+                        .foregroundStyle(Color.reefMint)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                }
             }
             Text(p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
                 .font(.caption2).lineLimit(1).truncationMode(.middle)
@@ -448,6 +569,13 @@ struct GroupReview: View {
         .background(Color.reefDeep)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(border, lineWidth: 2))
+        .overlay {
+            if focused {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(.white, style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
+                    .padding(2)
+            }
+        }
         .contentShape(Rectangle())
         .onTapGesture { model.promote(group: group.id, to: p.uuid) }
         .help(p.favorite ? t.tipFavorite() : (keep ? t.tipKeeper() : t.tipDelete()))

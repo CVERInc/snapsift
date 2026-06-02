@@ -86,6 +86,57 @@ struct L10n: Sendable {
         case .zhTW: return "選一個類別"
         }
     }
+    func helpTitle() -> String {
+        switch language {
+        case .en: return "Keyboard"
+        case .ja: return "キーボード"
+        case .zhTW: return "鍵盤快捷"
+        }
+    }
+    /// (keys, what it does) rows for the keyboard cheat sheet.
+    func helpRows() -> [(String, String)] {
+        switch language {
+        case .en: return [
+            ("↑ ↓ / j k", "Move between groups"),
+            ("1 – 9", "Keep the Nth frame"),
+            ("→ / l / ⏎", "Enter the frames"),
+            ("← → / h l", "Move between frames"),
+            ("⏎", "Keep the focused frame"),
+            ("Space", "Big preview"),
+            ("A", "Keep the whole group"),
+            ("Esc", "Back to the list"),
+            ("⌘1 ⌘2 ⌘3", "Scan / Look-alikes / Similar sets"),
+            ("⌘⌫", "Delete the marked photos"),
+            ("?", "This cheat sheet"),
+        ]
+        case .ja: return [
+            ("↑ ↓ / j k", "グループを移動"),
+            ("1 – 9", "N枚目を残す"),
+            ("→ / l / ⏎", "写真へ入る"),
+            ("← → / h l", "写真を移動"),
+            ("⏎", "選択中の1枚を残す"),
+            ("スペース", "大きくプレビュー"),
+            ("A", "グループ全部を残す"),
+            ("Esc", "リストへ戻る"),
+            ("⌘1 ⌘2 ⌘3", "スキャン / そっくり / テーマ別"),
+            ("⌘⌫", "選択した写真を削除"),
+            ("?", "このキー一覧"),
+        ]
+        case .zhTW: return [
+            ("↑ ↓ / j k", "上一群／下一群"),
+            ("1 – 9", "留第 N 張"),
+            ("→ / l / ⏎", "進入格子"),
+            ("← → / h l", "格子間移動"),
+            ("⏎", "把焦點這張設成保留"),
+            ("空白", "大圖預覽"),
+            ("A", "整群保留"),
+            ("Esc", "回到清單"),
+            ("⌘1 ⌘2 ⌘3", "掃描／找相似／同主題"),
+            ("⌘⌫", "刪掉標記的照片"),
+            ("?", "這張快捷小抄"),
+        ]
+        }
+    }
     func searchPrompt(_ smart: Bool) -> String {
         switch language {
         case .en: return smart ? "Search · ↩ for smart match" : "Filter categories"
