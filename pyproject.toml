@@ -1,0 +1,22 @@
+[project]
+name = "snapsift"
+version = "0.1.0"
+description = "Sift the near-duplicate snaps Apple's Duplicates detector misses"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["photos", "macos", "duplicates", "near-duplicate", "deduplication"]
+# Runtime is deliberately zero-dependency (stdlib only). The optional [hash]
+# extra pulls in Pillow for the L3 perceptual-hash pass (hash.py).
+dependencies = []
+
+[project.optional-dependencies]
+hash = ["Pillow>=9"]
+dev = ["pytest>=7", "Pillow>=9"]
+
+[project.urls]
+Homepage = "https://github.com/CVERInc/snapsift"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

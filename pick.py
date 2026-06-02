@@ -7,15 +7,21 @@ Given the groups.json from scan.py, decide *which* photo to keep in each
 cluster and which ones to delete. Outputs plan.json and delete-uuids.txt.
 
 Keeper heuristic (in order):
-  1. Prefer original-format files (HEIC > JPG > PNG > MP4) — favors the
+  1. Never delete a favorite. A favorited frame always survives, and if a
+     cluster has several favorites every one of them is kept.
+  2. Prefer Apple's own per-photo quality score (sharpness, framing,
+     timing, low noise…) — the genuinely better frame, not just the biggest
+     file. Scores are quantised before comparison so near-ties fall through
+     to the format/size tiebreakers rather than splitting hairs on noise.
+  3. Prefer original-format files (HEIC > JPG > PNG > MP4) — favors the
      iPhone-native capture over edited/shared/forwarded versions.
-  2. Among same-UTI, keep the largest file size — proxy for "highest
+  4. Among same-UTI, keep the largest file size — proxy for "highest
      quality version" (more bits = less compression).
-  3. If still tied, keep the earliest one (the original take).
+  5. If still tied, keep the earliest one (the original take).
 
-This avoids needing pixel access to the photos themselves. We trust that
-"bigger same-format file" usually means "original / less compressed",
-which is exactly what you want as the survivor.
+We never need pixel access: Apple already computed the aesthetic scores and
+we trust that "bigger same-format file" usually means "original / less
+compressed". Anything not the keeper *and* not a favorite gets deleted.
 
 Usage:
     python3 pick.py --input groups.json --output plan.json \\
@@ -42,12 +48,24 @@ UTI_PRIORITY = {
 }
 
 
+def rank(p: dict) -> tuple:
+    """Sort key for 'most worth keeping' — higher is better.
+
+    favorite first, then Apple's quality score (quantised so noise-level
+    differences don't override the format/size signal), then UTI priority,
+    then file size, then earliest take.
+    """
+    return (
+        1 if p.get("favorite") else 0,
+        round(p.get("quality") or 0.0, 1),
+        UTI_PRIORITY.get(p["uti"], 0),
+        p["size"],
+        -p["taken_at"],
+    )
+
+
 def keeper(group: list[dict]) -> dict:
     """Pick the one photo from the cluster to keep."""
-    def rank(p):
-        uti_score = UTI_PRIORITY.get(p["uti"], 0)
-        # primary: UTI priority, secondary: largest size, tertiary: earliest
-        return (uti_score, p["size"], -p["taken_at"])
     return max(group, key=rank)
 
 
@@ -73,7 +91,10 @@ def main():
     groups = data["groups"][: args.max_groups] if args.max_groups else data["groups"]
     for g in groups:
         keep = keeper(g["photos"])
-        deletes = [p for p in g["photos"] if p["uuid"] != keep["uuid"]]
+        # Delete everything that is neither the keeper nor a favorite. Favorites
+        # are sacred — a cluster of all-favorites deletes nothing.
+        deletes = [p for p in g["photos"]
+                   if p["uuid"] != keep["uuid"] and not p.get("favorite")]
         plan_groups.append({
             "size":     g["size"],
             "span_sec": g["span_sec"],

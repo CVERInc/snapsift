@@ -9,13 +9,16 @@ album was already empty, yet thousands of sub-second-apart shots remained.
 
 ## How it works
 
-Three small tools, no dependencies beyond Python 3 and macOS:
+Five small tools. The core (scan/pick/delete) has **zero dependencies** beyond
+Python 3 and macOS; the two optional passes use Pillow.
 
 | Step | Tool | What it does |
 |---|---|---|
-| 1 | `scan.py` | Reads `Photos.sqlite` directly (read-only, immutable). Walks every non-trashed asset in date order and clusters them by `(width, height)` + sub-3s time gap + ±10% file size. Emits `groups.json`. |
-| 2 | `pick.py` | For each cluster, picks one keeper using a UTI-priority + filesize heuristic (HEIC > JPG > PNG; larger file = more bits = less compression). Emits `plan.json` and `delete-uuids.txt`. |
+| 1 | `scan.py` | Reads `Photos.sqlite` directly (read-only, immutable). Walks every non-trashed **photo** (videos skipped by default) in date order and clusters them by `(width, height)` + sub-3s time gap + ±10% file size, capped at a 30s total span. Carries each frame's favorite flag and Apple's own quality scores. Emits `groups.json`. |
+| 2 | `pick.py` | For each cluster, picks one keeper: **favorites are never deleted**, then Apple's quality score, then UTI priority (HEIC > JPG > PNG), then larger file. Emits `plan.json` and `delete-uuids.txt`. |
 | 3 | `delete.applescript` | Reads `delete-uuids.txt` and tells `Photos.app` to delete the marked items in batches of 100. They go to "Recently Deleted" → recoverable for 30 days. |
+| L3 | `hash.py` *(opt.)* | **Cross-time** near-duplicates: dHashes each photo's thumbnail and groups the matches via a BK-tree, so the same shot saved on different days collapses together. Emits a `groups.json`-shaped file that feeds straight back into `pick.py`. Needs `pip install "Pillow>=9"`. |
+| UI | `review.py` *(opt.)* | A local web page to eyeball every cluster before deleting: keeper highlighted, click to re-pick, ★ favorites locked, then **Export** the reviewed delete list. Reads any `groups.json` (burst *or* perceptual). stdlib server; Pillow only sharpens the thumbnails. |
 
 ## Why it works
 
@@ -42,6 +45,13 @@ Real-world hit rate on a 120K-photo library:
 
 - `Photos.sqlite` is opened with `?mode=ro&immutable=1`, so we never touch
   Apple's data file even while Photos.app is running.
+- **Favorites are never deleted.** A favorited frame always survives — and
+  if a whole cluster is favorited, nothing in it is deleted.
+- **Videos are skipped by default** (two short clips shot back-to-back are
+  rarely true duplicates). Opt in with `scan.py --include-video`.
+- **Runaway clusters are capped** by `--max-span` (default 30s) so a slow
+  drift of near-identical frames can't silently chain across an unrelated
+  session.
 - Deletion goes via Photos' own AppleScript bridge, so items land in
   "Recently Deleted" — fully recoverable for 30 days.
 - iCloud sync handles the rest: deleting on the Mac also clears the
@@ -67,6 +77,32 @@ osascript delete.applescript "$(pwd)/delete-uuids.txt"
 # Then re-run without --max-groups and apply.
 ```
 
+### Optional: review visually before deleting
+
+```bash
+python3 review.py --groups groups.json     # opens http://127.0.0.1:8765
+# click to re-pick keepers, then "Export" → writes delete-uuids.txt
+```
+
+### Optional: L3 cross-time perceptual pass
+
+```bash
+pip install "Pillow>=9"
+python3 hash.py --output hash-groups.json --max-distance 2
+python3 review.py --groups hash-groups.json --uuid-out hash-delete-uuids.txt
+osascript delete.applescript "$(pwd)/hash-delete-uuids.txt"
+```
+
+## Development
+
+```bash
+pip install pytest "Pillow>=9"
+pytest                 # pure-logic tests — no Photos library needed
+```
+
+The clustering, keeper, hashing and grouping logic are all pure functions with
+unit tests; only the thin SQLite/thumbnail IO layer touches a real library.
+
 ## Schema gotchas (for hackers)
 
 - `ZASSET.ZDATECREATED` is Cocoa epoch (seconds since 2001-01-01 UTC). Add
@@ -83,12 +119,14 @@ osascript delete.applescript "$(pwd)/delete-uuids.txt"
 
 ## Roadmap
 
-- [ ] L3: compute perceptual hashes on `derivatives/` thumbnails to
-  catch near-duplicates *across* time (different days, same photo).
-- [ ] Web review UI: show each cluster side-by-side, let the user override
-  the picker's choice.
-- [ ] Smarter keeper picker: weight by `ZCOMPUTEDASSETATTRIBUTES`'s sharpness
-  / face score fields Apple already computes.
+- [x] L3: perceptual hashes over `derivatives/` thumbnails to catch
+  near-duplicates *across* time (different days, same photo) — `hash.py`.
+- [x] Web review UI: clusters side-by-side, override the picker's choice —
+  `review.py`.
+- [x] Smarter keeper: weighted by `ZCOMPUTEDASSETATTRIBUTES` sharpness /
+  framing / timing scores Apple already computes — `pick.py`.
+- [ ] Package as a single `snapsift` console entry point.
+- [ ] Face-aware keeper: prefer the frame where everyone's eyes are open.
 
 ## License
 
