@@ -58,6 +58,45 @@ enum LookAlikeScanner {
         return confirmed
     }
 
+    /// Content-verify time-burst clusters: a burst is only real if its frames
+    /// actually look alike. We dHash each member and re-split the cluster by
+    /// perceptual proximity, dropping frames that landed together purely by
+    /// timing + dimensions (e.g. two different shots taken 2s apart). Clusters
+    /// where a member's thumbnail can't be read are left untouched (we don't
+    /// split on incomplete information).
+    static func verifyByContent(_ clusters: [[Photo]],
+                                asset: (String) -> PHAsset?,
+                                manager: PHCachingImageManager,
+                                maxDistance: Int,
+                                t: L10n,
+                                progress: @escaping (String) -> Void) async -> [[Photo]] {
+        var out: [[Photo]] = []
+        var done = 0
+        for cluster in clusters {
+            done += 1
+            if done % 200 == 0 { progress(t.progVerifying(done, clusters.count)) }
+
+            var hashed: [(UInt64, Photo)] = []
+            var allHashed = true
+            for photo in cluster {
+                if let a = asset(photo.uuid), let px = await grayPixels9x8(a, manager) {
+                    hashed.append((dHash(grayRowMajor: px), photo))
+                } else {
+                    allHashed = false
+                    break
+                }
+            }
+            if !allHashed {
+                out.append(cluster)                 // can't verify → keep as-is
+                continue
+            }
+            for sub in groupByHash(hashed, maxDistance: maxDistance) where sub.count >= 2 {
+                out.append(sub.sorted { $0.takenAt < $1.takenAt })
+            }
+        }
+        return out
+    }
+
     // MARK: - feature-print union
 
     private static func unionByDistance(_ prints: [(String, VNFeaturePrintObservation)],

@@ -27,8 +27,16 @@ final class LibraryModel: ObservableObject {
     @Published var isScanning = false
     @Published var progress = ""
     @Published var includeVideo = false
+    /// Content-verify burst clusters with a perceptual hash so two different
+    /// shots taken seconds apart don't get grouped just by timing + dimensions.
+    @Published var verifyContent = true
     /// True once Apple's quality scores have been read from the library sidecar.
     @Published var qualityAvailable = false
+
+    /// Max dHash Hamming distance for two burst frames to count as the same
+    /// scene. Generous enough to keep real bursts (slight motion) together,
+    /// tight enough to split unrelated shots.
+    var contentMaxDistance = 14
     @Published var refiningFaces = false
     /// True once a face-refinement pass has re-picked keepers.
     @Published var facesApplied = false
@@ -101,7 +109,19 @@ final class LibraryModel: ObservableObject {
         let enriched = assets.map { makePhoto(from: $0, enr: enr) }
 
         progress = t.progClustering(enriched.count)
-        let clustered = cluster(enriched, gapSec: gapSec, sizeTol: sizeTol, maxSpan: maxSpan)
+        var clustered = cluster(enriched, gapSec: gapSec, sizeTol: sizeTol, maxSpan: maxSpan)
+
+        // Verify each time-burst actually looks alike (perceptual hash), so two
+        // different shots taken seconds apart aren't grouped on timing alone.
+        if verifyContent {
+            progress = t.progVerifying(0, clustered.count)
+            let lookup = assetsByID
+            clustered = await LookAlikeScanner.verifyByContent(
+                clustered, asset: { lookup[$0] }, manager: imageManager,
+                maxDistance: contentMaxDistance, t: t
+            ) { [weak self] msg in Task { @MainActor in self?.progress = msg } }
+        }
+
         groups = clustered.map { ReviewGroup(photos: $0, keeperID: keeper($0).uuid) }
     }
 

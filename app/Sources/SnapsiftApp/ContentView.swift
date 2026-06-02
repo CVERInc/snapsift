@@ -245,9 +245,9 @@ struct ContentView: View {
         }
         ToolbarItem {
             Menu {
+                Toggle(t.contentCheck(), isOn: $model.verifyContent)
                 Toggle(t.videos(), isOn: $model.includeVideo)
             } label: { Image(systemName: "slider.horizontal.3") }
-            .help(t.videos())
         }
         ToolbarItem {
             Menu {

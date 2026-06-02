@@ -226,6 +226,20 @@ struct L10n: Sendable {
         case .zhTW: return "分析人臉 \(i)/\(total)…"
         }
     }
+    func progVerifying(_ i: Int, _ total: Int) -> String {
+        switch language {
+        case .en: return "Verifying clusters \(i)/\(total)…"
+        case .ja: return "グループを確認中 \(i)/\(total)…"
+        case .zhTW: return "驗證群組 \(i)/\(total)…"
+        }
+    }
+    func contentCheck() -> String {
+        switch language {
+        case .en: return "Content check"
+        case .ja: return "内容チェック"
+        case .zhTW: return "內容驗證"
+        }
+    }
 
     // MARK: reclaim summary + post-delete banner
 
