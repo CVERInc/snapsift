@@ -79,6 +79,13 @@ struct L10n: Sendable {
         case .zhTW: return "選一個類別"
         }
     }
+    func searchPrompt(_ smart: Bool) -> String {
+        switch language {
+        case .en: return smart ? "Search · ↩ for smart match" : "Filter categories"
+        case .ja: return smart ? "検索 · ↩ でスマート検索" : "カテゴリを絞り込む"
+        case .zhTW: return smart ? "搜尋 · ↩ 智慧比對" : "篩選類別"
+        }
+    }
 
     // MARK: permission gate
 

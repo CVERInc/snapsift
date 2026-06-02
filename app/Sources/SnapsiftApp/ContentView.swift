@@ -77,9 +77,12 @@ struct ContentView: View {
         if model.browseMode {
             List {
                 Section(t.similarSets()) {
-                    ForEach(model.categories) { categoryRow($0) }
+                    ForEach(model.filteredCategories) { categoryRow($0) }
                 }
             }
+            .searchable(text: $model.searchQuery, placement: .sidebar,
+                        prompt: t.searchPrompt(model.apfelAvailable))
+            .onSubmit(of: .search) { Task { await model.runApfelSearch() } }
         } else {
             List {
                 if !model.confidentGroups.isEmpty {

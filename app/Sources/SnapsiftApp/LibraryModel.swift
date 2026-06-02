@@ -67,6 +67,35 @@ final class LibraryModel: ObservableObject {
     /// UI is in browse mode (categories), not cluster-review mode.
     @Published var categories: [CategoryBucket] = []
     var browseMode: Bool { !categories.isEmpty }
+    /// Free-text filter over categories (browse mode).
+    @Published var searchQuery = "" { didSet { apfelMatched = nil } }
+    /// Labels apfel semantically matched for the current query (nil = substring).
+    @Published var apfelMatched: Set<String>?
+    @Published var apfelSearching = false
+    var apfelAvailable: Bool { Apfel.isInstalled }
+
+    /// Categories after the search filter: apfel's semantic match if it ran,
+    /// otherwise a plain substring match — and everything when the query is empty.
+    var filteredCategories: [CategoryBucket] {
+        let q = searchQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return categories }
+        if let matched = apfelMatched { return categories.filter { matched.contains($0.label) } }
+        return categories.filter {
+            $0.label.lowercased().contains(q) || $0.display.lowercased().contains(q)
+        }
+    }
+
+    /// Refine the current query semantically via apfel (no-op if unavailable).
+    func runApfelSearch() async {
+        let q = searchQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty, apfelAvailable, !apfelSearching else { return }
+        apfelSearching = true
+        defer { apfelSearching = false }
+        let labels = categories.map(\.label)
+        if let matched = await Apfel.match(query: q, labels: labels) {
+            apfelMatched = Set(matched)
+        }
+    }
 
     private var enrichment: [String: QualitySidecar.Enrichment]?
     private var faceScores: [String: Double] = [:]
