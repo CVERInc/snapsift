@@ -113,6 +113,8 @@ struct ContentView: View {
     @ViewBuilder private var detail: some View {
         if let id = selection, let g = model.groups.first(where: { $0.id == id }) {
             GroupReview(group: g, model: model, t: t)
+        } else if model.groups.isEmpty {
+            onboarding
         } else {
             VStack(spacing: 8) {
                 Image(systemName: "photo.on.rectangle.angled")
@@ -122,6 +124,38 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.reefGround)
         }
+    }
+
+    /// First-run call to action in the big detail pane — gives a brand-new user
+    /// an obvious place to start instead of hunting for a toolbar icon.
+    private var onboarding: some View {
+        VStack(spacing: 16) {
+            if model.isScanning || model.refiningFaces {
+                ProgressView().controlSize(.large).tint(.reefMint)
+                Text(model.progress).foregroundStyle(Color.reefTextDim)
+            } else {
+                Image(systemName: "rectangle.stack.badge.minus")
+                    .font(.system(size: 52)).foregroundStyle(Color.reefMint)
+                Text("snapsift").font(.system(size: 26, weight: .bold)).foregroundStyle(.white)
+                Text(t.scanHint())
+                    .foregroundStyle(Color.reefTextDim)
+                    .multilineTextAlignment(.center).frame(maxWidth: 360)
+                HStack(spacing: 12) {
+                    Button { Task { await model.scan(t) } } label: {
+                        Label(t.scan(), systemImage: "sparkle.magnifyingglass")
+                            .frame(minWidth: 120)
+                    }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
+                    Button { Task { await model.scanLookAlikes(t) } } label: {
+                        Label(t.lookAlikes(), systemImage: "rectangle.on.rectangle")
+                    }
+                    .buttonStyle(.bordered).controlSize(.large)
+                }
+                .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.reefGround)
     }
 
     // MARK: status bar (reclaim summary)
@@ -160,9 +194,6 @@ struct ContentView: View {
     // MARK: toolbar
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            Toggle(t.videos(), isOn: $model.includeVideo).toggleStyle(.switch).tint(.reefTeal)
-        }
         ToolbarItem(placement: .primaryAction) {
             Button { Task { await model.scan(t) } } label: {
                 Label(t.scan(), systemImage: "sparkle.magnifyingglass")
@@ -190,6 +221,12 @@ struct ContentView: View {
             }
             .tint(.reefRed)
             .disabled(model.totalDeletions == 0 || deleting)
+        }
+        ToolbarItem {
+            Menu {
+                Toggle(t.videos(), isOn: $model.includeVideo)
+            } label: { Image(systemName: "slider.horizontal.3") }
+            .help(t.videos())
         }
         ToolbarItem {
             Menu {
