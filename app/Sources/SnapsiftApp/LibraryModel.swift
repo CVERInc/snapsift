@@ -191,18 +191,24 @@ final class LibraryModel: ObservableObject {
         // Neural gate: a cluster only stays "confident" (→ pre-marks a deletion)
         // if Apple's feature print agrees it's near-identical. dHash is cheap
         // recall; this is the precise arbiter that keeps the scan from ever
-        // suggesting you delete a frame that's actually a different moment.
+        // suggesting you delete a frame that's actually a different moment. Only
+        // dHash-confident clusters can pre-mark, so only those need the (pricier)
+        // neural check — run as one bounded-concurrency batch, not cluster-by-
+        // cluster, so unreadable-thumbnail timeouts overlap instead of summing.
+        let confidentIdx = verified.indices.filter { verified[$0].spread <= contentConfidentSpread }
+        let toCheck = confidentIdx.map { verified[$0].photos.map(\.uuid) }
+        let spreads = await LookAlikeScanner.featureSpreads(
+            toCheck, byID: assetsByID, manager: imageManager
+        ) { [weak self] done, total, loaded in
+            Task { @MainActor in self?.progress = t.progConfirming(done, total, loaded: loaded) }
+        }
+        var neuralConfident = Set<Int>()
+        for (k, idx) in confidentIdx.enumerated() {
+            if let fs = spreads[k], fs <= contentConfidentFeature { neuralConfident.insert(idx) }
+        }
         var built: [ReviewGroup] = []
-        var n = 0
-        for vc in verified {
-            n += 1
-            if n % 50 == 0 { progress = t.progConfirming(n, verified.count) }
-            var confident = vc.spread <= contentConfidentSpread
-            if confident {
-                let fs = await LookAlikeScanner.featureSpread(
-                    vc.photos.map(\.uuid), asset: { lookup[$0] }, manager: imageManager)
-                confident = (fs != nil && fs! <= contentConfidentFeature)
-            }
+        for (idx, vc) in verified.enumerated() {
+            let confident = neuralConfident.contains(idx)
             var g = ReviewGroup(photos: vc.photos, keeperID: keeper(vc.photos).uuid)
             g.confidentDupe = confident
             g.keepAll = !confident            // uncertain groups: keep all, pre-mark nothing

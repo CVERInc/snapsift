@@ -340,6 +340,15 @@ struct L10n: Sendable {
         case .zhTW: return "確認候選群組 \(i)/\(total)…"
         }
     }
+    /// Variant that also reports how many thumbnails were actually readable —
+    /// distinguishes "slow but working" from "can't read the library".
+    func progConfirming(_ i: Int, _ total: Int, loaded: Int) -> String {
+        switch language {
+        case .en: return "Confirming \(i)/\(total) · read \(loaded)…"
+        case .ja: return "確認中 \(i)/\(total) · 読込 \(loaded)…"
+        case .zhTW: return "確認 \(i)/\(total) · 讀到 \(loaded)…"
+        }
+    }
     /// Shown when oversized dHash-collision clusters were skipped (noise guard).
     func progSkippedClusters(_ n: Int) -> String {
         switch language {
