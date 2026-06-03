@@ -51,6 +51,18 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.reefGround)
+        // The permission screen has no main toolbar, so carry the language menu
+        // here too — otherwise a non-default-language user is stuck on the gate.
+        .toolbar { ToolbarItem { languageMenu } }
+    }
+
+    /// Globe language switcher, shared by the gate and the main toolbar.
+    private var languageMenu: some View {
+        Menu {
+            Picker("", selection: $langRaw) {
+                ForEach(Language.allCases) { l in Text(l.endonym).tag(l.rawValue) }
+            }.pickerStyle(.inline)
+        } label: { Image(systemName: "globe") }
     }
 
     // MARK: main split
@@ -537,13 +549,7 @@ struct ContentView: View {
             .help(t.helpTitle())
             .keyboardShortcut("?", modifiers: .command)
         }
-        ToolbarItem {
-            Menu {
-                Picker("", selection: $langRaw) {
-                    ForEach(Language.allCases) { l in Text(l.endonym).tag(l.rawValue) }
-                }.pickerStyle(.inline)
-            } label: { Image(systemName: "globe") }
-        }
+        ToolbarItem { languageMenu }
     }
 
     private func runDelete() async {

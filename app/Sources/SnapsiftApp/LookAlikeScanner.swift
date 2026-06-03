@@ -23,6 +23,12 @@ enum LookAlikeScanner {
                      featureDistance: Float = 0.15,   // ≈0.0 for a true re-saved
                                                       // copy; 0.15 excludes merely
                                                       // similar shots (cats ≈0.3)
+                     maxCluster: Int = 80,            // a stage-1 dHash cluster
+                                                      // bigger than this is noise
+                                                      // (solid colours, screenshots
+                                                      // all colliding). Confirming
+                                                      // it means thousands of neural
+                                                      // prints + O(n²) — the freeze.
                      progress: @escaping (String) -> Void) async -> [[String]] {
 
         // Stage 1 — dHash all thumbnails (tiny 9×8 requests, fast).
@@ -43,20 +49,33 @@ enum LookAlikeScanner {
         for a in assets { byID[a.localIdentifier] = a }
 
         var confirmed: [[String]] = []
+        var skipped = 0
         var c = 0
         for cand in candidates {
             c += 1
             if c % 25 == 0 { progress(t.progConfirming(c, candidates.count)) }
-            var prints: [(String, VNFeaturePrintObservation)] = []
-            for id in cand {
-                if let a = byID[id], let fp = await featurePrint(a, manager) {
-                    prints.append((id, fp))
+
+            // Oversized dHash clusters are collision noise; confirming them is the
+            // O(n²) + thousands-of-fetches freeze. Skip rather than hang.
+            if cand.count > maxCluster { skipped += 1; continue }
+
+            // Compute the members' neural prints concurrently — one cluster at a
+            // time keeps total in-flight work bounded by the cluster size.
+            let prints: [(String, VNFeaturePrintObservation)] =
+                await withTaskGroup(of: (String, VNFeaturePrintObservation)?.self) { group in
+                    for id in cand {
+                        guard let a = byID[id] else { continue }
+                        group.addTask { (await featurePrint(a, manager)).map { (id, $0) } }
+                    }
+                    var acc: [(String, VNFeaturePrintObservation)] = []
+                    for await r in group { if let r { acc.append(r) } }
+                    return acc
                 }
-            }
             for group in unionByDistance(prints, maxDistance: featureDistance) where group.count >= 2 {
                 confirmed.append(group)
             }
         }
+        if skipped > 0 { progress(t.progSkippedClusters(skipped)) }
         return confirmed
     }
 
@@ -108,6 +127,41 @@ enum LookAlikeScanner {
             }
         }
         return out
+    }
+
+    /// Largest pairwise neural feature-print distance among a cluster's frames —
+    /// the precise "how different are these really?" that dHash can't give. Used
+    /// to confirm a dHash-confident burst is genuinely near-identical *before* the
+    /// scan dares pre-mark a frame for deletion. Returns nil if any frame can't be
+    /// read; the caller treats nil as "uncertain — don't pre-mark", same as a
+    /// distance over threshold. "Same framing, subject moved" lands ≈0.2+; a true
+    /// held-shutter duplicate ≈0.0.
+    static func featureSpread(_ uuids: [String],
+                              asset: @escaping (String) -> PHAsset?,
+                              manager: PHCachingImageManager) async -> Float? {
+        let prints: [VNFeaturePrintObservation?] =
+            await withTaskGroup(of: VNFeaturePrintObservation?.self) { group in
+                for id in uuids {
+                    group.addTask {
+                        guard let a = asset(id) else { return nil }
+                        return await featurePrint(a, manager)
+                    }
+                }
+                var acc: [VNFeaturePrintObservation?] = []
+                for await r in group { acc.append(r) }
+                return acc
+            }
+        let fps = prints.compactMap { $0 }
+        guard fps.count == uuids.count else { return nil }   // any unreadable → uncertain
+        var maxD: Float = 0
+        for i in 0..<fps.count {
+            for j in (i + 1)..<fps.count {
+                var d: Float = 0
+                do { try fps[i].computeDistance(&d, to: fps[j]) } catch { continue }
+                maxD = max(maxD, d)
+            }
+        }
+        return maxD
     }
 
     // MARK: - feature-print union

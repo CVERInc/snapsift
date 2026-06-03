@@ -57,6 +57,13 @@ final class LibraryModel: ObservableObject {
     /// bursts: median spread 3, p75 6 — so ≤6 captures ~86% of genuine
     /// held-shutter bursts while pose/subject changes (≈12) fall to "you decide".
     var contentConfidentSpread = 6
+    /// Before a frame is *ever* pre-marked for deletion, the cluster must also be
+    /// neurally near-identical, not just dHash-close (dHash can't tell "same
+    /// framing, subject moved" from a true duplicate). A pre-marked deletion needs
+    /// max pairwise feature distance ≤ this; a moved-subject pair (≈0.2+) falls to
+    /// "you decide". Tight on purpose — wrongly deleting a keeper breaks trust,
+    /// while missing a duplicate is harmless.
+    var contentConfidentFeature: Float = 0.10
     @Published var refiningFaces = false
     /// True once a face-refinement pass has re-picked keepers.
     @Published var facesApplied = false
@@ -181,13 +188,27 @@ final class LibraryModel: ObservableObject {
             clustered, asset: { lookup[$0] }, manager: imageManager,
             maxDistance: contentMaxDistance, t: t
         ) { [weak self] msg in Task { @MainActor in self?.progress = msg } }
-        groups = verified.map { vc in
-            let confident = vc.spread <= contentConfidentSpread
+        // Neural gate: a cluster only stays "confident" (→ pre-marks a deletion)
+        // if Apple's feature print agrees it's near-identical. dHash is cheap
+        // recall; this is the precise arbiter that keeps the scan from ever
+        // suggesting you delete a frame that's actually a different moment.
+        var built: [ReviewGroup] = []
+        var n = 0
+        for vc in verified {
+            n += 1
+            if n % 50 == 0 { progress = t.progConfirming(n, verified.count) }
+            var confident = vc.spread <= contentConfidentSpread
+            if confident {
+                let fs = await LookAlikeScanner.featureSpread(
+                    vc.photos.map(\.uuid), asset: { lookup[$0] }, manager: imageManager)
+                confident = (fs != nil && fs! <= contentConfidentFeature)
+            }
             var g = ReviewGroup(photos: vc.photos, keeperID: keeper(vc.photos).uuid)
             g.confidentDupe = confident
             g.keepAll = !confident            // uncertain groups: keep all, pre-mark nothing
-            return g
+            built.append(g)
         }
+        groups = built
     }
 
     /// Build a Core Photo from a PHAsset, enriched with Apple quality + size.

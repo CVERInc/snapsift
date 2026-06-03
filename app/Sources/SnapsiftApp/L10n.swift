@@ -340,6 +340,14 @@ struct L10n: Sendable {
         case .zhTW: return "確認候選群組 \(i)/\(total)…"
         }
     }
+    /// Shown when oversized dHash-collision clusters were skipped (noise guard).
+    func progSkippedClusters(_ n: Int) -> String {
+        switch language {
+        case .en: return "Skipped \(n) oversized noise clusters"
+        case .ja: return "過大なノイズ群 \(n) 件をスキップ"
+        case .zhTW: return "略過 \(n) 個過大的噪音群"
+        }
+    }
     func progFaces(_ i: Int, _ total: Int) -> String {
         switch language {
         case .en: return "Analysing faces \(i)/\(total)…"
