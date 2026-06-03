@@ -9,11 +9,19 @@ struct L10n: Sendable {
 
     // MARK: chrome
 
-    func videos() -> String {
+    /// Scope tab: which media the scans operate on. "篩" echoes the app's name.
+    func scopePhotosOnly() -> String {
         switch language {
-        case .en: return "Videos"
-        case .ja: return "動画"
-        case .zhTW: return "影片"
+        case .en: return "Photos only"
+        case .ja: return "写真のみ"
+        case .zhTW: return "只篩照片"
+        }
+    }
+    func scopeWithVideo() -> String {
+        switch language {
+        case .en: return "Include videos"
+        case .ja: return "動画も含める"
+        case .zhTW: return "包含影片"
         }
     }
     func scan() -> String {

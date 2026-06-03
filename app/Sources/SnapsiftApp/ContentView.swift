@@ -59,13 +59,26 @@ struct ContentView: View {
         NavigationSplitView {
             sidebar
         } detail: {
-            detail
+            // Help docks as a manual trailing column rather than .inspector —
+            // .inspector quietly forces the NavigationSplitView toolbar into its
+            // overflow (»), collapsing the action buttons regardless of window
+            // width. A plain HStack keeps the toolbar laid out normally.
+            HStack(spacing: 0) {
+                detail
+                    .frame(maxWidth: .infinity)
+                    .safeAreaInset(edge: .top) { scopeBar }
+                if showHelp {
+                    Divider()
+                    helpPanel
+                        .frame(width: 290)
+                        .transition(.move(edge: .trailing))
+                }
+            }
         }
         .toolbar { toolbar }
         .safeAreaInset(edge: .bottom) { statusBar }
         .overlay(alignment: .top) { bannerView }
         .overlay { if previewID != nil { previewOverlay } }
-        .inspector(isPresented: $showHelp) { helpPanel }
     }
 
     @ViewBuilder private var previewOverlay: some View {
@@ -83,16 +96,20 @@ struct ContentView: View {
         }
     }
 
-    /// The keyboard cheat sheet, docked as a non-modal panel on the trailing
-    /// edge (native `.inspector`). It stays put — fills the otherwise-empty right
-    /// side — until "?" is pressed again or the ✕ is tapped.
+    private func toggleHelp() {
+        withAnimation(.easeOut(duration: 0.18)) { showHelp.toggle() }
+    }
+
+    /// The keyboard cheat sheet, docked as a non-modal column on the trailing
+    /// edge. It stays put — filling the otherwise-empty right side — until "?" is
+    /// pressed again or the ✕ is tapped.
     private var helpPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text(t.helpTitle()).font(.title3.bold()).foregroundStyle(Color.reefMint)
                     Spacer()
-                    Button { showHelp = false } label: {
+                    Button { toggleHelp() } label: {
                         Image(systemName: "xmark.circle.fill").font(.title3)
                     }
                     .buttonStyle(.plain)
@@ -111,8 +128,8 @@ struct ContentView: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxHeight: .infinity)
         .background(Color.reefDeep)
-        .inspectorColumnWidth(min: 240, ideal: 290, max: 380)
     }
 
     private var sidebar: some View {
@@ -162,7 +179,7 @@ struct ContentView: View {
     // MARK: keyboard — list zone
 
     private func handleListKey(_ kp: KeyPress, _ proxy: ScrollViewProxy) -> KeyPress.Result {
-        if kp.characters == "?" { showHelp.toggle(); return .handled }
+        if kp.characters == "?" { toggleHelp(); return .handled }
         switch kp.key {
         case .upArrow:    moveSelection(-1, proxy); return .handled
         case .downArrow:  moveSelection(1, proxy);  return .handled
@@ -194,7 +211,7 @@ struct ContentView: View {
     // MARK: keyboard — grid zone
 
     private func handleGridKey(_ kp: KeyPress) -> KeyPress.Result {
-        if kp.characters == "?" { showHelp.toggle(); return .handled }
+        if kp.characters == "?" { toggleHelp(); return .handled }
         guard let g = selectedGroup else { return .ignored }
         switch kp.key {
         case .leftArrow, .upArrow:   moveFrame(-1, g); return .handled
@@ -328,7 +345,7 @@ struct ContentView: View {
                 .focusable()
                 .focusEffectDisabled()
                 .onKeyPress { kp in
-                    if kp.characters == "?" { showHelp.toggle(); return .handled }
+                    if kp.characters == "?" { toggleHelp(); return .handled }
                     return .ignored
                 }
         } else {
@@ -417,6 +434,26 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: scope tab (which media the scans cover)
+
+    /// A persistent segmented tab atop the detail pane — photos only, or photos
+    /// plus videos. It's a scope (what to scan over), distinct from the three
+    /// task cards. Changing it applies to the next scan you run.
+    private var scopeBar: some View {
+        Picker("", selection: $model.includeVideo) {
+            Text(t.scopePhotosOnly()).tag(false)
+            Text(t.scopeWithVideo()).tag(true)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .disabled(model.isScanning)
+        .frame(maxWidth: 320)
+        .padding(.horizontal, 16).padding(.vertical, 7)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial)
+        .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .bottom)
+    }
+
     // MARK: status bar (reclaim summary)
 
     private var statusBar: some View {
@@ -494,16 +531,11 @@ struct ContentView: View {
             .keyboardShortcut(.delete, modifiers: .command)
         }
         ToolbarItem {
-            Button { showHelp.toggle() } label: {
+            Button { toggleHelp() } label: {
                 Image(systemName: "questionmark.circle")
             }
             .help(t.helpTitle())
             .keyboardShortcut("?", modifiers: .command)
-        }
-        ToolbarItem {
-            Menu {
-                Toggle(t.videos(), isOn: $model.includeVideo)
-            } label: { Image(systemName: "slider.horizontal.3") }
         }
         ToolbarItem {
             Menu {
