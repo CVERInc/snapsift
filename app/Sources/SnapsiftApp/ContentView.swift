@@ -65,7 +65,7 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom) { statusBar }
         .overlay(alignment: .top) { bannerView }
         .overlay { if previewID != nil { previewOverlay } }
-        .overlay { if showHelp { helpOverlay } }
+        .inspector(isPresented: $showHelp) { helpPanel }
     }
 
     @ViewBuilder private var previewOverlay: some View {
@@ -83,24 +83,36 @@ struct ContentView: View {
         }
     }
 
-    private var helpOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.78).ignoresSafeArea().onTapGesture { showHelp = false }
-            VStack(alignment: .leading, spacing: 10) {
-                Text(t.helpTitle()).font(.title3.bold()).foregroundStyle(Color.reefMint)
+    /// The keyboard cheat sheet, docked as a non-modal panel on the trailing
+    /// edge (native `.inspector`). It stays put — fills the otherwise-empty right
+    /// side — until "?" is pressed again or the ✕ is tapped.
+    private var helpPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(t.helpTitle()).font(.title3.bold()).foregroundStyle(Color.reefMint)
+                    Spacer()
+                    Button { showHelp = false } label: {
+                        Image(systemName: "xmark.circle.fill").font(.title3)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.reefTextDim)
+                    .help(t.helpClose())
+                }
                 ForEach(t.helpRows(), id: \.0) { row in
-                    HStack(alignment: .top, spacing: 14) {
+                    HStack(alignment: .top, spacing: 12) {
                         Text(row.0).font(.system(.callout, design: .monospaced).weight(.semibold))
-                            .foregroundStyle(.white).frame(width: 140, alignment: .leading)
+                            .foregroundStyle(.white).frame(width: 116, alignment: .leading)
                         Text(row.1).foregroundStyle(Color.reefText)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
-            .padding(26)
-            .background(Color.reefDeep, in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.reefBorder))
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .onKeyPress(.escape) { showHelp = false; return .handled }
+        .background(Color.reefDeep)
+        .inspectorColumnWidth(min: 240, ideal: 290, max: 380)
     }
 
     private var sidebar: some View {
@@ -309,7 +321,16 @@ struct ContentView: View {
                 .focused($gridFocused)
                 .onKeyPress { handleGridKey($0) }
         } else if model.groups.isEmpty {
+            // Focusable so the bare "?" cheat-sheet key works on the first-run
+            // screen too (the sidebar isn't focusable until groups exist). The
+            // focus ring is suppressed so the whole pane doesn't glow.
             onboarding
+                .focusable()
+                .focusEffectDisabled()
+                .onKeyPress { kp in
+                    if kp.characters == "?" { showHelp.toggle(); return .handled }
+                    return .ignored
+                }
         } else {
             placeholder("photo.on.rectangle.angled", t.selectCluster())
         }
@@ -327,6 +348,7 @@ struct ContentView: View {
     /// First-run call to action in the big detail pane — gives a brand-new user
     /// an obvious place to start instead of hunting for a toolbar icon.
     private var onboarding: some View {
+      ScrollView {
         VStack(spacing: 16) {
             if model.isScanning || model.refiningFaces {
                 ProgressView().controlSize(.large).tint(.reefMint)
@@ -343,7 +365,7 @@ struct ContentView: View {
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Color.reefMint)
                     .padding(.top, 2)
-                HStack(spacing: 14) {
+                LazyVGrid(columns: onboardColumns, spacing: 14) {
                     onboardCard(title: t.scan(), icon: "sparkle.magnifyingglass",
                                 caption: t.tipScan(), prominent: true) {
                         Task { await model.scan(t) }
@@ -357,12 +379,21 @@ struct ContentView: View {
                         Task { await model.scanSimilarSets(t) }
                     }
                 }
+                .frame(maxWidth: 720)
                 .padding(.top, 8)
+                .padding(.horizontal, 24)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.reefGround)
+        .frame(maxWidth: .infinity, minHeight: 460)
+        .padding(.vertical, 24)
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(Color.reefGround)
     }
+
+    /// Adaptive columns so the start cards wrap (and never clip) as the window
+    /// narrows: three across when there's room, down to one on a slim pane.
+    private let onboardColumns = [GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 14)]
 
     private func onboardCard(title: String, icon: String, caption: String,
                              prominent: Bool, action: @escaping () -> Void) -> some View {
@@ -377,7 +408,7 @@ struct ContentView: View {
                     .foregroundStyle(prominent ? Color.reefGround.opacity(0.8) : Color.reefTextDim)
                     .multilineTextAlignment(.center).lineLimit(3)
             }
-            .frame(width: 220, height: 140)
+            .frame(maxWidth: .infinity, minHeight: 140)
             .padding(12)
             .background(prominent ? Color.reefMint : Color.reefDeep,
                         in: RoundedRectangle(cornerRadius: 14))
@@ -461,6 +492,13 @@ struct ContentView: View {
             .tint(.reefRed)
             .disabled(model.totalDeletions == 0 || deleting)
             .keyboardShortcut(.delete, modifiers: .command)
+        }
+        ToolbarItem {
+            Button { showHelp.toggle() } label: {
+                Image(systemName: "questionmark.circle")
+            }
+            .help(t.helpTitle())
+            .keyboardShortcut("?", modifiers: .command)
         }
         ToolbarItem {
             Menu {

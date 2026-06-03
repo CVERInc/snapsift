@@ -93,6 +93,13 @@ struct L10n: Sendable {
         case .zhTW: return "鍵盤快捷"
         }
     }
+    func helpClose() -> String {
+        switch language {
+        case .en: return "Close"
+        case .ja: return "閉じる"
+        case .zhTW: return "關閉"
+        }
+    }
     /// (keys, what it does) rows for the keyboard cheat sheet.
     func helpRows() -> [(String, String)] {
         switch language {
