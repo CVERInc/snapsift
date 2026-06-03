@@ -153,14 +153,11 @@ struct L10n: Sendable {
     }
 
     // MARK: permission gate
+    //
+    // The request screen reuses privacyPitch() for its body — it's the same
+    // promise as the first-run onboarding, so there's only one set of strings to
+    // keep honest. The "Grant access" button supplies the call to action.
 
-    func gateRequestBody() -> String {
-        switch language {
-        case .en: return "snapsift is a native Swift app that runs entirely on your Mac. Grant Photos access and every bit of analysis happens on-device and offline — no network, nothing sent anywhere."
-        case .ja: return "snapsift はこの Mac だけで動くネイティブ Swift アプリです。写真へのアクセスを許可すれば、分析はすべて端末上・オフラインで行われます — ネットワーク不要、データ送信なし。"
-        case .zhTW: return "snapsift 是純本機的原生 Swift App。授權相簿後，所有分析都在這台 Mac 上離線完成 —— 不需網路、不收發任何資料。"
-        }
-    }
     func gateRequestButton() -> String {
         switch language {
         case .en: return "Grant access"

@@ -26,7 +26,7 @@ struct ContentView: View {
             case .denied, .restricted:
                 gate(message: t.gateDeniedBody(), button: nil)
             default:
-                gate(message: t.gateRequestBody(), button: t.gateRequestButton())
+                gate(message: t.privacyPitch(), button: t.gateRequestButton())
             }
         }
         .frame(minWidth: 820, minHeight: 560)
