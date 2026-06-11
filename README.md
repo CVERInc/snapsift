@@ -1,8 +1,13 @@
 # snapsift
 
-> Sift the near-duplicate snaps Apple's built-in Duplicates detector misses
-> — specifically the "manual burst" sequences where someone held the shutter
+> **Sift the near-duplicate snaps Apple's built-in Duplicates detector misses** —
+> specifically the "manual burst" sequences where someone held the shutter
 > and got 10+ near-identical shots.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform: macOS](https://img.shields.io/badge/Platform-macOS-black?logo=apple)](https://www.apple.com/macos/)
+
+🌐 日本語の紹介 → [cver.net/ja-jp/oss/snapsift](https://cver.net/ja-jp/oss/snapsift) ・ 繁體中文介紹 → [cver.net/zh-tw/oss/snapsift](https://cver.net/zh-tw/oss/snapsift)
 
 Built for a real Photos library of 120K+ photos where Apple's `Duplicates`
 album was already empty, yet thousands of sub-second-apart shots remained.
@@ -157,7 +162,7 @@ unit tests; only the thin SQLite/thumbnail IO layer touches a real library.
 - [x] Smarter keeper: weighted by `ZCOMPUTEDASSETATTRIBUTES` sharpness /
   framing / timing scores Apple already computes — `pick.py`.
 - [ ] Package as a single `snapsift` console entry point.
-- [ ] Face-aware keeper: prefer the frame where everyone's eyes are open.
+- [x] Face-aware keeper: prefer the frame where everyone's eyes are open.
 
 ## License
 
