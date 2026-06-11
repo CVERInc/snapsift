@@ -98,7 +98,7 @@ struct ContentView: View {
             ZStack {
                 Color.black.opacity(0.82).ignoresSafeArea()
                 AssetThumbnail(asset: model.asset(for: previewID), manager: model.imageManager, side: 760)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .shadow(radius: 30)
             }
             .contentShape(Rectangle())
@@ -287,7 +287,7 @@ struct ContentView: View {
         .contentShape(Rectangle())
         .onTapGesture { categorySelection = c.id }
         .listRowBackground(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(sel ? Color.reefTeal : Color.clear)
                 .padding(.vertical, 1)
         )
@@ -313,7 +313,7 @@ struct ContentView: View {
         .contentShape(Rectangle())
         .onTapGesture { selection = g.id }
         .listRowBackground(
-            RoundedRectangle(cornerRadius: 6)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(sel ? Color.reefTeal : Color.clear)
                 .padding(.vertical, 1)
         )
@@ -440,8 +440,8 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, minHeight: 140)
             .padding(12)
             .background(prominent ? Color.reefMint : Color.reefDeep,
-                        in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.reefBorder, lineWidth: prominent ? 0 : 1))
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.reefBorder, lineWidth: prominent ? 0 : 1))
         }
         .buttonStyle(.plain)
     }
@@ -642,11 +642,11 @@ struct GroupReview: View {
                 .padding(.horizontal, 6).padding(.vertical, 5)
         }
         .background(Color.reefDeep)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(border, lineWidth: 2))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(border, lineWidth: 2))
         .overlay {
             if focused {
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(.white, style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
                     .padding(2)
             }
@@ -669,7 +669,7 @@ struct GroupReview: View {
         Text(text).font(.system(size: 10, weight: .bold))
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(bg).foregroundStyle(fg)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 }
 
@@ -695,13 +695,13 @@ struct CategoryBrowse: View {
                 LazyVGrid(columns: columns, spacing: 10) {
                     ForEach(shown) { p in
                         AssetThumbnail(asset: model.asset(for: p.uuid), manager: model.imageManager, side: 130)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                             .overlay(alignment: .topTrailing) {
                                 if p.favorite {
                                     Text("★").font(.system(size: 10, weight: .bold))
                                         .padding(3).background(Color.reefAmber)
                                         .foregroundStyle(Color(hex: 0x1a1203))
-                                        .clipShape(RoundedRectangle(cornerRadius: 4)).padding(4)
+                                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous)).padding(4)
                                 }
                             }
                     }
