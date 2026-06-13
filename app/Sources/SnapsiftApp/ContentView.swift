@@ -95,16 +95,12 @@ struct ContentView: View {
 
     @ViewBuilder private var previewOverlay: some View {
         if let previewID {
-            ZStack {
-                Color.black.opacity(0.82).ignoresSafeArea()
-                AssetThumbnail(asset: model.asset(for: previewID), manager: model.imageManager, side: 760)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                    .shadow(radius: 30)
+            // Space opens this — the one deliberate moment we DO fetch the full
+            // original from iCloud, so the user can zoom in and be sure before
+            // deciding keep/delete. The scan itself stays fully offline.
+            BigPreview(asset: model.asset(for: previewID), manager: model.imageManager, t: t) {
+                self.previewID = nil
             }
-            .contentShape(Rectangle())
-            .onTapGesture { self.previewID = nil }
-            .onKeyPress { _ in self.previewID = nil; return .handled }
-            .focusable()
         }
     }
 
@@ -203,6 +199,7 @@ struct ContentView: View {
         case "j": moveSelection(1, proxy);  return .handled
         case "l": enterGrid(); return .handled
         case "a": if let id = selection { model.toggleKeepAll(group: id) }; return .handled
+        case "d": if let id = selection { model.toggleDeleteAll(group: id) }; return .handled
         case let c where c.count == 1 && c.first!.isNumber:
             if let n = Int(c), n >= 1 { pickNth(n - 1) }; return .handled
         default: return .ignored
@@ -237,6 +234,7 @@ struct ContentView: View {
         case "l", "j": moveFrame(1, g);  return .handled
         case " ":      previewID = focusedFrame; return .handled
         case "a":      model.toggleKeepAll(group: g.id); return .handled
+        case "d":      model.toggleDeleteAll(group: g.id); return .handled
         default: return .ignored
         }
     }
@@ -595,6 +593,13 @@ struct GroupReview: View {
                             .help(t.tipAppleRanked())
                     }
                     Spacer()
+                    Button { model.toggleDeleteAll(group: group.id) } label: {
+                        Label(group.deleteAll ? t.deletingAll() : t.deleteAll(),
+                              systemImage: group.deleteAll ? "trash.fill" : "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(group.deleteAll ? .reefRed : .reefTeal)
+                    .help(t.tipDeleteAll())
                     Button { model.toggleKeepAll(group: group.id) } label: {
                         Label(group.keepAll ? t.keepingAll() : t.keepAll(),
                               systemImage: group.keepAll ? "checkmark.circle.fill" : "checkmark.circle")

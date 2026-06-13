@@ -117,8 +117,9 @@ struct L10n: Sendable {
             ("→ / l / ⏎", "Enter the frames"),
             ("← → / h l", "Move between frames"),
             ("⏎", "Keep the focused frame"),
-            ("Space", "Big preview"),
+            ("Space", "Full-res preview · zoom"),
             ("A", "Keep the whole group"),
+            ("D", "Delete the whole group"),
             ("Esc", "Back to the list"),
             ("⌘1 ⌘2 ⌘3", "Scan / Look-alikes / Similar sets"),
             ("⌘⌫", "Delete the marked photos"),
@@ -130,8 +131,9 @@ struct L10n: Sendable {
             ("→ / l / ⏎", "写真へ入る"),
             ("← → / h l", "写真を移動"),
             ("⏎", "選択中の1枚を残す"),
-            ("スペース", "大きくプレビュー"),
+            ("スペース", "原本プレビュー・拡大"),
             ("A", "グループ全部を残す"),
+            ("D", "グループ全部を削除"),
             ("Esc", "リストへ戻る"),
             ("⌘1 ⌘2 ⌘3", "スキャン / そっくり / テーマ別"),
             ("⌘⌫", "選択した写真を削除"),
@@ -143,8 +145,9 @@ struct L10n: Sendable {
             ("→ / l / ⏎", "進入格子"),
             ("← → / h l", "格子間移動"),
             ("⏎", "把焦點這張設成保留"),
-            ("空白", "大圖預覽"),
+            ("空白", "原檔預覽・可放大"),
             ("A", "整群保留"),
+            ("D", "整群刪除"),
             ("Esc", "回到清單"),
             ("⌘1 ⌘2 ⌘3", "掃描／找相似／同主題"),
             ("⌘⌫", "刪掉標記的照片"),
@@ -411,6 +414,37 @@ struct L10n: Sendable {
         case .en: return "Keep every frame in this group — delete nothing"
         case .ja: return "このグループは全て残す（何も削除しない）"
         case .zhTW: return "這群全部保留 — 不刪任何一張"
+        }
+    }
+    /// Big-preview loader caption — shows the iCloud download % while fetching
+    /// the full-resolution original.
+    func previewLoading(_ pct: Double) -> String {
+        let p = Int(pct * 100)
+        switch language {
+        case .en: return (pct > 0 && pct < 1) ? "Fetching original from iCloud… \(p)%" : "Loading…"
+        case .ja: return (pct > 0 && pct < 1) ? "iCloud から原本を取得中… \(p)%" : "読み込み中…"
+        case .zhTW: return (pct > 0 && pct < 1) ? "從 iCloud 取回原檔… \(p)%" : "載入中…"
+        }
+    }
+    func deleteAll() -> String {
+        switch language {
+        case .en: return "Delete all"
+        case .ja: return "すべて削除"
+        case .zhTW: return "整群刪除"
+        }
+    }
+    func deletingAll() -> String {
+        switch language {
+        case .en: return "Deleting all"
+        case .ja: return "すべて削除"
+        case .zhTW: return "整群刪除中"
+        }
+    }
+    func tipDeleteAll() -> String {
+        switch language {
+        case .en: return "Delete every frame in this group (favourites stay safe)"
+        case .ja: return "このグループを全て削除（お気に入りは保護）"
+        case .zhTW: return "這群全部刪除（★ 最愛仍受保護）"
         }
     }
 

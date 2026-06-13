@@ -13,17 +13,24 @@ struct ReviewGroup: Identifiable {
     /// are perceptually similar but that the user wants to keep in full (e.g.
     /// several poses of the same subject).
     var keepAll = false
+    /// Human override: the user looked and wants the whole group gone (machine
+    /// kept them apart, but to the eye they're redundant — or simply unwanted).
+    /// Favourites are still protected. Mutually exclusive with ``keepAll``.
+    var deleteAll = false
     /// A confident, near-identical burst (members barely differ) → safe to
     /// pre-mark for deletion. When false the frames differ enough that they may
     /// be distinct moments, so we don't pre-mark anything (keepAll defaults on).
     var confidentDupe = true
 
-    func isKeeper(_ p: Photo) -> Bool { !keepAll && p.uuid == keeperID }
-    func isDelete(_ p: Photo) -> Bool { !keepAll && p.uuid != keeperID && !p.favorite }
+    func isKeeper(_ p: Photo) -> Bool { !keepAll && !deleteAll && p.uuid == keeperID }
+    func isDelete(_ p: Photo) -> Bool {
+        guard !keepAll, !p.favorite else { return false }   // ★ favourites never deleted
+        return deleteAll || p.uuid != keeperID
+    }
     var spanSec: Double { (photos.last?.takenAt ?? 0) - (photos.first?.takenAt ?? 0) }
     var hasFavorite: Bool { photos.contains { $0.favorite } }
     var hasVideo: Bool { photos.contains { $0.kind == 1 } }
-    var deletionIDs: [String] { keepAll ? [] : photos.filter(isDelete).map(\.uuid) }
+    var deletionIDs: [String] { photos.filter(isDelete).map(\.uuid) }
 }
 
 /// A semantic bucket from the "Similar sets" pass: all photos Vision tagged with
@@ -342,6 +349,7 @@ final class LibraryModel: ObservableObject {
     func promote(group groupID: ReviewGroup.ID, to photoID: String) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
         groups[i].keepAll = false
+        groups[i].deleteAll = false
         groups[i].keeperID = photoID
     }
 
@@ -349,6 +357,15 @@ final class LibraryModel: ObservableObject {
     func toggleKeepAll(group groupID: ReviewGroup.ID) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
         groups[i].keepAll.toggle()
+        if groups[i].keepAll { groups[i].deleteAll = false }   // mutually exclusive
+    }
+
+    /// Human override: delete the whole group (favourites stay protected).
+    /// Toggles back off; clears keepAll so the two never both apply.
+    func toggleDeleteAll(group groupID: ReviewGroup.ID) {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        groups[i].deleteAll.toggle()
+        if groups[i].deleteAll { groups[i].keepAll = false }
     }
 
     /// Combined keeper key: favorites, then face score, then Apple quality, then
