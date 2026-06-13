@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/Platform-macOS-black?logo=apple)](https://www.apple.com/macos/)
 
-🌐 日本語の紹介 → [cver.net/ja-jp/oss/snapsift](https://cver.net/ja-jp/oss/snapsift) ・ 繁體中文介紹 → [cver.net/zh-tw/oss/snapsift](https://cver.net/zh-tw/oss/snapsift)
+🌐 [日本語](https://cver.net/ja-jp/oss/snapsift) · [한국어](https://cver.net/ko-kr/oss/snapsift) · [繁體中文](https://cver.net/zh-tw/oss/snapsift)
 
 Built for a real Photos library of 120K+ photos where Apple's `Duplicates`
 album was already empty, yet thousands of sub-second-apart shots remained.
