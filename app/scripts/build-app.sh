@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build a double-clickable snapsift.app from the SwiftUI target — no Xcode needed.
 #
-#   ./scripts/build-app.sh                       # release → ~/Desktop/snapsift.app
+#   ./scripts/build-app.sh                       # release → ~/Applications/snapsift.app
 #   ./scripts/build-app.sh debug                 # faster debug build
 #   ./scripts/build-app.sh release /tmp/snapsift.app   # custom destination
 #
@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIG="${1:-release}"
-DEST="${2:-$HOME/Desktop/snapsift.app}"
+DEST="${2:-$HOME/Applications/snapsift.app}"
 
 echo "▸ swift build -c $CONFIG --product SnapsiftApp"
 swift build -c "$CONFIG" --product SnapsiftApp
