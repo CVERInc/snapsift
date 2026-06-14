@@ -146,7 +146,10 @@ struct ContentView: View {
             sidebarList
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
-                .background(Color.reefDeep)
+                // Frosted teal sidebar: keep the reef tint, gain depth (chrome,
+                // not canvas — the photo grid stays fully opaque for color truth).
+                .background(Color.reefDeep.opacity(0.55))
+                .background(.ultraThinMaterial)
                 .navigationTitle("snapsift")
                 .frame(minWidth: 240)
                 .overlay { if model.groups.isEmpty && model.categories.isEmpty { emptyState } }
@@ -438,9 +441,7 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, minHeight: 140)
             .padding(12)
-            .background(prominent ? Color.reefMint : Color.reefDeep,
-                        in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.reefBorder, lineWidth: prominent ? 0 : 1))
+            .onboardCardSurface(prominent: prominent)
         }
         .buttonStyle(.plain)
     }
@@ -717,5 +718,18 @@ struct CategoryBrowse: View {
         }
         .background(Color.reefGround)
         .navigationTitle(category.display)
+    }
+}
+
+private extension View {
+    /// Start-card surface: the prominent card is a solid mint CTA; the rest are
+    /// Signet frosted-glass cards. Both share the design-system card radius.
+    @ViewBuilder func onboardCardSurface(prominent: Bool) -> some View {
+        if prominent {
+            background(Color.reefMint,
+                       in: RoundedRectangle(cornerRadius: CVERRadius.card, style: .continuous))
+        } else {
+            liquidGlassCard(cornerRadius: CVERRadius.card)
+        }
     }
 }
