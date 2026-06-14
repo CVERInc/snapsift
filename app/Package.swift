@@ -15,13 +15,21 @@ let package = Package(
         .executable(name: "SnapsiftApp", targets: ["SnapsiftApp"]),
         .executable(name: "SnapsiftTests", targets: ["SnapsiftTests"]),
     ],
+    dependencies: [
+        // Signet — CVER's shared design system (palette, tokens, glass surfaces, chrome).
+        // Pinned to main / latest per the in-house dep convention.
+        .package(url: "https://github.com/CVERInc/signet", branch: "main"),
+    ],
     targets: [
         .target(name: "SnapsiftCore"),
         // SwiftUI app over the same engine: PhotoKit enumeration + thumbnails +
-        // native deletion, with the reef family theme.
+        // native deletion, with the reef family theme (now from CVERKit).
         // SwiftUI app: PhotoKit's escaping, non-Sendable callbacks fit the
         // tools-5.9 default (Swift 5) language mode cleanly.
-        .executableTarget(name: "SnapsiftApp", dependencies: ["SnapsiftCore"]),
+        .executableTarget(name: "SnapsiftApp", dependencies: [
+            "SnapsiftCore",
+            .product(name: "Signet", package: "signet"),
+        ]),
         .executableTarget(name: "SnapsiftTests", dependencies: ["SnapsiftCore"]),
     ]
 )

@@ -1,6 +1,7 @@
 import SwiftUI
 import Photos
 import SnapsiftCore
+import Signet
 
 struct ContentView: View {
     @StateObject private var model = LibraryModel()

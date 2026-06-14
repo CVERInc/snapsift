@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import Signet
 
 /// Loads a PHAsset thumbnail via PHImageManager — so it works even when the
 /// original has been evicted by iCloud "Optimize Storage" (it fetches on
