@@ -420,13 +420,20 @@ final class LibraryModel: ObservableObject {
         }
 
         // Drop deleted frames; a group that loses all but its keeper is resolved.
+        // Crucially, carry the user's review decisions forward: a "keep all" or
+        // "delete all" group, or a group the scan flagged as not-confident, must
+        // keep that state. Rebuilding with defaults silently re-marks protected
+        // photos for deletion on the next pass — an accuracy/trust red line.
         let removed = Set(ids)
-        groups = groups.compactMap { g in
-            let remaining = g.photos.filter { !removed.contains($0.uuid) }
-            guard remaining.count >= 2 else { return nil }
-            let keeperID = remaining.contains { $0.uuid == g.keeperID }
-                ? g.keeperID : keeper(remaining).uuid
-            return ReviewGroup(photos: remaining, keeperID: keeperID)
+        groups = groups.compactMap { g -> ReviewGroup? in
+            guard let r = regroupAfterDeletion(photos: g.photos,
+                                               keeperID: g.keeperID,
+                                               removed: removed) else { return nil }
+            var ng = ReviewGroup(photos: r.photos, keeperID: r.keeperID)
+            ng.keepAll = g.keepAll
+            ng.deleteAll = g.deleteAll
+            ng.confidentDupe = g.confidentDupe
+            return ng
         }
         return assets.count
     }

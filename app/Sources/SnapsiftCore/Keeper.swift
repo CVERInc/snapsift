@@ -42,3 +42,23 @@ public func deletions(_ group: [Photo]) -> [Photo] {
     let keep = keeper(group)
     return group.filter { $0.uuid != keep.uuid && !$0.favorite }
 }
+
+/// The carry-forward state of a reviewed cluster after some of its frames were
+/// deleted. `nil` `photos` means the cluster is resolved (fewer than two frames
+/// remain) and should be dropped entirely.
+///
+/// Re-grouping after a delete pass MUST preserve the user's per-group review
+/// decisions. Dropping them silently flips a "keep all" group back into one that
+/// pre-marks its non-keepers for deletion — the exact opposite of what the user
+/// asked, and a trust/accuracy red line (it would silently re-mark protected
+/// photos). This pure helper keeps `keepAll` / `deleteAll` / `confidentDupe`
+/// intact and only re-derives the keeper when the previous one was deleted.
+public func regroupAfterDeletion(photos: [Photo],
+                                 keeperID: String,
+                                 removed: Set<String>) -> (photos: [Photo], keeperID: String)? {
+    let remaining = photos.filter { !removed.contains($0.uuid) }
+    guard remaining.count >= 2 else { return nil }
+    let newKeeperID = remaining.contains { $0.uuid == keeperID } ? keeperID
+        : keeper(remaining).uuid
+    return (remaining, newKeeperID)
+}

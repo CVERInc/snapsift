@@ -64,6 +64,37 @@ do {
 }
 check(deletions([ph(1, 0, fav: true), ph(2, 0, fav: true)]).isEmpty,
       "all-favorite cluster deletes nothing")
+
+print("Regroup-after-deletion")
+do {
+    // A "keep all" group deletes nothing, so its frames all survive a delete
+    // pass. Re-grouping must keep the original keeper and NOT touch membership —
+    // the App layer then carries keepAll forward so it can't be re-marked.
+    let g = [ph(1, 0), ph(2, 1), ph(3, 2)]
+    let r = regroupAfterDeletion(photos: g, keeperID: "U2", removed: [])
+    check(r != nil && r!.photos.map(\.uuid) == ["U1", "U2", "U3"] && r!.keeperID == "U2",
+          "untouched group keeps its keeper and members")
+}
+do {
+    // The surviving keeper stays the keeper even when other frames are deleted.
+    let g = [ph(1, 0), ph(2, 1), ph(3, 2)]
+    let r = regroupAfterDeletion(photos: g, keeperID: "U1", removed: ["U3"])
+    check(r != nil && r!.photos.map(\.uuid) == ["U1", "U2"] && r!.keeperID == "U1",
+          "surviving keeper preserved")
+}
+do {
+    // If the previous keeper was the one deleted, re-derive from the remainder.
+    let g = [ph(1, 0, quality: 0.1), ph(2, 1, quality: 0.9), ph(3, 2, quality: 0.5)]
+    let r = regroupAfterDeletion(photos: g, keeperID: "U1", removed: ["U1"])
+    check(r != nil && r!.photos.map(\.uuid) == ["U2", "U3"] && r!.keeperID == "U2",
+          "deleted keeper re-derived from remainder")
+}
+do {
+    // Fewer than two frames left → the group is resolved and dropped.
+    let g = [ph(1, 0), ph(2, 1)]
+    check(regroupAfterDeletion(photos: g, keeperID: "U1", removed: ["U2"]) == nil,
+          "group resolved to <2 frames is dropped")
+}
 // Quality quantisation must match the Python CLI's pick.quality_bucket exactly
 // (shared round-half-up floor(q*10+0.5)). Swift's default .rounded() was
 // round-half-away, so 0.25 → 3 here but Python's banker's round() → 2: the CLI
