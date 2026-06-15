@@ -14,8 +14,21 @@ dependencies = []
 hash = ["Pillow>=9"]
 dev = ["pytest>=7", "Pillow>=9"]
 
+[project.scripts]
+# Single console entry point: `snapsift scan|pick|delete|hash|review`.
+snapsift = "cli:main"
+
 [project.urls]
 Homepage = "https://github.com/CVERInc/snapsift"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# The tools are flat top-level modules (scan.py, pick.py, …) rather than a
+# package, so tell the build backend to ship exactly them as py-modules.
+[tool.setuptools]
+py-modules = ["cli", "scan", "pick", "hash", "review"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

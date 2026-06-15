@@ -96,6 +96,19 @@ Real-world hit rate on a 120K-photo library:
 
 ## Usage
 
+Each tool is a standalone script (`python3 scan.py …`). If you `pip install .`,
+the same five tools are also reachable through one console command — handy for
+discovery and scripting:
+
+```bash
+snapsift --help            # lists: scan · pick · delete · hash · review
+snapsift scan   --gap-sec 5    # == python3 scan.py   --gap-sec 5
+snapsift pick   --max-groups 10
+snapsift delete delete-uuids.txt
+```
+
+The per-script form below works identically — pick whichever you prefer.
+
 ```bash
 # 1. Scan
 python3 scan.py \
@@ -161,7 +174,7 @@ unit tests; only the thin SQLite/thumbnail IO layer touches a real library.
   `review.py`.
 - [x] Smarter keeper: weighted by `ZCOMPUTEDASSETATTRIBUTES` sharpness /
   framing / timing scores Apple already computes — `pick.py`.
-- [ ] Package as a single `snapsift` console entry point.
+- [x] Package as a single `snapsift` console entry point — `cli.py`.
 - [x] Face-aware keeper: prefer the frame where everyone's eyes are open.
 
 ## License
