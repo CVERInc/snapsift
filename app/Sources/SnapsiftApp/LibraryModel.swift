@@ -373,7 +373,7 @@ final class LibraryModel: ObservableObject {
     private func faceRankKey(_ p: Photo) -> (Int, Int, Int, Int, Int, Double) {
         (p.favorite ? 1 : 0,
          Int(((faceScores[p.uuid] ?? 0) * 100).rounded()),
-         Int((p.quality * 10).rounded()),
+         qualityBucket(p.quality),
          utiPriority[p.uti] ?? 0,
          p.size,
          -p.takenAt)

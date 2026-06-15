@@ -1,6 +1,6 @@
 """Keeper / delete-selection logic from pick.py — favorites are sacred."""
 import pytest
-from pick import keeper, rank
+from pick import keeper, rank, quality_bucket
 
 
 def ph(uuid, *, uti="public.jpeg", size=1_000_000, taken_at=0.0,
@@ -67,3 +67,32 @@ def test_rank_is_total_order():
     # rank must return comparable tuples for max()/sorted()
     group = [ph("a", quality=0.5), ph("b", quality=0.9), ph("c", fav=True)]
     assert sorted(group, key=rank)[-1]["uuid"] == "c"
+
+
+# ── quality quantisation: must match the Swift app exactly ───────────────────
+# These pin the SHARED round-half-up rule (floor(q*10 + 0.5)). Python's old
+# round(q, 1) used banker's rounding (0.25 → 0.2) while Swift's .rounded() used
+# round-half-away (0.25 → 0.3), so the CLI and the app could pick DIFFERENT
+# keepers on a half-tenth quality boundary. The bucket must be the same integer
+# on both sides; Swift's mirror lives in app/.../SnapsiftCore/Keeper.swift.
+
+def test_quality_bucket_round_half_up_matches_swift():
+    # The exact half-boundaries where banker's vs away-from-zero diverged.
+    assert quality_bucket(0.05) == 1
+    assert quality_bucket(0.15) == 2
+    assert quality_bucket(0.25) == 3     # banker's round() gave 0.2 → 2 (the bug)
+    assert quality_bucket(0.35) == 4
+    assert quality_bucket(0.45) == 5
+    assert quality_bucket(-0.15) == -1
+    assert quality_bucket(0.0) == 0
+    assert quality_bucket(None) == 0
+
+
+def test_keeper_half_boundary_quality_is_deterministic():
+    # Reproduces the cross-impl keeper disagreement: under the OLD code Python
+    # bucketed 0.25 and 0.22 both to 0.2 (tie → larger 'b' won) while Swift put
+    # 0.25 in a higher bucket ('a' won). The shared rule now buckets 0.25 → 3,
+    # 0.22 → 2, so BOTH keep 'a' — one answer, no platform split.
+    a = ph("a", uti="public.heic", size=1_000_000, taken_at=0.0, quality=0.25)
+    b = ph("b", uti="public.heic", size=2_000_000, taken_at=1.0, quality=0.22)
+    assert keeper([a, b])["uuid"] == "a"

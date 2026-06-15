@@ -64,6 +64,16 @@ do {
 }
 check(deletions([ph(1, 0, fav: true), ph(2, 0, fav: true)]).isEmpty,
       "all-favorite cluster deletes nothing")
+// Quality quantisation must match the Python CLI's pick.quality_bucket exactly
+// (shared round-half-up floor(q*10+0.5)). Swift's default .rounded() was
+// round-half-away, so 0.25 → 3 here but Python's banker's round() → 2: the CLI
+// and the app could pick different keepers on a half-tenth boundary.
+check(qualityBucket(0.05) == 1 && qualityBucket(0.15) == 2 && qualityBucket(0.25) == 3
+      && qualityBucket(0.35) == 4 && qualityBucket(0.45) == 5 && qualityBucket(-0.15) == -1,
+      "quality bucket = round-half-up (matches Python)")
+check(keeper([ph(1, 0, size: 1_000_000, uti: "public.heic", quality: 0.25),
+              ph(2, 1, size: 2_000_000, uti: "public.heic", quality: 0.22)]).uuid == "U1",
+      "half-boundary quality keeper matches Python")
 
 print("Hashing")
 check(hamming(0b1010, 0b1010) == 0 && hamming(0b1010, 0b1000) == 1

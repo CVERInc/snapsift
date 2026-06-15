@@ -12,13 +12,20 @@ public let utiPriority: [String: Int] = [
     "com.apple.quicktime-movie": 70,
 ]
 
+/// Quantise a quality score to integer tenths with deterministic, platform-
+/// independent round-half-up — `floor(q*10 + 0.5)`. This is the SAME rule the
+/// Python CLI uses (`pick.quality_bucket`), NOT Swift's default round-half-away
+/// `.rounded()`, so the app and the CLI always agree on the keeper. Quantising
+/// means noise-level quality differences fall through to format/size.
+public func qualityBucket(_ quality: Double) -> Int { Int((quality * 10 + 0.5).rounded(.down)) }
+
 /// Sort key for "most worth keeping" — higher is better. Favorites first, then
 /// Apple's quality score quantised to 1 decimal (so noise-level differences
 /// don't override the format/size signal), then UTI priority, file size, and
 /// finally the earliest take. Mirrors Python `pick.rank`.
 public func rankKey(_ p: Photo) -> (Int, Int, Int, Int, Double) {
     (p.favorite ? 1 : 0,
-     Int((p.quality * 10).rounded()),
+     qualityBucket(p.quality),
      utiPriority[p.uti] ?? 0,
      p.size,
      -p.takenAt)

@@ -29,7 +29,7 @@ Usage:
 """
 
 from __future__ import annotations
-import argparse, json, sys
+import argparse, json, math, sys
 from pathlib import Path
 from collections import Counter
 
@@ -48,6 +48,16 @@ UTI_PRIORITY = {
 }
 
 
+def quality_bucket(quality: float) -> int:
+    """Quantise a quality score to integer tenths with deterministic, platform-
+    independent round-half-up. This is the SAME rule the Swift app uses
+    (`Keeper.rankKey`): a pure IEEE-754 `floor(q*10 + 0.5)`, NOT Python's
+    banker's `round(q, 1)` — so the CLI and the app always pick the same keeper.
+    Quantising means noise-level quality differences fall through to the
+    format/size tiebreakers instead of splitting hairs."""
+    return math.floor((quality or 0.0) * 10 + 0.5)
+
+
 def rank(p: dict) -> tuple:
     """Sort key for 'most worth keeping' — higher is better.
 
@@ -57,7 +67,7 @@ def rank(p: dict) -> tuple:
     """
     return (
         1 if p.get("favorite") else 0,
-        round(p.get("quality") or 0.0, 1),
+        quality_bucket(p.get("quality") or 0.0),
         UTI_PRIORITY.get(p["uti"], 0),
         p["size"],
         -p["taken_at"],
