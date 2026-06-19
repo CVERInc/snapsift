@@ -549,6 +549,12 @@ struct ContentView: View {
 
     // MARK: status bar (reclaim summary)
 
+    /// Build version pulled from CFBundleShortVersionString at runtime — single
+    /// source of truth is Info.plist; no literal that can drift.
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
+
     private var statusBar: some View {
         HStack(spacing: 10) {
             if model.totalDeletions > 0 {
@@ -561,12 +567,13 @@ struct ContentView: View {
                 Label(t.appleRanked(), systemImage: "wand.and.stars")
                     .foregroundStyle(Color.reefMint)
             }
+            Text("snapsift v\(appVersion)")
+                .foregroundStyle(Color.reefTextDim.opacity(0.55))
         }
         .font(.caption)
         .padding(.horizontal, 14).padding(.vertical, 7)
         .background(.ultraThinMaterial)
         .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .top)
-        .opacity(model.totalDeletions > 0 || model.qualityAvailable ? 1 : 0)
     }
 
     @ViewBuilder private var bannerView: some View {
