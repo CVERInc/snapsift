@@ -46,8 +46,13 @@ struct ContentView: View {
                 .foregroundStyle(Color.reefTextDim)
                 .frame(maxWidth: 440)
             if let button {
-                Button(button) { Task { await model.requestAccess() } }
-                    .buttonStyle(.borderedProminent)
+                Button(button) {
+                    Task {
+                        await model.requestAccess()
+                        model.loadAlbums()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -92,6 +97,7 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom) { statusBar }
         .overlay(alignment: .top) { bannerView }
         .overlay { if previewID != nil { previewOverlay } }
+        .onAppear { model.loadAlbums() }
     }
 
     @ViewBuilder private var previewOverlay: some View {
@@ -446,24 +452,96 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: scope tab (which media the scans cover)
+    // MARK: scope bar (media type + source picker)
 
-    /// A persistent segmented tab atop the detail pane — photos only, or photos
-    /// plus videos. It's a scope (what to scan over), distinct from the three
-    /// task cards. Changing it applies to the next scan you run.
+    /// The persistent bar atop the detail pane. Two controls side by side:
+    ///   • Segmented tab — Photos only vs. Photos + Videos (applies to next scan)
+    ///   • Source menu — Whole Library or a specific album
+    /// Both are disabled while a scan is running.
     private var scopeBar: some View {
-        Picker("", selection: $model.includeVideo) {
-            Text(t.scopePhotosOnly()).tag(false)
-            Text(t.scopeWithVideo()).tag(true)
+        HStack(spacing: 10) {
+            Picker("", selection: $model.includeVideo) {
+                Text(t.scopePhotosOnly()).tag(false)
+                Text(t.scopeWithVideo()).tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(model.isScanning)
+            .frame(maxWidth: 260)
+
+            sourceMenu
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .disabled(model.isScanning)
-        .frame(maxWidth: 320)
         .padding(.horizontal, 16).padding(.vertical, 7)
         .frame(maxWidth: .infinity)
         .background(.ultraThinMaterial)
         .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .bottom)
+    }
+
+    /// A compact menu that lets the user pick "Whole Library" or a specific album.
+    /// Albums are loaded once when access is granted; the list is sorted A→Z.
+    private var sourceMenu: some View {
+        Menu {
+            // Whole-library option at the top, always visible.
+            Button {
+                model.scanSource = .wholeLibrary
+            } label: {
+                if case .wholeLibrary = model.scanSource {
+                    Label(t.sourceWholeLibrary(), systemImage: "checkmark")
+                } else {
+                    Text(t.sourceWholeLibrary())
+                }
+            }
+
+            if !model.albums.isEmpty {
+                Divider()
+                ForEach(model.albums) { album in
+                    Button {
+                        model.scanSource = .album(album)
+                    } label: {
+                        if case .album(let current) = model.scanSource, current.id == album.id {
+                            Label(albumMenuLabel(album), systemImage: "checkmark")
+                        } else {
+                            Text(albumMenuLabel(album))
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "rectangle.stack")
+                    .font(.caption)
+                Text(sourceMenuTitle)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(Color.reefMint)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(Color.reefDeep.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(Color.reefBorder, lineWidth: 1)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .disabled(model.isScanning)
+        .help(t.sourcePickerLabel())
+    }
+
+    private var sourceMenuTitle: String {
+        switch model.scanSource {
+        case .wholeLibrary: return t.sourceWholeLibrary()
+        case .album(let a): return a.title
+        }
+    }
+
+    private func albumMenuLabel(_ album: AlbumItem) -> String {
+        if album.estimatedCount >= 0 {
+            return "\(album.title)  (\(album.estimatedCount))"
+        }
+        return album.title
     }
 
     // MARK: status bar (reclaim summary)

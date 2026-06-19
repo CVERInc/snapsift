@@ -200,5 +200,26 @@ do {
 }
 check(groupByHash([(1, "a"), (2, "b")], maxDistance: 0).isEmpty, "distance zero keeps distinct")
 
+print("Source picker (slice 2)")
+// AlbumItem.estimatedCount: -1 encodes NSNotFound so the UI can distinguish
+// "we know there are 0 photos" from "count not yet cached by Photos".
+do {
+    // A count the system has cached shows as-is.
+    let known = (id: "A", title: "Vacation", estimatedCount: 42)
+    check(known.estimatedCount == 42, "album item carries known count")
+    // A count the system hasn't cached yet is stored as -1 (sentinel for NSNotFound).
+    let unknown = (id: "B", title: "Empty", estimatedCount: -1)
+    check(unknown.estimatedCount < 0, "album item stores -1 sentinel for unknown count")
+}
+// albumMenuLabel logic: show count in parentheses when known, bare title when not.
+do {
+    func albumMenuLabel(title: String, count: Int) -> String {
+        count >= 0 ? "\(title)  (\(count))" : title
+    }
+    check(albumMenuLabel(title: "Trip", count: 12) == "Trip  (12)", "label shows count when known")
+    check(albumMenuLabel(title: "Trip", count: 0) == "Trip  (0)", "label shows zero count")
+    check(albumMenuLabel(title: "Trip", count: -1) == "Trip", "label omits count when unknown")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

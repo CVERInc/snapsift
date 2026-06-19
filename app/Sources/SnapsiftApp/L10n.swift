@@ -7,6 +7,33 @@ struct L10n: Sendable {
     let language: Language
     init(_ language: Language) { self.language = language }
 
+    // MARK: source picker
+
+    /// Menu label for the whole-library option.
+    func sourceWholeLibrary() -> String {
+        switch language {
+        case .en: return "Whole Library"
+        case .ja: return "ライブラリ全体"
+        case .zhTW: return "整個圖庫"
+        }
+    }
+    /// Picker header — appears as a section title above the album list.
+    func sourcePickerLabel() -> String {
+        switch language {
+        case .en: return "Source"
+        case .ja: return "ソース"
+        case .zhTW: return "來源"
+        }
+    }
+    /// Shown when the album has no cached count yet.
+    func albumCountUnknown() -> String {
+        switch language {
+        case .en: return "—"
+        case .ja: return "—"
+        case .zhTW: return "—"
+        }
+    }
+
     // MARK: chrome
 
     /// Scope tab: which media the scans operate on. "篩" echoes the app's name.
@@ -372,6 +399,15 @@ struct L10n: Sendable {
         case .en: return "Verifying clusters \(i)/\(total)…"
         case .ja: return "グループを確認中 \(i)/\(total)…"
         case .zhTW: return "驗證群組 \(i)/\(total)…"
+        }
+    }
+    /// Shown when the chosen album can no longer be resolved (deleted between
+    /// showing the picker and starting the scan).
+    func progAlbumGone() -> String {
+        switch language {
+        case .en: return "Album not found — it may have been deleted. Choose a source and try again."
+        case .ja: return "アルバムが見つかりません（削除された可能性があります）。ソースを選び直して再試行してください。"
+        case .zhTW: return "找不到相簿（可能已被刪除）。請重新選擇來源後再試。"
         }
     }
     func contentCheck() -> String {

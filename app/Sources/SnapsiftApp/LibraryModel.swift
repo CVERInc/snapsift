@@ -55,6 +55,11 @@ final class LibraryModel: ObservableObject {
     @Published var includeVideo = false
     /// True once Apple's quality scores have been read from the library sidecar.
     @Published var qualityAvailable = false
+    /// Where the next scan reads its working set from. Default = whole library.
+    @Published var scanSource: ScanSource = .wholeLibrary
+    /// User albums fetched once after authorization (title + estimated count).
+    /// Empty until `loadAlbums()` is called.
+    @Published var albums: [AlbumItem] = []
 
     /// Max dHash Hamming distance for two burst frames to count as the same
     /// scene. Generous enough to keep real bursts (slight motion) together,
@@ -141,6 +146,12 @@ final class LibraryModel: ObservableObject {
         auth = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
     }
 
+    /// Populate `albums` from the Photos library (title + estimated count only —
+    /// no pixels, no network). Call once after the user grants access.
+    func loadAlbums() {
+        albums = fetchUserAlbums()
+    }
+
     func scan(_ t: L10n) async {
         guard !isScanning else { return }
         isScanning = true
@@ -157,7 +168,14 @@ final class LibraryModel: ObservableObject {
         if !includeVideo {
             opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         }
-        let result = PHAsset.fetchAssets(with: opts)
+        // Scope to the chosen source (whole library or a single album). If the
+        // album can no longer be resolved (deleted since the picker showed it),
+        // bail early rather than silently falling back to the whole library.
+        guard let result = fetchAssets(source: scanSource, options: opts) else {
+            progress = t.progAlbumGone()
+            isScanning = false
+            return
+        }
 
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)
@@ -301,7 +319,7 @@ final class LibraryModel: ObservableObject {
     }
 
     /// L3 cross-time pass: dHash-candidate + neural feature-print confirmation
-    /// over the whole library. Heavier than the burst scan — shows progress.
+    /// over the chosen source. Heavier than the burst scan — shows progress.
     func scanLookAlikes(_ t: L10n) async {
         guard !isScanning else { return }
         isScanning = true
@@ -316,7 +334,11 @@ final class LibraryModel: ObservableObject {
         if !includeVideo {
             opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         }
-        let result = PHAsset.fetchAssets(with: opts)
+        guard let result = fetchAssets(source: scanSource, options: opts) else {
+            progress = t.progAlbumGone()
+            isScanning = false
+            return
+        }
         var assets: [PHAsset] = []
         var map: [String: PHAsset] = [:]
         assets.reserveCapacity(result.count)
@@ -348,7 +370,7 @@ final class LibraryModel: ObservableObject {
 
     /// "Similar sets": find sets of photos you took of the same thing — several
     /// near-same shots (like three poses of the same cat) — by clustering the
-    /// whole library on visual similarity (looser than Look-alikes), then naming
+    /// chosen source on visual similarity (looser than Look-alikes), then naming
     /// each set from its Vision content tags (prettified by apfel if available).
     /// No deletion — this is for browsing/curation.
     func scanSimilarSets(_ t: L10n) async {
@@ -366,7 +388,11 @@ final class LibraryModel: ObservableObject {
         if !includeVideo {
             opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         }
-        let result = PHAsset.fetchAssets(with: opts)
+        guard let result = fetchAssets(source: scanSource, options: opts) else {
+            progress = t.progAlbumGone()
+            isScanning = false
+            return
+        }
         var assets: [PHAsset] = []
         var map: [String: PHAsset] = [:]
         assets.reserveCapacity(result.count)
