@@ -13,9 +13,13 @@ func check(_ condition: Bool, _ label: String) {
 
 func ph(_ pk: Int, _ takenAt: Double, w: Int = 4032, h: Int = 3024,
         size: Int = 2_000_000, uti: String = "public.heic",
-        fav: Bool = false, quality: Double = 0) -> Photo {
+        fav: Bool = false, quality: Double = 0,
+        edited: Bool = false, isDocument: Bool = false,
+        sharpness: Double = 0, originalCamera: Bool = false) -> Photo {
     Photo(uuid: "U\(pk)", filename: "IMG_\(pk).heic", takenAt: takenAt,
-          width: w, height: h, size: size, uti: uti, favorite: fav, quality: quality)
+          width: w, height: h, size: size, uti: uti, favorite: fav, quality: quality,
+          edited: edited, isDocument: isDocument, sharpness: sharpness,
+          originalCamera: originalCamera)
 }
 func sizes(_ g: [[Photo]]) -> [Int] { g.map(\.count) }
 
@@ -64,6 +68,71 @@ do {
 }
 check(deletions([ph(1, 0, fav: true), ph(2, 0, fav: true)]).isEmpty,
       "all-favorite cluster deletes nothing")
+
+print("Protection class (slice 1)")
+// An EDITED frame (user adjustments) is sacred — never in deletions, exactly
+// like a favorite. The keeper is the unedited high-quality original, but the
+// edited frame survives anyway because the user deliberately worked on it.
+do {
+    let deleted = Set(deletions([ph(1, 0, size: 9_000_000, uti: "public.heic"),
+                                 ph(2, 0, edited: true), ph(3, 0)]).map(\.uuid))
+    check(!deleted.contains("U2") && deleted.contains("U3"), "edited frame never deleted")
+}
+// A DOCUMENT / scan / receipt is a utility photo people keep deliberately.
+do {
+    let deleted = Set(deletions([ph(1, 0, size: 9_000_000, uti: "public.heic"),
+                                 ph(2, 0, isDocument: true), ph(3, 0)]).map(\.uuid))
+    check(!deleted.contains("U2") && deleted.contains("U3"), "document frame never deleted")
+}
+check(deletions([ph(1, 0, edited: true), ph(2, 0, isDocument: true)]).isEmpty,
+      "all-protected cluster deletes nothing")
+
+print("Blur is within-group ranking only (slice 1)")
+// Within an interchangeable group the sharper frame wins as keeper…
+check(keeper([ph(1, 0, sharpness: 0.2), ph(2, 0, sharpness: 0.9)]).uuid == "U2",
+      "sharper frame is keeper within a group")
+// …but sharpness sits BELOW quality/format, so it can't override the real
+// quality signal (no hair-splitting on blur when a frame is clearly better).
+check(keeper([ph(1, 0, uti: "public.heic", quality: 0.9, sharpness: 0.0),
+              ph(2, 0, uti: "public.jpeg", quality: 0.1, sharpness: 1.0)]).uuid == "U1",
+      "sharpness does not override quality")
+// CRITICAL: a lone blurry photo (single-member group) is never touched — and
+// blur never expands the deletion set. The blurriest frame, if it's the only
+// non-keeper of a real multi-frame cluster, is the ONLY thing blur can cost.
+do {
+    let blurry = ph(1, 0, sharpness: 0.0)
+    check(deletions([blurry]).isEmpty, "lone blurry photo is never deleted")
+    // Same two frames, only sharpness differs → deletion COUNT is unchanged
+    // (still exactly the one non-keeper); blur only reorders who keeps.
+    let sharpKeeper = Set(deletions([ph(1, 0, sharpness: 0.9), ph(2, 1, sharpness: 0.1)]).map(\.uuid))
+    let blurKeeper  = Set(deletions([ph(1, 0, sharpness: 0.1), ph(2, 1, sharpness: 0.9)]).map(\.uuid))
+    check(sharpKeeper == ["U2"] && blurKeeper == ["U1"],
+          "blur reorders keeper but never grows the deletion set")
+}
+
+print("Social re-save vs original (slice 1)")
+// An original camera capture (intact EXIF Make/Model) beats a re-compressed
+// social-app re-save even if the re-save is a newer/larger file. newer != better.
+check(keeper([ph(1, 0, size: 1_000_000, originalCamera: true),
+              ph(2, 1, size: 5_000_000, originalCamera: false)]).uuid == "U1",
+      "original-camera frame beats larger social re-save")
+// …but the protection guarantee still trumps ranking: a social re-save that the
+// user EDITED is still never deleted.
+do {
+    let deleted = Set(deletions([ph(1, 0, originalCamera: true),
+                                 ph(2, 1, edited: true, originalCamera: false)]).map(\.uuid))
+    check(!deleted.contains("U2"), "edited social re-save still protected")
+}
+// PENDING (originalCamera App detection): the Core ranking above is fully wired,
+// but PhotoFlags.originalCamera() still returns false (no cheap on-device EXIF
+// Make/Model in the current Photo-building path — see its TODO). So in the app
+// today every frame has originalCamera == false and this signal is a no-op that
+// falls through to format/size, exactly as before this slice — never a delete
+// trigger, so it's safe. This assertion pins that with-all-false fallback;
+// flip it (and wire real EXIF) when the App detector lands.
+check(keeper([ph(1, 0, size: 5_000_000, originalCamera: false),
+              ph(2, 1, size: 1_000_000, originalCamera: false)]).uuid == "U1",
+      "originalCamera all-false → falls through to size (App detection pending)")
 
 print("Regroup-after-deletion")
 do {

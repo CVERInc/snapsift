@@ -626,7 +626,10 @@ struct GroupReview: View {
         let keep = group.isKeeper(p)
         let del = group.isDelete(p)
         let focused = p.uuid == focusedFrame
-        let border: Color = keep ? .reefGreen : (p.favorite ? .reefAmber : (del ? .reefRed : .clear))
+        // Protected frames (favorite / edited / document) are never deletable —
+        // show them amber, never red, so the UI can't imply a protected frame
+        // will be removed.
+        let border: Color = keep ? .reefGreen : (p.isProtected ? .reefAmber : (del ? .reefRed : .clear))
         return VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 AssetThumbnail(asset: model.asset(for: p.uuid), manager: model.imageManager, side: 160)
@@ -660,7 +663,7 @@ struct GroupReview: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { model.promote(group: group.id, to: p.uuid) }
-        .help(p.favorite ? t.tipFavorite() : (keep ? t.tipKeeper() : t.tipDelete()))
+        .help(p.isProtected ? t.tipFavorite() : (keep ? t.tipKeeper() : t.tipDelete()))
     }
 
     private func badge(keep: Bool, del: Bool, fav: Bool) -> some View {

@@ -19,16 +19,61 @@ public let utiPriority: [String: Int] = [
 /// means noise-level quality differences fall through to format/size.
 public func qualityBucket(_ quality: Double) -> Int { Int((quality * 10 + 0.5).rounded(.down)) }
 
-/// Sort key for "most worth keeping" — higher is better. Favorites first, then
-/// Apple's quality score quantised to 1 decimal (so noise-level differences
-/// don't override the format/size signal), then UTI priority, file size, and
-/// finally the earliest take. Mirrors Python `pick.rank`.
-public func rankKey(_ p: Photo) -> (Int, Int, Int, Int, Double) {
-    (p.favorite ? 1 : 0,
-     qualityBucket(p.quality),
-     utiPriority[p.uti] ?? 0,
-     p.size,
-     -p.takenAt)
+/// Sort key for "most worth keeping" — higher is better. Mirrors Python
+/// `pick.rank` exactly (the CLI and the app MUST pick the same keeper).
+///
+/// Priority, highest first:
+///   1. favorite           — the user starred it; always wins.
+///   2. quality (bucketed) — Apple's own aesthetic score, quantised to tenths so
+///                           noise-level differences fall through to the signals
+///                           below rather than splitting hairs.
+///   3. originalCamera     — a genuine camera capture (intact EXIF Make/Model)
+///                           beats an EXIF-stripped social-app re-save. Sits
+///                           ABOVE sharpness/format/size on purpose: "newer or
+///                           larger" must NOT beat "the real original", and a
+///                           re-compressed re-save is rarely the better keeper.
+///   4. sharpness (bucketed) — within an otherwise-tied group, prefer the
+///                           crisper frame. Quantised to tenths like quality so
+///                           sensor noise can't dominate, and slotted BELOW
+///                           quality so it can never override the real quality
+///                           signal. This is the ONLY thing sharpness does: it
+///                           reorders the keeper within a real multi-frame group.
+///                           It is NEVER a standalone delete trigger (see
+///                           `deletions`, which keys off `isProtected`, not blur).
+///   5. UTI priority       — original-format files (HEIC > JPG > …).
+///   6. file size          — bigger same-format file = less compression.
+///   7. earliest take      — the original capture if all else is equal.
+///
+/// A named `Comparable` struct (not a tuple — Swift tuples only compare up to six
+/// elements) so the seven-way priority above is lexicographic and explicit.
+public struct RankKey: Comparable {
+    public let favorite: Int
+    public let quality: Int
+    public let originalCamera: Int
+    public let sharpness: Int
+    public let uti: Int
+    public let size: Int
+    public let negTakenAt: Double
+
+    public static func < (a: RankKey, b: RankKey) -> Bool {
+        if a.favorite != b.favorite { return a.favorite < b.favorite }
+        if a.quality != b.quality { return a.quality < b.quality }
+        if a.originalCamera != b.originalCamera { return a.originalCamera < b.originalCamera }
+        if a.sharpness != b.sharpness { return a.sharpness < b.sharpness }
+        if a.uti != b.uti { return a.uti < b.uti }
+        if a.size != b.size { return a.size < b.size }
+        return a.negTakenAt < b.negTakenAt
+    }
+}
+
+public func rankKey(_ p: Photo) -> RankKey {
+    RankKey(favorite: p.favorite ? 1 : 0,
+            quality: qualityBucket(p.quality),
+            originalCamera: p.originalCamera ? 1 : 0,
+            sharpness: qualityBucket(p.sharpness),
+            uti: utiPriority[p.uti] ?? 0,
+            size: p.size,
+            negTakenAt: -p.takenAt)
 }
 
 /// The single frame to keep from a cluster.
@@ -36,11 +81,17 @@ public func keeper(_ group: [Photo]) -> Photo {
     group.max { rankKey($0) < rankKey($1) }!
 }
 
-/// UUIDs to delete from a cluster: everything that is neither the keeper nor a
-/// favorite. Favorites are sacred — an all-favorite cluster deletes nothing.
+/// Photos to delete from a cluster: everything that is neither the keeper nor a
+/// PROTECTED frame. A frame is protected if it is a favorite, an edited frame,
+/// or a document/scan (`Photo.isProtected`) — such frames are sacred and NEVER
+/// deleted, so a cluster of all-protected frames deletes nothing. This single
+/// predicate is the whole app's protection guard; the App layer's `ReviewGroup`
+/// routes through `isProtected` too so a protected frame can never end up
+/// pre-marked anywhere. Ranking signals (sharpness, originalCamera) only choose
+/// WHICH frame is the keeper — they can never put a frame into this set.
 public func deletions(_ group: [Photo]) -> [Photo] {
     let keep = keeper(group)
-    return group.filter { $0.uuid != keep.uuid && !$0.favorite }
+    return group.filter { $0.uuid != keep.uuid && !$0.isProtected }
 }
 
 /// The carry-forward state of a reviewed cluster after some of its frames were

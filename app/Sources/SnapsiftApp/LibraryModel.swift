@@ -4,7 +4,8 @@ import AppKit
 import SnapsiftCore
 
 /// One reviewable near-duplicate cluster: the Core photos plus the currently
-/// chosen keeper. Favorites are never deletable regardless of keeper choice.
+/// chosen keeper. Protected frames (favorite / edited / document — `Photo
+/// .isProtected`) are never deletable regardless of keeper choice.
 struct ReviewGroup: Identifiable {
     let id = UUID()
     let photos: [Photo]
@@ -24,7 +25,7 @@ struct ReviewGroup: Identifiable {
 
     func isKeeper(_ p: Photo) -> Bool { !keepAll && !deleteAll && p.uuid == keeperID }
     func isDelete(_ p: Photo) -> Bool {
-        guard !keepAll, !p.favorite else { return false }   // ★ favourites never deleted
+        guard !keepAll, !p.isProtected else { return false }   // ★ protected (favorite/edited/document) never deleted
         return deleteAll || p.uuid != keeperID
     }
     var spanSec: Double { (photos.last?.takenAt ?? 0) - (photos.first?.takenAt ?? 0) }
@@ -213,10 +214,17 @@ final class LibraryModel: ObservableObject {
         for (k, idx) in confidentIdx.enumerated() {
             if let fs = spreads[k], fs <= contentConfidentFeature { neuralConfident.insert(idx) }
         }
+        // Fill pixel-based flags (document protection + sharpness ranking) over
+        // just the verified cluster members, then build each group from the
+        // enriched photos so the keeper respects sharpness and documents are
+        // protected. Index-aligned with `verified` so the confident flags line up.
+        let flagged = await enrichFlags(verified.map(\.photos)) { done, total in
+            self.progress = t.progVerifying(done, total)
+        }
         var built: [ReviewGroup] = []
-        for (idx, vc) in verified.enumerated() {
+        for (idx, photos) in flagged.enumerated() {
             let confident = neuralConfident.contains(idx)
-            var g = ReviewGroup(photos: vc.photos, keeperID: keeper(vc.photos).uuid)
+            var g = ReviewGroup(photos: photos, keeperID: keeper(photos).uuid)
             g.confidentDupe = confident
             g.keepAll = !confident            // uncertain groups: keep all, pre-mark nothing
             built.append(g)
@@ -230,12 +238,66 @@ final class LibraryModel: ObservableObject {
         let e = enr[QualitySidecar.zuuid(fromLocalIdentifier: id)]
         let uti = (asset.value(forKey: "uniformTypeIdentifier") as? String) ?? ""
         let name = (asset.value(forKey: "filename") as? String) ?? ""
+        // Cheap metadata-only flags computed here; the pixel-based ones
+        // (isDocument, sharpness) are filled in by enrichFlags() over cluster
+        // members only, so Vision never runs on the whole library.
         return Photo(uuid: id, filename: name,
                      takenAt: asset.creationDate?.timeIntervalSince1970 ?? 0,
                      width: asset.pixelWidth, height: asset.pixelHeight,
                      size: e?.size ?? 0, uti: uti,
                      kind: asset.mediaType == .video ? 1 : 0,
-                     favorite: asset.isFavorite, quality: e?.quality ?? 0)
+                     favorite: asset.isFavorite, quality: e?.quality ?? 0,
+                     edited: PhotoFlags.edited(asset),
+                     originalCamera: PhotoFlags.originalCamera(asset))
+    }
+
+    /// Fill the pixel-based flags (`isDocument`, `sharpness`) for the photos that
+    /// belong to clusters — Vision/Laplacian never run on the whole library, only
+    /// on frames that could actually be deleted or chosen as keeper. Returns the
+    /// clusters with those photos rebuilt; `edited`/`originalCamera`/quality/size
+    /// (already set in `makePhoto`) are preserved. Bounded concurrency with a
+    /// per-image timeout, like the scanners, so a stuck thumbnail can't stall it.
+    private func enrichFlags(_ clusters: [[Photo]],
+                             progress: (Int, Int) -> Void) async -> [[Photo]] {
+        let uuids = Array(Set(clusters.flatMap { $0.map(\.uuid) }))
+        var docs: [String: Bool] = [:]
+        var sharps: [String: Double] = [:]
+        var done = 0
+        let lookup = assetsByID
+        await withTaskGroup(of: (String, Bool, Double).self) { group in
+            var next = 0
+            let limit = 8
+            func add() {
+                while next < uuids.count {
+                    let id = uuids[next]; next += 1
+                    guard let a = lookup[id] else { continue }
+                    let mgr = imageManager
+                    group.addTask {
+                        async let doc = PhotoFlags.isDocument(a, manager: mgr)
+                        async let shp = PhotoFlags.sharpness(a, manager: mgr)
+                        return (id, await doc, await shp)
+                    }
+                    return
+                }
+            }
+            for _ in 0..<limit { add() }
+            for await (id, doc, shp) in group {
+                docs[id] = doc; sharps[id] = shp
+                done += 1
+                if done % 25 == 0 { progress(done, uuids.count) }
+                add()
+            }
+        }
+        return clusters.map { cluster in
+            cluster.map { p in
+                Photo(uuid: p.uuid, filename: p.filename, takenAt: p.takenAt,
+                      width: p.width, height: p.height, size: p.size, uti: p.uti,
+                      kind: p.kind, favorite: p.favorite, quality: p.quality,
+                      edited: p.edited, isDocument: docs[p.uuid] ?? p.isDocument,
+                      sharpness: sharps[p.uuid] ?? p.sharpness,
+                      originalCamera: p.originalCamera)
+            }
+        }
     }
 
     /// L3 cross-time pass: dHash-candidate + neural feature-print confirmation
@@ -272,12 +334,16 @@ final class LibraryModel: ObservableObject {
             Task { @MainActor in self?.progress = msg }
         }
 
-        groups = idGroups.compactMap { ids in
+        let raw = idGroups.compactMap { ids -> [Photo]? in
             let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0, enr: enr) }
                 .sorted { $0.takenAt < $1.takenAt }
-            guard photos.count >= 2 else { return nil }
-            return ReviewGroup(photos: photos, keeperID: keeper(photos).uuid)
+            return photos.count >= 2 ? photos : nil
         }
+        // Document protection + sharpness ranking over the cluster members only.
+        let enriched = await enrichFlags(raw) { done, total in
+            self.progress = t.progVerifying(done, total)
+        }
+        groups = enriched.map { ReviewGroup(photos: $0, keeperID: keeper($0).uuid) }
     }
 
     /// "Similar sets": find sets of photos you took of the same thing — several
@@ -368,15 +434,24 @@ final class LibraryModel: ObservableObject {
         if groups[i].deleteAll { groups[i].keepAll = false }
     }
 
-    /// Combined keeper key: favorites, then face score, then Apple quality, then
-    /// format / size / earliest — an app-level extension of Core's `rankKey`.
-    private func faceRankKey(_ p: Photo) -> (Int, Int, Int, Int, Int, Double) {
-        (p.favorite ? 1 : 0,
-         Int(((faceScores[p.uuid] ?? 0) * 100).rounded()),
-         qualityBucket(p.quality),
-         utiPriority[p.uti] ?? 0,
-         p.size,
-         -p.takenAt)
+    /// Combined keeper key: an app-level extension of Core's `RankKey` that slots
+    /// the on-device face score just below favorite (the frame where people look
+    /// their best), then mirrors Core exactly: quality, original-camera,
+    /// sharpness, format, size, earliest take. Kept in lockstep with `rankKey` so
+    /// the face pass can only re-pick the keeper — never resurrect a deleted
+    /// signal or change WHICH frames are deletable.
+    private struct FaceRankKey: Comparable {
+        let favorite: Int, face: Int, core: RankKey
+        static func < (a: FaceRankKey, b: FaceRankKey) -> Bool {
+            if a.favorite != b.favorite { return a.favorite < b.favorite }
+            if a.face != b.face { return a.face < b.face }
+            return a.core < b.core   // quality, original-camera, sharpness, uti, size, take
+        }
+    }
+    private func faceRankKey(_ p: Photo) -> FaceRankKey {
+        FaceRankKey(favorite: p.favorite ? 1 : 0,
+                    face: Int(((faceScores[p.uuid] ?? 0) * 100).rounded()),
+                    core: rankKey(p))
     }
 
     /// On-device Vision pass: score the faces in every cluster member, then

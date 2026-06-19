@@ -6,22 +6,33 @@ snapsift / pick.py
 Given the groups.json from scan.py, decide *which* photo to keep in each
 cluster and which ones to delete. Outputs plan.json and delete-uuids.txt.
 
-Keeper heuristic (in order):
-  1. Never delete a favorite. A favorited frame always survives, and if a
-     cluster has several favorites every one of them is kept.
+A frame is PROTECTED — never deleted — if it is a favorite OR an edited frame
+(the user applied adjustments) OR a document/scan. A cluster of all-protected
+frames deletes nothing. Over-protecting is the safe direction: the #1 rule is to
+never mark a frame a human likely wants to keep.
+
+Keeper heuristic (in order, highest first):
+  1. Never delete a protected frame (favorite / edited / document). Among the
+     rest, a favorite always wins the keeper slot.
   2. Prefer Apple's own per-photo quality score (sharpness, framing,
      timing, low noise…) — the genuinely better frame, not just the biggest
      file. Scores are quantised before comparison so near-ties fall through
-     to the format/size tiebreakers rather than splitting hairs on noise.
-  3. Prefer original-format files (HEIC > JPG > PNG > MP4) — favors the
-     iPhone-native capture over edited/shared/forwarded versions.
-  4. Among same-UTI, keep the largest file size — proxy for "highest
+     to the tiebreakers rather than splitting hairs on noise.
+  3. Prefer the frame with genuine original-camera metadata (intact EXIF
+     Make/Model) over an EXIF-stripped social-app re-save. Sits above
+     sharpness/format/size: newer or larger does NOT mean better.
+  4. Prefer the sharper frame (quantised like quality). A WITHIN-GROUP tiebreak
+     only — it reorders the keeper inside a real multi-frame group and can never
+     on its own add a frame to the delete set. Blur is never a delete trigger.
+  5. Prefer original-format files (HEIC > JPG > PNG > MP4) — favors the
+     iPhone-native capture over shared/forwarded versions.
+  6. Among same-UTI, keep the largest file size — proxy for "highest
      quality version" (more bits = less compression).
-  5. If still tied, keep the earliest one (the original take).
+  7. If still tied, keep the earliest one (the original take).
 
-We never need pixel access: Apple already computed the aesthetic scores and
-we trust that "bigger same-format file" usually means "original / less
-compressed". Anything not the keeper *and* not a favorite gets deleted.
+We never need pixel access here: the App layer precomputes the aesthetic score,
+sharpness, original-camera flag, edited flag and document flag on-device and
+hands them in. Anything not the keeper *and* not protected gets deleted.
 
 Usage:
     python3 pick.py --input groups.json --output plan.json \\
@@ -59,19 +70,35 @@ def quality_bucket(quality: float) -> int:
 
 
 def rank(p: dict) -> tuple:
-    """Sort key for 'most worth keeping' — higher is better.
+    """Sort key for 'most worth keeping' — higher is better. Mirrors the Swift
+    `Keeper.rankKey` EXACTLY so the CLI and the app never disagree on the keeper.
 
-    favorite first, then Apple's quality score (quantised so noise-level
-    differences don't override the format/size signal), then UTI priority,
-    then file size, then earliest take.
+    Order, highest first: favorite, Apple quality (quantised), original-camera,
+    sharpness (quantised), UTI priority, file size, earliest take.
+
+    original_camera sits above sharpness/format/size: a genuine camera capture
+    beats an EXIF-stripped re-save even if the re-save is newer/larger. sharpness
+    sits BELOW quality (so it can't override the real quality signal) and is a
+    within-group tiebreak ONLY — it never expands the delete set (see `deletes`,
+    which keys off protection, not blur).
     """
     return (
         1 if p.get("favorite") else 0,
         quality_bucket(p.get("quality") or 0.0),
+        1 if p.get("original_camera") else 0,
+        quality_bucket(p.get("sharpness") or 0.0),
         UTI_PRIORITY.get(p["uti"], 0),
         p["size"],
         -p["taken_at"],
     )
+
+
+def is_protected(p: dict) -> bool:
+    """A frame a human likely wants to keep regardless of keeper choice: a
+    favorite, an edited frame, or a document/scan. Protected frames are NEVER
+    deleted. Mirrors Swift `Photo.isProtected`. Over-protection is the safe
+    direction — the #1 rule is to never mark a frame a human likely wants."""
+    return bool(p.get("favorite") or p.get("edited") or p.get("is_document"))
 
 
 def keeper(group: list[dict]) -> dict:
@@ -101,10 +128,11 @@ def main():
     groups = data["groups"][: args.max_groups] if args.max_groups else data["groups"]
     for g in groups:
         keep = keeper(g["photos"])
-        # Delete everything that is neither the keeper nor a favorite. Favorites
-        # are sacred — a cluster of all-favorites deletes nothing.
+        # Delete everything that is neither the keeper nor protected. Protected
+        # frames (favorite / edited / document) are sacred — a cluster of all
+        # protected frames deletes nothing.
         deletes = [p for p in g["photos"]
-                   if p["uuid"] != keep["uuid"] and not p.get("favorite")]
+                   if p["uuid"] != keep["uuid"] and not is_protected(p)]
         plan_groups.append({
             "size":     g["size"],
             "span_sec": g["span_sec"],
