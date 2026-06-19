@@ -7,8 +7,8 @@
   <key>CFBundleIdentifier</key><string>net.cver.snapsift</string>
   <key>CFBundleExecutable</key><string>SnapsiftApp</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>0.9.0</string>
+  <key>CFBundleVersion</key><string>9</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -17,6 +17,6 @@
   <key>NSPhotoLibraryUsageDescription</key>
   <string>snapsift reads your photo library on your Mac to find near-duplicate burst shots so you can delete the extras. Nothing leaves your device.</string>
   <key>NSPhotoLibraryAddUsageDescription</key>
-  <string>snapsift modifies your library only to move reviewed near-duplicates to Recently Deleted, where they remain recoverable for 30 days.</string>
+  <string>snapsift modifies your library only to (1) sort candidates into "Snapsift" review albums so you can decide in your own time — a non-destructive label that leaves photos in place — and (2) when you choose, move reviewed exact duplicates to Recently Deleted, where they remain recoverable for 30 days.</string>
 </dict>
 </plist>
