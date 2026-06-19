@@ -14,6 +14,7 @@ struct ContentView: View {
     @FocusState private var sidebarFocused: Bool
     @FocusState private var gridFocused: Bool
     @State private var banner: String?
+    @State private var writingAlbums = false
     @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
 
     private var language: Language { Language(rawValue: langRaw) ?? .en }
@@ -353,7 +354,9 @@ struct ContentView: View {
                 placeholder("square.grid.2x2", t.selectCategory())
             }
         } else if let id = selection, let g = model.groups.first(where: { $0.id == id }) {
-            GroupReview(group: g, model: model, t: t, focusedFrame: gridFocused ? focusedFrame : nil)
+            GroupReview(group: g, model: model, t: t,
+                        focusedFrame: gridFocused ? focusedFrame : nil,
+                        isExactDupeGroup: model.exactDupeGroupIDs.contains(g.id))
                 .focusable()
                 .focused($gridFocused)
                 .onKeyPress { handleGridKey($0) }
@@ -613,6 +616,14 @@ struct ContentView: View {
             .keyboardShortcut("4", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
+            Button { Task { await runWriteAlbums() } } label: {
+                Label(t.sortIntoAlbums(), systemImage: "rectangle.stack.badge.plus")
+            }
+            .help(t.tipSortIntoAlbums())
+            .disabled(model.groups.isEmpty || model.isWritingAlbums || writingAlbums || model.isScanning)
+            .keyboardShortcut("5", modifiers: .command)
+        }
+        ToolbarItem(placement: .primaryAction) {
             Button(role: .destructive) { Task { await runDelete() } } label: {
                 Label(t.deleteN(model.totalDeletions), systemImage: "trash")
             }
@@ -628,6 +639,17 @@ struct ContentView: View {
             .keyboardShortcut("?", modifiers: .command)
         }
         ToolbarItem { languageMenu }
+    }
+
+    private func runWriteAlbums() async {
+        writingAlbums = true
+        defer { writingAlbums = false }
+        do {
+            let msg = try await model.writeAlbums(t)
+            showBanner(msg)
+        } catch {
+            showBanner(error.localizedDescription)
+        }
     }
 
     private func runDelete() async {
@@ -657,6 +679,8 @@ struct GroupReview: View {
     @ObservedObject var model: LibraryModel
     let t: L10n
     var focusedFrame: String? = nil
+    /// True when the parent confirmed this group as an exact-duplicate cluster.
+    var isExactDupeGroup: Bool = false
 
     private let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
 
@@ -704,15 +728,25 @@ struct GroupReview: View {
         let keep = group.isKeeper(p)
         let del = group.isDelete(p)
         let focused = p.uuid == focusedFrame
+        // An exact-dup non-keeper earns the orange "可安心清" badge ONLY when the
+        // group passed the strict predicate (dHash 0 + feature ≈0 + same size).
+        // Protected frames are shown amber regardless — they are never deletable.
+        let isExactSuggested = isExactDupeGroup && !keep && !p.isProtected
         // Protected frames (favorite / edited / document) are never deletable —
         // show them amber, never red, so the UI can't imply a protected frame
         // will be removed.
-        let border: Color = keep ? .reefGreen : (p.isProtected ? .reefAmber : (del ? .reefRed : .clear))
+        let border: Color = keep ? .reefGreen
+            : (p.isProtected ? .reefAmber
+            : (isExactSuggested ? Color.reefAmber   // amber = "interchangeable" not red
+            : (del ? .reefRed : .clear)))
+        // Exact-dup non-keepers dim just like regular delete candidates so it's
+        // visually clear they are "the redundant copy".
+        let dimmed = del || isExactSuggested
         return VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 AssetThumbnail(asset: model.asset(for: p.uuid), manager: model.imageManager, side: 160)
-                    .opacity(del ? 0.34 : 1)
-                badge(keep: keep, del: del, fav: p.favorite)
+                    .opacity(dimmed ? 0.34 : 1)
+                badge(keep: keep, del: del, fav: p.favorite, exactSuggested: isExactSuggested)
                 if index < 9 {
                     Text("\(index + 1)")
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
@@ -741,13 +775,23 @@ struct GroupReview: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { model.promote(group: group.id, to: p.uuid) }
-        .help(p.isProtected ? t.tipFavorite() : (keep ? t.tipKeeper() : t.tipDelete()))
+        .help(
+            p.isProtected && isExactDupeGroup ? t.tipExactDupeProtected()
+            : p.isProtected ? t.tipFavorite()
+            : isExactSuggested ? t.tipExactDupe()
+            : keep ? t.tipKeeper()
+            : t.tipDelete()
+        )
     }
 
-    private func badge(keep: Bool, del: Bool, fav: Bool) -> some View {
+    private func badge(keep: Bool, del: Bool, fav: Bool, exactSuggested: Bool) -> some View {
         HStack(spacing: 4) {
             if keep { tag(t.keep(), .reefGreen, Color(hex: 0x04110a)) }
-            if del { tag(t.delete(), .reefRed, .white) }
+            // Exact-dup badge: orange-amber label distinct from the generic red DELETE.
+            // This is the ONLY place in the app where a "safe to delete" affordance
+            // appears — and only for frames that passed the strict predicate.
+            if exactSuggested { tag(t.exactDupeBadge(), .reefAmber, Color(hex: 0x1a1203)) }
+            else if del { tag(t.delete(), .reefRed, .white) }
             if fav { tag("★", .reefAmber, Color(hex: 0x1a1203)) }
         }
         .padding(6)

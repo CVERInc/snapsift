@@ -91,6 +91,13 @@ final class LibraryModel: ObservableObject {
     @Published var apfelSearching = false
     var apfelAvailable: Bool { Apfel.isInstalled }
 
+    /// ReviewGroup IDs that passed the exact-duplicate predicate (dHash distance 0
+    /// + feature-print ≈0 + same dimensions). Populated by `detectExactDuplicates`
+    /// after a look-alike scan. Empty until that pass runs.
+    @Published var exactDupeGroupIDs: Set<ReviewGroup.ID> = []
+    /// True while album-write is in progress.
+    @Published var isWritingAlbums = false
+
     /// Categories after the search filter: apfel's semantic match if it ran,
     /// otherwise a plain substring match — and everything when the query is empty.
     var filteredCategories: [CategoryBucket] {
@@ -505,6 +512,98 @@ final class LibraryModel: ObservableObject {
         }
         facesApplied = true
         progress = ""
+    }
+
+    // MARK: - Exact-duplicate detection (Part B)
+
+    /// Run the exact-duplicate predicate over the current groups to identify
+    /// which ones are genuine re-saves (not just bursts). This is called by
+    /// `scanLookAlikes` where feature prints are already available, and also
+    /// on demand after any scan via the toolbar button.
+    ///
+    /// A group qualifies as exact-duplicate when:
+    ///   - All members share the same pixel dimensions, AND
+    ///   - The max pairwise dHash Hamming distance == 0, AND
+    ///   - The max pairwise feature-print distance ≤ ExactDuplicatePredicate.featureThreshold
+    ///
+    /// The result is stored in `exactDupeGroupIDs` for the UI and AlbumWriter.
+    func detectExactDuplicates(_ t: L10n) async {
+        guard !groups.isEmpty else { exactDupeGroupIDs = []; return }
+        progress = t.progVerifying(0, groups.count)
+
+        // We need feature prints for the dimension+dHash-consistent groups.
+        // Re-use the existing photo hashes via a lightweight second pass.
+        // All hashing and print computation runs off the main actor.
+        let snapshot = groups
+        let lookup = assetsByID
+        let mgr = imageManager
+
+        var exact: Set<ReviewGroup.ID> = []
+        var done = 0
+        for g in snapshot {
+            defer { done += 1; if done % 10 == 0 { progress = t.progVerifying(done, snapshot.count) } }
+            guard g.photos.count >= 2 else { continue }
+
+            // 1. Same dimensions: all members must match the first frame.
+            let w0 = g.photos[0].width, h0 = g.photos[0].height
+            guard g.photos.allSatisfy({ $0.width == w0 && $0.height == h0 }) else { continue }
+
+            // 2. dHash distance == 0 for ALL pairs (computed in Core — no I/O).
+            //    We need thumbnails; request them with bounded concurrency.
+            let ids = g.photos.map(\.uuid)
+            let hashes = await LookAlikeScanner.dHashesPublic(ids, byID: lookup, manager: mgr)
+            guard hashes.count == ids.count else { continue }
+            let hashValues = ids.compactMap { hashes[$0] }
+            guard hashValues.count == ids.count else { continue }
+            var allZero = true
+            outer: for i in 0..<hashValues.count {
+                for j in (i + 1)..<hashValues.count {
+                    if hamming(hashValues[i], hashValues[j]) > ExactDuplicatePredicate.hammingThreshold {
+                        allZero = false; break outer
+                    }
+                }
+            }
+            guard allZero else { continue }
+
+            // 3. Feature-print distance ≤ featureThreshold for ALL pairs.
+            let spreads = await LookAlikeScanner.featureSpreads([ids], byID: lookup, manager: mgr) { _, _, _ in }
+            guard let spread = spreads.first, let s = spread,
+                  s <= ExactDuplicatePredicate.featureThreshold else { continue }
+
+            exact.insert(g.id)
+        }
+
+        exactDupeGroupIDs = exact
+        progress = ""
+    }
+
+    // MARK: - Album write (Part A + Part B)
+
+    /// Sort the scan result into Photos albums — strictly non-destructive
+    /// (membership tags only; originals stay in place).
+    ///
+    /// Part A: bursts, blurry, and documents albums are always review-only.
+    ///         Protected frames never appear in any delete-oriented bucket.
+    /// Part B: the exact-duplicates album is the ONLY one where non-keeper,
+    ///         non-protected frames earn a "suggest delete" badge in the UI.
+    ///
+    /// Returns a human-readable banner summarising what was written (or
+    /// "nothing new" if all assets were already in the albums).
+    @discardableResult
+    func writeAlbums(_ t: L10n) async throws -> String {
+        guard !isWritingAlbums, !groups.isEmpty else { return t.albumsNothingNew() }
+        isWritingAlbums = true
+        progress = t.progWritingAlbums()
+        defer { isWritingAlbums = false; progress = "" }
+
+        let result = try await AlbumWriter.write(
+            groups: groups,
+            exactGroups: exactDupeGroupIDs,
+            assetsByID: assetsByID,
+            t: t
+        )
+        return t.albumsWritten(bursts: result.bursts, blurry: result.blurry,
+                               docs: result.documents, exact: result.exactDupes)
     }
 
     /// Delete every reviewed non-keeper, non-favorite frame via PhotoKit. macOS

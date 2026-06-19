@@ -511,4 +511,151 @@ struct L10n: Sendable {
         case .zhTW: return "沒有標記要刪除的項目"
         }
     }
+
+    // MARK: album-write (Part A / Part B)
+
+    // ── Album names ─────────────────────────────────────────────────────────
+    // Prefixed with "Snapsift · " by AlbumWriter.prefix. The suffix is
+    // localized here; the prefix stays ASCII so the round-trip through the
+    // source picker is unambiguous regardless of OS locale.
+
+    /// Near-duplicate / burst candidates — for human review, NOT a delete bucket.
+    func albumNameBursts() -> String {
+        switch language {
+        case .en:   return "Burst Candidates"
+        case .ja:   return "バースト候補"
+        case .zhTW: return "近重複照片"
+        }
+    }
+
+    /// Frames that appear blurry relative to the best frame in their cluster.
+    func albumNameBlurry() -> String {
+        switch language {
+        case .en:   return "Blurry"
+        case .ja:   return "ブレ写真"
+        case .zhTW: return "模糊照片"
+        }
+    }
+
+    /// Documents, IDs, receipts, scans — organizational, never a delete bucket.
+    func albumNameDocs() -> String {
+        switch language {
+        case .en:   return "Documents & IDs"
+        case .ja:   return "書類・証明書"
+        case .zhTW: return "文件與證件"
+        }
+    }
+
+    /// Exact duplicates (dHash distance 0 + feature ≈0 + same size). The ONLY
+    /// bucket where the UI may show a delete suggestion badge.
+    func albumNameExact() -> String {
+        switch language {
+        case .en:   return "Exact Duplicates"
+        case .ja:   return "完全に同じ写真"
+        case .zhTW: return "完全相同"
+        }
+    }
+
+    // ── Toolbar button + progress ────────────────────────────────────────────
+
+    func sortIntoAlbums() -> String {
+        switch language {
+        case .en:   return "Sort into Albums"
+        case .ja:   return "アルバムに仕分け"
+        case .zhTW: return "整理進相簿"
+        }
+    }
+    func tipSortIntoAlbums() -> String {
+        switch language {
+        case .en:   return "Write candidates into named Snapsift albums — non-destructive; nothing is deleted"
+        case .ja:   return "候補を名前付き Snapsift アルバムに仕分ける（非破壊・何も削除しない）"
+        case .zhTW: return "把候選照片整理進具名的 Snapsift 相簿 — 不破壞原檔，不刪任何東西"
+        }
+    }
+    func progWritingAlbums() -> String {
+        switch language {
+        case .en:   return "Writing albums…"
+        case .ja:   return "アルバムに書き込み中…"
+        case .zhTW: return "寫入相簿中…"
+        }
+    }
+    func albumsWritten(bursts: Int, blurry: Int, docs: Int, exact: Int) -> String {
+        // Compact summary: "Sorted into albums · 12 bursts, 3 blurry, 1 exact dup"
+        var parts: [String] = []
+        if bursts > 0 { parts.append(albumsWrittenBursts(bursts)) }
+        if blurry > 0 { parts.append(albumsWrittenBlurry(blurry)) }
+        if docs   > 0 { parts.append(albumsWrittenDocs(docs)) }
+        if exact  > 0 { parts.append(albumsWrittenExact(exact)) }
+        let summary = parts.isEmpty ? albumsNothingNew() : parts.joined(separator: ", ")
+        switch language {
+        case .en:   return "Sorted into albums · \(summary)"
+        case .ja:   return "アルバムに仕分け完了 · \(summary)"
+        case .zhTW: return "整理進相簿完成 · \(summary)"
+        }
+    }
+    private func albumsWrittenBursts(_ n: Int) -> String {
+        switch language {
+        case .en:   return "\(n) burst\(n == 1 ? "" : "s")"
+        case .ja:   return "バースト \(n)枚"
+        case .zhTW: return "\(n) 近重複"
+        }
+    }
+    private func albumsWrittenBlurry(_ n: Int) -> String {
+        switch language {
+        case .en:   return "\(n) blurry"
+        case .ja:   return "ブレ \(n)枚"
+        case .zhTW: return "\(n) 模糊"
+        }
+    }
+    private func albumsWrittenDocs(_ n: Int) -> String {
+        switch language {
+        case .en:   return "\(n) doc\(n == 1 ? "" : "s")"
+        case .ja:   return "書類 \(n)枚"
+        case .zhTW: return "\(n) 文件"
+        }
+    }
+    private func albumsWrittenExact(_ n: Int) -> String {
+        switch language {
+        case .en:   return "\(n) exact dup\(n == 1 ? "" : "s")"
+        case .ja:   return "完全重複 \(n)枚"
+        case .zhTW: return "\(n) 完全相同"
+        }
+    }
+    func albumsNothingNew() -> String {
+        switch language {
+        case .en:   return "nothing new to add"
+        case .ja:   return "新しく追加するものなし"
+        case .zhTW: return "沒有新增項目"
+        }
+    }
+
+    // ── Exact-duplicate badge (Part B) ───────────────────────────────────────
+
+    /// Badge shown on the non-keeper in a confirmed exact-duplicate group.
+    /// Distinct from the generic DELETE badge: this one carries an explicit
+    /// "safe to remove" message, since these frames are genuinely interchangeable.
+    func exactDupeBadge() -> String {
+        switch language {
+        case .en:   return "EXACT DUP"
+        case .ja:   return "完全重複"
+        case .zhTW: return "完全相同"
+        }
+    }
+    /// Tooltip for the exact-dup badge.
+    func tipExactDupe() -> String {
+        switch language {
+        case .en:   return "Exact duplicate — same image saved twice. Safe to remove (goes to Recently Deleted)"
+        case .ja:   return "完全な重複 — 同じ画像が2回保存されています。削除して問題ありません（「最近削除した項目」に移動）"
+        case .zhTW: return "完全相同 — 同一張圖存了兩份，可安心清（移到「最近刪除」，30 天內可復原）"
+        }
+    }
+    /// Tooltip for a protected frame that is in an exact-dup group — even here,
+    /// protection wins.
+    func tipExactDupeProtected() -> String {
+        switch language {
+        case .en:   return "Exact duplicate, but protected (favorite / edited / document) — never deleted"
+        case .ja:   return "完全な重複ですが保護対象（お気に入り・編集済み・書類）— 削除しません"
+        case .zhTW: return "完全相同，但受保護（最愛／已編輯／文件）—— 絕對不刪"
+        }
+    }
 }

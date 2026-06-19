@@ -221,5 +221,88 @@ do {
     check(albumMenuLabel(title: "Trip", count: -1) == "Trip", "label omits count when unknown")
 }
 
+print("Exact-duplicate predicate (slice 3)")
+// The strict bar: same dimensions AND dHash Hamming distance == 0 AND
+// feature-print distance ≤ featureThreshold. Distance 1+ is NOT exact.
+do {
+    // Perfect match: all three conditions true → exact duplicate.
+    check(ExactDuplicatePredicate.isExactDuplicate(
+        hammingDistance: 0, featureDistance: 0.00, sameSize: true),
+          "hamming 0 + feature 0 + same size → exact")
+
+    // Feature threshold edge: exactly at the boundary → exact.
+    check(ExactDuplicatePredicate.isExactDuplicate(
+        hammingDistance: 0, featureDistance: ExactDuplicatePredicate.featureThreshold, sameSize: true),
+          "hamming 0 + feature at threshold → exact")
+
+    // Feature distance 1 bit above threshold (just over) → NOT exact.
+    check(!ExactDuplicatePredicate.isExactDuplicate(
+        hammingDistance: 0, featureDistance: ExactDuplicatePredicate.featureThreshold + 0.001, sameSize: true),
+          "feature just above threshold → not exact")
+
+    // dHash distance 1 → NOT exact (a single bit differs perceptually).
+    check(!ExactDuplicatePredicate.isExactDuplicate(
+        hammingDistance: 1, featureDistance: 0.00, sameSize: true),
+          "hamming distance 1 → not exact")
+
+    // Different dimensions → NOT exact even if hashes are identical.
+    check(!ExactDuplicatePredicate.isExactDuplicate(
+        hammingDistance: 0, featureDistance: 0.00, sameSize: false),
+          "different dimensions → not exact")
+
+    // Normal burst pair (feature ≈0.08, within confident threshold but above
+    // exact threshold) → NOT exact.
+    check(!ExactDuplicatePredicate.isExactDuplicate(
+        hammingDistance: 0, featureDistance: 0.08, sameSize: true),
+          "burst-range feature distance → not exact")
+}
+
+print("Exact-duplicate suggestions (slice 3)")
+// Protected frames in an exact-dup group are NEVER suggested for deletion.
+do {
+    // Two-frame group: favorite (protected) vs plain. Suggestion excludes favorite.
+    let favPhoto = ph(1, 0, size: 9_000_000, uti: "public.heic", fav: true)
+    let plainPhoto = ph(2, 0, size: 8_000_000, uti: "public.heic")
+    let suggestions = exactDuplicateSuggestions([favPhoto, plainPhoto])
+    check(!suggestions.map(\.uuid).contains("U1"),
+          "protected (favorite) never in exact-dup suggestions")
+}
+do {
+    // Edited frame in exact-dup group → still protected, never suggested.
+    let edited = ph(1, 0, edited: true)
+    let plain  = ph(2, 1)
+    let suggestions = exactDuplicateSuggestions([edited, plain])
+    check(!suggestions.map(\.uuid).contains("U1"),
+          "edited frame never in exact-dup suggestions")
+}
+do {
+    // Document frame in exact-dup group → still protected.
+    let doc   = ph(1, 0, isDocument: true)
+    let plain = ph(2, 1)
+    let suggestions = exactDuplicateSuggestions([doc, plain])
+    check(!suggestions.map(\.uuid).contains("U1"),
+          "document frame never in exact-dup suggestions")
+}
+do {
+    // All-protected group: no suggestions.
+    check(exactDuplicateSuggestions([ph(1, 0, fav: true), ph(2, 1, edited: true)]).isEmpty,
+          "all-protected exact-dup group → no suggestions")
+}
+do {
+    // Three-frame group: one keeper, one plain non-keeper, one protected.
+    // Only the plain non-keeper is suggested.
+    let keeper = ph(1, 0, quality: 0.9)
+    let protected_ = ph(2, 1, edited: true)
+    let plain  = ph(3, 2, quality: 0.1)
+    let suggestions = Set(exactDuplicateSuggestions([keeper, protected_, plain]).map(\.uuid))
+    check(!suggestions.contains("U2") && suggestions.contains("U3"),
+          "only non-protected non-keeper suggested in mixed exact-dup group")
+}
+do {
+    // Single-member group: returns empty (can never be a duplicate of itself).
+    check(exactDuplicateSuggestions([ph(1, 0)]).isEmpty,
+          "single-frame group → no exact-dup suggestions")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

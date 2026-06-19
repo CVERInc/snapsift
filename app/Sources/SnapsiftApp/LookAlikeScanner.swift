@@ -70,6 +70,16 @@ enum LookAlikeScanner {
         return confirmed
     }
 
+    /// Public wrapper so LibraryModel's exact-duplicate pass can hash a specific
+    /// set of asset IDs without duplicating the implementation. The private
+    /// `dHashes` variant uses a closure lookup; this variant takes the direct
+    /// `byID` dictionary, matching the pattern used by `featureSpreads`.
+    static func dHashesPublic(_ ids: [String],
+                              byID: [String: PHAsset],
+                              manager: PHCachingImageManager) async -> [String: UInt64] {
+        await dHashes(ids, asset: { byID[$0] }, manager: manager) { _, _ in }
+    }
+
     /// dHash a set of assets with bounded concurrency (timeout per thumbnail in
     /// cgImage). Unreadable assets are simply absent from the result.
     private static func dHashes(_ ids: [String],
