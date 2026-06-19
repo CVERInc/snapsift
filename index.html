@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>snapsift — 留最好的一張，丟掉整串連拍</title>
-  <meta name="description" content="On-device macOS app that finds the near-duplicate burst shots Apple's Duplicates detector misses — quality-aware keeper, face-aware re-pick, cross-time look-alikes — and deletes the extras into Recently Deleted. 完全在裝置上執行的 macOS App。">
+  <title>snapsift — keep the best shot, lose the burst</title>
+  <meta name="description" content="On-device macOS app that finds the near-duplicate burst shots Apple's Duplicates detector misses — quality-aware keeper, face-aware re-pick, cross-time look-alikes — and deletes the extras into Recently Deleted. Runs entirely on your Mac.">
   <meta property="og:title" content="snapsift — keep the best shot, lose the burst">
   <meta property="og:description" content="On-device · PhotoKit + Vision · Apple-quality keeper · favorites safe · recoverable delete · MIT">
   <meta property="og:type" content="website">
@@ -57,12 +57,6 @@
       padding: 8px 14px; border-radius: 999px; transition: all 0.2s ease;
     }
     .nav-link:hover { color: #fff; background: var(--surface); }
-    .lang-toggle {
-      cursor: pointer; border: 1px solid var(--border); background: var(--surface); color: var(--text);
-      font-family: inherit; font-weight: 700; font-size: 0.82rem; padding: 7px 14px;
-      border-radius: 999px; transition: all 0.2s ease;
-    }
-    .lang-toggle:hover { background: var(--surface-2); border-color: var(--mint); }
 
     header.hero { text-align: center; padding: 56px 0 36px; }
     .wordmark {
@@ -126,44 +120,26 @@
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86rem; color: var(--text); }
     footer { text-align: center; padding: 40px 24px 60px; color: var(--text-faint); font-size: 0.88rem; }
     footer a { color: var(--mint); text-decoration: none; }
-
-    [data-en] { display: none; }
-    html[data-lang="en"] [data-zh] { display: none; }
-    html[data-lang="en"] [data-en] { display: inline; }
   </style>
 </head>
 <body>
   <nav>
     <span class="brand">snapsift</span>
     <div class="nav-right">
-      <a class="nav-link" href="#get"><span data-zh>安裝</span><span data-en>Get it</span></a>
+      <a class="nav-link" href="#get">Get it</a>
       <a class="nav-link" href="https://github.com/CVERInc/snapsift" target="_blank" rel="noopener">GitHub</a>
-      <button class="lang-toggle" id="langBtn">EN</button>
     </div>
   </nav>
 
   <header class="hero">
     <div class="wrap">
       <h1 class="wordmark">snapsift</h1>
-      <p class="tagline">
-        <span data-zh>留最好的一張，丟掉整串連拍。</span>
-        <span data-en>Keep the best shot. Lose the burst.</span>
-      </p>
-      <p class="sub">
-        <span data-zh>Apple 的「重複項目」抓不到「手動連拍」——你按住快門連拍十幾張、它認為那是刻意拍的。snapsift 把它們揪出來，幫你只留最好的一張。</span>
-        <span data-en>Apple's Duplicates detector leaves manual bursts alone — hold the shutter, get 15 near-identical frames, and it thinks you meant to. snapsift finds them and keeps just the best one.</span>
-      </p>
-      <p class="intended-use">
-        <span data-zh>完全在你的 Mac 上執行 · 最愛一律保留 · 刪除可在「最近刪除」復原 30 天</span>
-        <span data-en>Runs entirely on your Mac · favorites always kept · deletions recoverable for 30 days</span>
-      </p>
+      <p class="tagline">Keep the best shot. Lose the burst.</p>
+      <p class="sub">Apple's Duplicates detector leaves manual bursts alone — hold the shutter, get 15 near-identical frames, and it thinks you meant to. snapsift finds them and keeps just the best one.</p>
+      <p class="intended-use">Runs entirely on your Mac · favorites always kept · deletions recoverable for 30 days</p>
       <div class="cta-row">
-        <a class="btn btn-primary" href="#get">
-          <span data-zh>取得 App</span><span data-en>Get the app</span>
-        </a>
-        <a class="btn btn-ghost" href="https://github.com/CVERInc/snapsift" target="_blank" rel="noopener">
-          <span data-zh>原始碼</span><span data-en>Source</span>
-        </a>
+        <a class="btn btn-primary" href="#get">Get the app</a>
+        <a class="btn btn-ghost" href="https://github.com/CVERInc/snapsift" target="_blank" rel="noopener">Source</a>
       </div>
     </div>
   </header>
@@ -173,10 +149,10 @@
       <div class="mock-bar">
         <div class="mock-dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
         <span class="mock-title">snapsift</span>
-        <span class="mock-meta"><span data-zh>5 張 · 跨距 1.8 秒 · 留 1 刪 4</span><span data-en>5 frames · spans 1.8s · keep 1, delete 4</span></span>
+        <span class="mock-meta">5 frames · spans 1.8s · keep 1, delete 4</span>
       </div>
       <div class="mock-body">
-        <div class="mock-head"><span data-zh>點任一張改為保留 · ★ 最愛永遠保留</span><span data-en>Click any frame to keep it · ★ favorites always kept</span></div>
+        <div class="mock-head">Click any frame to keep it · ★ favorites always kept</div>
         <div class="grid">
           <div class="frame keep"><div class="pic p1"></div><span class="lbl">KEEP</span></div>
           <div class="frame del"><div class="pic p2"></div><span class="lbl">DELETE</span></div>
@@ -189,38 +165,38 @@
 
   <section>
     <div class="wrap">
-      <h2 class="section-title"><span data-zh>為什麼用 snapsift</span><span data-en>Why snapsift</span></h2>
-      <p class="section-sub"><span data-zh>站在 Apple 自己的框架上，一切都在裝置裡。</span><span data-en>Built on Apple's own frameworks. All on-device.</span></p>
+      <h2 class="section-title">Why snapsift</h2>
+      <p class="section-sub">Built on Apple's own frameworks. All on-device.</p>
       <div class="features">
         <div class="card">
           <div class="ic">🔒</div>
-          <h3><span data-zh>完全在裝置上</span><span data-en>Fully on-device</span></h3>
-          <p><span data-zh>PhotoKit 讀取、Vision 分析、原生刪除——沒有任何資料離開你的 Mac。</span><span data-en>PhotoKit reads, Vision analyses, native delete — nothing ever leaves your Mac.</span></p>
+          <h3>Fully on-device</h3>
+          <p>PhotoKit reads, Vision analyses, native delete — nothing ever leaves your Mac.</p>
         </div>
         <div class="card">
           <div class="ic">✨</div>
-          <h3><span data-zh>挑出真正最好的一張</span><span data-en>Keeps the genuinely best frame</span></h3>
-          <p><span data-zh>讀取 Apple 自己算好的品質分數，留下最銳利、構圖最好的，而不只是檔案最大的。</span><span data-en>Reads Apple's own quality scores to keep the sharpest, best-composed frame — not just the biggest file.</span></p>
+          <h3>Keeps the genuinely best frame</h3>
+          <p>Reads Apple's own quality scores to keep the sharpest, best-composed frame — not just the biggest file.</p>
         </div>
         <div class="card">
           <div class="ic">😊</div>
-          <h3><span data-zh>看臉挑張</span><span data-en>Face-aware</span></h3>
-          <p><span data-zh>用 Vision 偵測臉與睜眼，連拍裡自動選大家都看鏡頭、眼睛張開的那張。</span><span data-en>Vision finds faces and open eyes, picking the frame where everyone looks their best.</span></p>
+          <h3>Face-aware</h3>
+          <p>Vision finds faces and open eyes, picking the frame where everyone looks their best.</p>
         </div>
         <div class="card">
           <div class="ic">🕓</div>
-          <h3><span data-zh>跨時間找相似</span><span data-en>Cross-time look-alikes</span></h3>
-          <p><span data-zh>用 Apple 神經 feature print 找出不同天存下的同一張照片，不只是當下的連拍。</span><span data-en>Apple's neural feature prints find the same photo saved on different days, not just time bursts.</span></p>
+          <h3>Cross-time look-alikes</h3>
+          <p>Apple's neural feature prints find the same photo saved on different days, not just time bursts.</p>
         </div>
         <div class="card">
           <div class="ic">⭐</div>
-          <h3><span data-zh>最愛一律保留</span><span data-en>Favorites are sacred</span></h3>
-          <p><span data-zh>最愛永遠不會被刪；影片預設略過。安全是預設值。</span><span data-en>Favorites are never deleted; videos are skipped by default. Safe by default.</span></p>
+          <h3>Favorites are sacred</h3>
+          <p>Favorites are never deleted; videos are skipped by default. Safe by default.</p>
         </div>
         <div class="card">
           <div class="ic">↩️</div>
-          <h3><span data-zh>隨時可復原</span><span data-en>Always recoverable</span></h3>
-          <p><span data-zh>刪除走系統的「最近刪除」，30 天內隨時救回；iCloud 同步到所有裝置。</span><span data-en>Deletions go to Recently Deleted — recoverable for 30 days, synced across your devices.</span></p>
+          <h3>Always recoverable</h3>
+          <p>Deletions go to Recently Deleted — recoverable for 30 days, synced across your devices.</p>
         </div>
       </div>
     </div>
@@ -228,38 +204,28 @@
 
   <section id="get">
     <div class="wrap">
-      <h2 class="section-title"><span data-zh>開始使用</span><span data-en>Get started</span></h2>
-      <p class="section-sub"><span data-zh>不需要 Xcode，一行指令就有可雙擊的 App。</span><span data-en>No Xcode — one command builds a double-clickable app.</span></p>
+      <h2 class="section-title">Get started</h2>
+      <p class="section-sub">No Xcode — one command builds a double-clickable app.</p>
       <div class="steps">
         <div class="step">
-          <h3><span data-zh>1 · 取得原始碼</span><span data-en>1 · Clone</span></h3>
+          <h3>1 · Clone</h3>
           <pre><code>git clone https://github.com/CVERInc/snapsift
 cd snapsift/app</code></pre>
         </div>
         <div class="step">
-          <h3><span data-zh>2 · 建出 App</span><span data-en>2 · Build the app</span></h3>
+          <h3>2 · Build the app</h3>
           <pre><code>./scripts/build-app.sh        # → ~/Desktop/snapsift.app</code></pre>
         </div>
         <div class="step">
-          <h3><span data-zh>3 · 掃描、審查、刪除</span><span data-en>3 · Scan, review, delete</span></h3>
-          <p><span data-zh>雙擊 snapsift.app（首次未簽名請右鍵→打開），首次掃描會請求照片存取權。掃描 → 並排審查每群 → 刪除多餘的。</span><span data-en>Double-click snapsift.app (first time: right-click → Open). It asks for Photos access on first scan. Scan → review each cluster → delete the extras.</span></p>
+          <h3>3 · Scan, review, delete</h3>
+          <p>Double-click snapsift.app (first time: right-click → Open). It asks for Photos access on first scan. Scan → review each cluster → delete the extras.</p>
         </div>
       </div>
     </div>
   </section>
 
   <footer>
-    <p><span data-zh>由 <a href="https://cver.net">cver.net</a> 打造 · MIT 授權 · </span><span data-en>By <a href="https://cver.net">cver.net</a> · MIT · </span><a href="https://github.com/CVERInc/snapsift">GitHub</a></p>
+    <p>By <a href="https://cver.net">cver.net</a> · MIT · <a href="https://github.com/CVERInc/snapsift">GitHub</a></p>
   </footer>
-
-  <script>
-    const btn = document.getElementById('langBtn');
-    btn.addEventListener('click', () => {
-      const en = document.documentElement.getAttribute('data-lang') === 'en';
-      document.documentElement.setAttribute('data-lang', en ? 'zh' : 'en');
-      document.documentElement.setAttribute('lang', en ? 'zh-Hant' : 'en');
-      btn.textContent = en ? 'EN' : '中';
-    });
-  </script>
 </body>
 </html>
