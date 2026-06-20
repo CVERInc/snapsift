@@ -1,9 +1,28 @@
 import Foundation
 
 /// UTI keep-priority — higher wins. Mirrors Python `pick.UTI_PRIORITY`.
+///
+/// RAW formats rank at 90 — above JPEG (80) but below HEIC (100).
+/// Rationale: a RAW file is the highest-fidelity capture available; it is never
+/// a re-compressed derivative. HEIC beats RAW only because HEIC is the iPhone
+/// native format and represents the processed result with Apple's ISP tuning
+/// (which is typically preferred for viewing). If the user shot RAW+JPEG the
+/// RAW is the keeper. DNG uses `com.adobe.raw-image` (the canonical UTI Apple
+/// registers for DNG in the system UTI database).
 public let utiPriority: [String: Int] = [
     "public.heic": 100,
     "public.heif": 100,
+    // RAW formats — above JPEG, below HEIC
+    "com.adobe.raw-image": 90,          // DNG (Adobe / Apple canonical)
+    "public.camera-raw-image": 90,      // generic RAW abstract base type
+    "com.canon.cr2-raw-image": 90,      // Canon CR2
+    "com.canon.cr3-raw-image": 90,      // Canon CR3
+    "com.nikon.raw-image": 90,          // Nikon NEF
+    "com.nikon.nrw-raw-image": 90,      // Nikon NRW (compact Nikon RAW)
+    "com.sony.arw-raw-image": 90,       // Sony ARW
+    "com.fuji.raf-raw-image": 90,       // Fujifilm RAF
+    "com.panasonic.rw2-raw-image": 90,  // Panasonic RW2
+    "com.dng": 90,                       // alternative DNG UTI seen on some imports
     "public.jpeg": 80,
     "public.png": 60,
     "public.tiff": 50,

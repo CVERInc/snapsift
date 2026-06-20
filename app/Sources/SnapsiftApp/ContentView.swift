@@ -27,6 +27,12 @@ struct ContentView: View {
     @State private var pendingPreCommitGroups: [PreCommitGroup] = []
     // Feature 4: deletion history sheet
     @State private var showHistorySheet = false
+    // FIX 3 (safety hardening): stale-asset warning alert state.
+    // Populated when some IDs can no longer be resolved at delete time.
+    @State private var staleAlertData: (staleCount: Int, foundCount: Int)?
+    // Continuation used to return the user's choice from the stale-asset alert
+    // back to the async performDelete() that's waiting on it.
+    @State private var staleAlertContinuation: CheckedContinuation<Bool, Never>?
 
     private var language: Language { Language(rawValue: langRaw) ?? .en }
     private var t: L10n { L10n(language) }
@@ -204,6 +210,30 @@ struct ContentView: View {
             }
         } message: {
             Text(t.forceRejectAlertBody())
+        }
+        // FIX 3: stale-asset warning — shown when some IDs could not be found at
+        // delete time (the library changed since the scan). The user can proceed
+        // with the assets that WERE found or cancel entirely.
+        .alert(t.staleAssetAlertTitle(), isPresented: Binding(
+            get: { staleAlertData != nil },
+            set: { if !$0 { staleAlertData = nil } }
+        )) {
+            if let data = staleAlertData {
+                Button(t.staleAssetAlertProceed(data.foundCount), role: .destructive) {
+                    staleAlertData = nil
+                    staleAlertContinuation?.resume(returning: true)
+                    staleAlertContinuation = nil
+                }
+            }
+            Button(t.staleAssetAlertCancel(), role: .cancel) {
+                staleAlertData = nil
+                staleAlertContinuation?.resume(returning: false)
+                staleAlertContinuation = nil
+            }
+        } message: {
+            if let data = staleAlertData {
+                Text(t.staleAssetAlertBody(stale: data.staleCount, found: data.foundCount))
+            }
         }
     }
 
@@ -496,8 +526,13 @@ struct ContentView: View {
                 Text(t.frames(g.photos.count))
                     .font(.headline)
                     .foregroundStyle(sel ? .white : Color.reefMint)
-                if g.hasFavorite { Text("★").foregroundStyle(Color.reefAmber) }
-                if g.hasVideo { Image(systemName: "video.fill").font(.caption2).foregroundStyle(Color.reefAmber) }
+                // FIX 6: sidebar info badges use reefMint, not amber.
+                // Amber is reserved strictly for "protected — won't delete" warnings
+                // (frame borders, protection badges in the grid, the "All protected"
+                // label). Informational indicators must not borrow the same colour
+                // or they blur the meaning of the protection signal.
+                if g.hasFavorite { Text("★").foregroundStyle(Color.reefMint) }
+                if g.hasVideo { Image(systemName: "video.fill").font(.caption2).foregroundStyle(Color.reefMint) }
                 if g.keepAll { Image(systemName: "checkmark.circle.fill").font(.caption2).foregroundStyle(Color.reefGreen) }
             }
             Text(t.sidebarSubtitle(span: g.spanSec, delete: g.deletionIDs.count))
@@ -902,8 +937,17 @@ struct ContentView: View {
         deleting = true
         defer { deleting = false }
         do {
-            let n = try await model.deleteReviewed()
+            let n = try await model.deleteReviewed { [self] staleCount, foundCount in
+                // FIX 3: stale-asset warning — suspend until the user responds.
+                // We surface an alert, then resume via CheckedContinuation.
+                return await withCheckedContinuation { cont in
+                    staleAlertData = (staleCount: staleCount, foundCount: foundCount)
+                    staleAlertContinuation = cont
+                }
+            }
             if !model.groups.contains(where: { $0.id == selection }) { selection = nil }
+            // FIX 5: success banner explicitly states the 30-day recovery window
+            // (mirrors the pre-commit sheet language — same promise, same place).
             if n > 0 { showBanner(t.deletedBanner(n)) }
         } catch {
             // FIX 2: failed delete must be LOUD and actionable, not a silent 3s banner.

@@ -698,10 +698,13 @@ struct L10n: Sendable {
         }
     }
     func deletedBanner(_ n: Int) -> String {
+        // FIX 5: state the point-of-no-return clearly — "permanent after 30 days"
+        // mirrors the pre-commit sheet language so the recovery window is obvious
+        // both before AND after committing.
         switch language {
-        case .en: return "Moved \(n) to Recently Deleted · recoverable for 30 days"
-        case .ja: return "\(n)枚を「最近削除した項目」へ · 30日間は復元可能"
-        case .zhTW: return "已將 \(n) 張移到「最近刪除」· 30 天內可復原"
+        case .en: return "Moved \(n) to Recently Deleted — permanent after 30 days"
+        case .ja: return "\(n)枚を「最近削除した項目」へ — 30日後は完全削除"
+        case .zhTW: return "已將 \(n) 張移到「最近刪除」— 30 天後永久刪除"
         }
     }
     func nothingToDelete() -> String {
@@ -709,6 +712,47 @@ struct L10n: Sendable {
         case .en: return "Nothing marked for deletion"
         case .ja: return "削除対象がありません"
         case .zhTW: return "沒有標記要刪除的項目"
+        }
+    }
+
+    // MARK: FIX 3 — stale-asset warning alert
+
+    /// Alert title when some IDs can't be resolved at delete time.
+    func staleAssetAlertTitle() -> String {
+        switch language {
+        case .en:   return "Some photos can't be found"
+        case .ja:   return "一部の写真が見つかりません"
+        case .zhTW: return "部分照片找不到"
+        }
+    }
+
+    /// Alert body explaining the stale-asset situation.
+    func staleAssetAlertBody(stale: Int, found: Int) -> String {
+        switch language {
+        case .en:
+            return "\(stale) photo\(stale == 1 ? "" : "s") couldn't be found — they may have been moved or deleted by another app. Delete the \(found) that were found?"
+        case .ja:
+            return "\(stale)枚の写真が見つかりませんでした（別のアプリで移動または削除された可能性があります）。見つかった\(found)枚を削除しますか？"
+        case .zhTW:
+            return "\(stale) 張照片找不到 —— 可能已被其他 App 移動或刪除。要刪除找得到的 \(found) 張嗎？"
+        }
+    }
+
+    /// Proceed button label — delete the N photos that were found.
+    func staleAssetAlertProceed(_ found: Int) -> String {
+        switch language {
+        case .en:   return "Delete \(found) Found"
+        case .ja:   return "見つかった\(found)枚を削除"
+        case .zhTW: return "刪除找到的 \(found) 張"
+        }
+    }
+
+    /// Cancel button label for the stale-asset alert.
+    func staleAssetAlertCancel() -> String {
+        switch language {
+        case .en:   return "Cancel"
+        case .ja:   return "キャンセル"
+        case .zhTW: return "取消"
         }
     }
 

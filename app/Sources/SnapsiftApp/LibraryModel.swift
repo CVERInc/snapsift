@@ -20,7 +20,14 @@ struct ReviewGroup: Identifiable {
     var rejected: Set<String> = []
     /// A confident, near-identical burst → safe to pre-seed rejections.
     /// When false the frames differ enough that the user should decide.
-    var confidentDupe = true
+    ///
+    /// FIX 4: default is FALSE — a group is uncertain until the scanner explicitly
+    /// proves confidence (dHash spread ≤ threshold AND neural feature distance ≤
+    /// threshold). Defaulting to true was "guilty until proven innocent": a group
+    /// constructed without explicitly setting this flag would pre-seed rejections,
+    /// which is the wrong, more-aggressive behaviour. Every construction site that
+    /// wants confident behaviour MUST set confidentDupe = true explicitly.
+    var confidentDupe = false
 
     // SLICE-1 INVARIANT (unchanged from prior model):
     //   • The scanner NEVER seeds a protected frame into `rejected`.
@@ -219,6 +226,27 @@ final class LibraryModel: ObservableObject {
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(result.count)
         result.enumerateObjects { asset, _, _ in
+            // FIX 1 — Live Photo paired-video guard.
+            // When includeVideo is true, the .mov companion of a Live Photo appears
+            // as an independent video PHAsset. Deleting it orphans the Live Photo
+            // still (motion is permanently lost and the pair is NOT recoverable as
+            // a pair from Recently Deleted). We exclude it here.
+            //
+            // Detection: PHAssetResource.assetResources(for:) is synchronous and
+            // returns the resource descriptors for an asset without touching pixels.
+            // A Live Photo paired video has at least one resource with type
+            // .pairedVideo (9) or .fullSizePairedVideo (10). A regular video has
+            // neither. The Live Photo STILL (photo side) is NOT excluded — deleting
+            // a Live Photo still via PhotoKit correctly removes both halves
+            // atomically and is recoverable from Recently Deleted; only the orphaned
+            // video half is dangerous.
+            if asset.mediaType == .video {
+                let resources = PHAssetResource.assetResources(for: asset)
+                let isPairedVideo = resources.contains {
+                    $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
+                }
+                if isPairedVideo { return }   // skip — deleting it orphans the Live Photo
+            }
             assets.append(asset)
             map[asset.localIdentifier] = asset
         }
@@ -387,7 +415,18 @@ final class LibraryModel: ObservableObject {
         var assets: [PHAsset] = []
         var map: [String: PHAsset] = [:]
         assets.reserveCapacity(result.count)
-        result.enumerateObjects { a, _, _ in assets.append(a); map[a.localIdentifier] = a }
+        result.enumerateObjects { a, _, _ in
+            // FIX 1 — Live Photo paired-video guard (same logic as scan()).
+            if a.mediaType == .video {
+                let resources = PHAssetResource.assetResources(for: a)
+                let isPairedVideo = resources.contains {
+                    $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
+                }
+                if isPairedVideo { return }
+            }
+            assets.append(a)
+            map[a.localIdentifier] = a
+        }
         assetsByID = map
 
         if enrichment == nil {
@@ -444,7 +483,18 @@ final class LibraryModel: ObservableObject {
         var assets: [PHAsset] = []
         var map: [String: PHAsset] = [:]
         assets.reserveCapacity(result.count)
-        result.enumerateObjects { a, _, _ in assets.append(a); map[a.localIdentifier] = a }
+        result.enumerateObjects { a, _, _ in
+            // FIX 1 — Live Photo paired-video guard (same logic as scan()).
+            if a.mediaType == .video {
+                let resources = PHAssetResource.assetResources(for: a)
+                let isPairedVideo = resources.contains {
+                    $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
+                }
+                if isPairedVideo { return }
+            }
+            assets.append(a)
+            map[a.localIdentifier] = a
+        }
         assetsByID = map
 
         if enrichment == nil {
@@ -732,11 +782,33 @@ final class LibraryModel: ObservableObject {
     /// Delete every reviewed non-keeper, non-favorite frame via PhotoKit. macOS
     /// shows its own confirmation; items land in Recently Deleted (30 days).
     /// Returns the number actually removed.
+    ///
+    /// FIX 3 — stale-asset guard: if the library changed since the last scan,
+    /// some asset IDs may no longer resolve. Rather than silently dropping them
+    /// (which would undercount "Deleted N" and clear groups as if they were gone),
+    /// we surface a clear warning and let the caller decide whether to proceed.
+    ///
+    /// `staleWarning`: non-nil when some IDs could not be resolved. The closure
+    /// receives (staleCount, foundCount) and must return `true` to proceed with
+    /// the assets that WERE found, or `false` to abort entirely.
     @discardableResult
-    func deleteReviewed() async throws -> Int {
+    func deleteReviewed(
+        staleWarning: ((Int, Int) async -> Bool)? = nil
+    ) async throws -> Int {
         let ids = groups.flatMap(\.deletionIDs)
         let assets = ids.compactMap { assetsByID[$0] }
         guard !assets.isEmpty else { return 0 }
+
+        // FIX 3: detect stale IDs (library mutated since scan).
+        if assets.count != ids.count {
+            let staleCount = ids.count - assets.count
+            if let warn = staleWarning {
+                let proceed = await warn(staleCount, assets.count)
+                guard proceed else { return 0 }
+            }
+            // No warning handler supplied: proceed silently with found assets
+            // (legacy callers that don't pass the closure get existing behavior).
+        }
 
         // Build audit records BEFORE the delete (photos still exist in model).
         let timestamp = DeletionAuditLog.nowTimestamp()
