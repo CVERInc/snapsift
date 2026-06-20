@@ -1187,6 +1187,18 @@ struct GroupReview: View {
             if p.favorite  { tag("★",       .reefAmber, Color(hex: 0x1a1203)) }
             if p.edited    { tag("✎",       .reefAmber, Color(hex: 0x1a1203)) }
             if p.isDocument { tag("doc",    .reefAmber, Color(hex: 0x1a1203)) }
+            // FIX #4: iCloud-eviction indicator — document classification was
+            // skipped (original not on-device), so we couldn't confirm this isn't
+            // a document. The frame is left un-marked to stay safe.
+            if p.documentEvalDegraded {
+                Image(systemName: "icloud.slash")
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(Color.reefTextDim.opacity(0.18))
+                    .foregroundStyle(Color.reefTextDim)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .help(t.tipDocumentEvalDegraded())
+            }
         }
         .padding(6)
     }

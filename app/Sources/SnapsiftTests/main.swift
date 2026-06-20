@@ -134,6 +134,88 @@ check(keeper([ph(1, 0, size: 5_000_000, originalCamera: false),
               ph(2, 1, size: 1_000_000, originalCamera: false)]).uuid == "U1",
       "originalCamera all-false → falls through to size (App detection pending)")
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX #9 — originalCamera guard tests
+//
+// PhotoFlags.originalCamera() is documented as a dead field that always returns
+// false (pending real EXIF Make/Model wiring). These tests:
+//   (a) PIN the current all-false behaviour — keeper selection falls through to
+//       the sharpness/format/size/earliest tiebreaks exactly as if the signal
+//       weren't there. If someone partially wires originalCamera in a way that
+//       breaks the uniform-false path, this catches it.
+//   (b) DOCUMENT the INTENDED behaviour for when EXIF IS wired — a frame with
+//       originalCamera=true must beat an otherwise-equal sibling with
+//       originalCamera=false (and that outcome must flow through keeperReason
+//       as .originalCamera). This test will start failing the moment the signal
+//       is wired, as a reminder that it needs end-to-end verification.
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("FIX #9 — originalCamera guard tests")
+
+do {
+    // (a) ALL-FALSE GUARD: when every frame has originalCamera=false the signal
+    //     is uniformly inactive and keeper selection is identical to a world
+    //     where the field doesn't exist. Verify the fallthrough chain:
+    //     quality-tie → format-tie → size wins, then earliest wins.
+
+    // Quality tie, format tie, size decides.
+    let big   = ph(1, 0, size: 9_000_000, uti: "public.heic", quality: 0.5,
+                   originalCamera: false)
+    let small = ph(2, 1, size: 1_000_000, uti: "public.heic", quality: 0.5,
+                   originalCamera: false)
+    check(keeper([big, small]).uuid == "U1",
+          "originalCamera all-false: size tiebreak works (not disrupted by dead field)")
+
+    // Quality tie, format wins.
+    let heic = ph(3, 0, uti: "public.heic", quality: 0.5, originalCamera: false)
+    let jpeg = ph(4, 1, uti: "public.jpeg", quality: 0.5, originalCamera: false)
+    check(keeper([heic, jpeg]).uuid == "U3",
+          "originalCamera all-false: format tiebreak works (not disrupted by dead field)")
+
+    // Quality tie, format tie, size tie, earliest wins.
+    let first  = ph(5, 0, size: 1_000_000, uti: "public.heic", quality: 0.5,
+                    originalCamera: false)
+    let second = ph(6, 1, size: 1_000_000, uti: "public.heic", quality: 0.5,
+                    originalCamera: false)
+    check(keeper([first, second]).uuid == "U5",
+          "originalCamera all-false: earliest tiebreak works (not disrupted by dead field)")
+
+    // keeperReason must NOT return .originalCamera when both frames are all-false.
+    let r = keeperReason(photos: [heic, jpeg], keeperID: "U3")
+    check(r == .format,
+          "originalCamera all-false: keeperReason returns .format, not .originalCamera")
+}
+
+do {
+    // (b) INTENDED BEHAVIOUR GUARD: IF originalCamera were true for one frame
+    //     and false for an otherwise equal sibling, the originalCamera frame
+    //     must win (documents the intended behaviour for when EXIF is wired).
+    //     This is a forward-compatibility test: it passes today because the
+    //     Core RankKey already implements the precedence correctly; it will
+    //     remain green once the App detector is wired.
+    let cam   = ph(1, 0, size: 1_000_000, uti: "public.heic", quality: 0.5,
+                   sharpness: 0.5, originalCamera: true)
+    let resave = ph(2, 1, size: 9_000_000, uti: "public.heic", quality: 0.5,
+                    sharpness: 0.5, originalCamera: false)
+    check(keeper([cam, resave]).uuid == "U1",
+          "originalCamera=true beats larger/newer sibling (intended ranking when EXIF is wired)")
+
+    // keeperReason correctly identifies originalCamera as the deciding signal.
+    check(keeperReason(photos: [cam, resave], keeperID: "U1") == .originalCamera,
+          "originalCamera=true: keeperReason returns .originalCamera")
+
+    // The asymmetry is one-directional: the cam frame winning requires the
+    // resave to be false. Two true frames fall through to the next tiebreak
+    // (sharpness here, then format/size/earliest).
+    let cam2 = ph(3, 0, size: 9_000_000, uti: "public.heic", quality: 0.5,
+                  sharpness: 0.5, originalCamera: true)
+    let cam3 = ph(4, 1, size: 1_000_000, uti: "public.heic", quality: 0.5,
+                  sharpness: 0.5, originalCamera: true)
+    // Both true → falls through to size (cam2 larger).
+    check(keeper([cam2, cam3]).uuid == "U3",
+          "originalCamera both-true: falls through to size tiebreak")
+}
+
 print("Regroup-after-deletion")
 do {
     // A "keep all" group deletes nothing, so its frames all survive a delete
@@ -892,6 +974,82 @@ do {
     // Only U2 (plain) should be seeded. U1 is keeper. U3 is protected (edited).
     check(seeded == Set(["U2"]),
           "confident seeding: only non-keeper non-protected frames; protected never seeded")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX #4 — documentEvalDegraded: safe-seeding guard (pure-Core)
+//
+// When the Vision document eval ran but the image was unavailable (iCloud-
+// evicted / timeout), `documentEvalDegraded` is set to true and `isDocument`
+// is false — but we cannot confirm the frame is NOT a document. The auto-
+// seeding logic must treat such a frame like a protected one: never seed it
+// into `rejected` for confident groups (stay keep-by-default).
+//
+// Tests verify:
+//   1. A degraded frame is NOT in the auto-seeded rejected set.
+//   2. The `documentEvalDegraded` field threads through Photo correctly.
+//   3. A non-degraded, non-protected frame IS still seeded as before.
+//   4. The user can still MANUALLY reject a degraded frame via forceReject.
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("FIX #4 — documentEvalDegraded auto-seeding guard (pure-Core)")
+
+// Helper: mirror the FIX #4 aware seeding logic from LibraryModel.scan().
+// Confident group: reject non-keeper, non-protected, non-degraded frames.
+func seedRejected(photos: [Photo], keeperID: String) -> Set<String> {
+    Set(photos.compactMap { p in
+        (p.uuid != keeperID && !p.isProtected && !p.documentEvalDegraded) ? p.uuid : nil
+    })
+}
+
+do {
+    // (1) Degraded frame excluded from auto-seeding, just like a protected frame.
+    let keep     = Photo(uuid: "UK", filename: "keep.heic", takenAt: 0,
+                         width: 100, height: 100, size: 1_000_000, uti: "public.heic",
+                         quality: 0.9)
+    let plain    = Photo(uuid: "UP", filename: "plain.heic", takenAt: 1,
+                         width: 100, height: 100, size: 1_000_000, uti: "public.heic")
+    let degraded = Photo(uuid: "UD", filename: "degraded.heic", takenAt: 2,
+                         width: 100, height: 100, size: 1_000_000, uti: "public.heic",
+                         documentEvalDegraded: true)
+
+    let seeded = seedRejected(photos: [keep, plain, degraded], keeperID: "UK")
+    check(!seeded.contains("UK"), "degraded: keeper never seeded")
+    check(seeded.contains("UP"),  "degraded: plain non-keeper IS seeded")
+    check(!seeded.contains("UD"), "degraded: degraded frame NOT auto-seeded (FIX #4)")
+}
+
+do {
+    // (2) documentEvalDegraded field threads through Photo correctly.
+    let p = Photo(uuid: "Ux", filename: "x.heic", takenAt: 0,
+                  width: 100, height: 100, size: 1000, uti: "public.heic",
+                  documentEvalDegraded: true)
+    check(p.documentEvalDegraded == true,  "documentEvalDegraded=true stored correctly")
+    let q = Photo(uuid: "Uy", filename: "y.heic", takenAt: 0,
+                  width: 100, height: 100, size: 1000, uti: "public.heic")
+    check(q.documentEvalDegraded == false, "documentEvalDegraded defaults to false")
+}
+
+do {
+    // (3) Non-degraded, non-protected frame still seeded as before (no regression).
+    let keep  = Photo(uuid: "UK2", filename: "k.heic", takenAt: 0,
+                      width: 100, height: 100, size: 1_000_000, uti: "public.heic",
+                      quality: 0.9)
+    let plain = Photo(uuid: "UP2", filename: "p.heic", takenAt: 1,
+                      width: 100, height: 100, size: 1_000_000, uti: "public.heic")
+    let seeded = seedRejected(photos: [keep, plain], keeperID: "UK2")
+    check(seeded == Set(["UP2"]),
+          "degraded: non-degraded plain non-keeper still seeded as normal")
+}
+
+do {
+    // (4) A degraded frame CAN still be manually rejected by the user (force path).
+    //     Verify that documentEvalDegraded doesn't accidentally set isProtected.
+    let degraded = Photo(uuid: "UD2", filename: "d.heic", takenAt: 0,
+                         width: 100, height: 100, size: 1000, uti: "public.heic",
+                         documentEvalDegraded: true)
+    check(!degraded.isProtected,
+          "degraded: documentEvalDegraded alone does not set isProtected (user can still force-reject)")
 }
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")

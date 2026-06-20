@@ -311,10 +311,13 @@ final class LibraryModel: ObservableObject {
             var g = ReviewGroup(photos: photos, keeperID: keep.uuid)
             g.confidentDupe = confident
             if confident {
-                // Seed rejections: all non-keeper, non-protected frames.
+                // Seed rejections: all non-keeper, non-protected, non-degraded frames.
                 // SLICE-1 INVARIANT: protected frames are NEVER auto-seeded.
+                // FIX #4: frames whose document eval was degraded (iCloud-evicted /
+                // timeout) are also NEVER auto-seeded — we couldn't confirm they are
+                // not documents, so we stay in the safe keep-by-default direction.
                 g.rejected = Set(photos.compactMap { p in
-                    (p.uuid != keep.uuid && !p.isProtected) ? p.uuid : nil
+                    (p.uuid != keep.uuid && !p.isProtected && !p.documentEvalDegraded) ? p.uuid : nil
                 })
             }
             // Uncertain groups: rejected stays empty (keep all, user decides).
@@ -342,20 +345,29 @@ final class LibraryModel: ObservableObject {
                      originalCamera: PhotoFlags.originalCamera(asset))
     }
 
-    /// Fill the pixel-based flags (`isDocument`, `sharpness`) for the photos that
-    /// belong to clusters — Vision/Laplacian never run on the whole library, only
-    /// on frames that could actually be deleted or chosen as keeper. Returns the
-    /// clusters with those photos rebuilt; `edited`/`originalCamera`/quality/size
-    /// (already set in `makePhoto`) are preserved. Bounded concurrency with a
-    /// per-image timeout, like the scanners, so a stuck thumbnail can't stall it.
+    /// Fill the pixel-based flags (`isDocument`, `sharpness`, `documentEvalDegraded`)
+    /// for the photos that belong to clusters — Vision/Laplacian never run on the
+    /// whole library, only on frames that could actually be deleted or chosen as
+    /// keeper. Returns the clusters with those photos rebuilt; `edited`/
+    /// `originalCamera`/quality/size (already set in `makePhoto`) are preserved.
+    /// Bounded concurrency with a per-image timeout, like the scanners, so a stuck
+    /// thumbnail can't stall it.
+    ///
+    /// FIX #4: uses `PhotoFlags.isDocumentResult` (returns `(isDocument, degraded)`)
+    /// instead of the plain bool variant so we can record whether the Vision pass
+    /// was actually able to see the image. A `degraded = true` result means the
+    /// original was iCloud-evicted or timed out — `isDocument` is unreliable in
+    /// that case and the Photo is marked `documentEvalDegraded = true` so the caller
+    /// can withhold auto-seeding.
     private func enrichFlags(_ clusters: [[Photo]],
                              progress: (Int, Int) -> Void) async -> [[Photo]] {
         let uuids = Array(Set(clusters.flatMap { $0.map(\.uuid) }))
         var docs: [String: Bool] = [:]
+        var docsDegraded: [String: Bool] = [:]
         var sharps: [String: Double] = [:]
         var done = 0
         let lookup = assetsByID
-        await withTaskGroup(of: (String, Bool, Double).self) { group in
+        await withTaskGroup(of: (String, Bool, Bool, Double).self) { group in
             var next = 0
             let limit = 8
             func add() {
@@ -364,16 +376,19 @@ final class LibraryModel: ObservableObject {
                     guard let a = lookup[id] else { continue }
                     let mgr = imageManager
                     group.addTask {
-                        async let doc = PhotoFlags.isDocument(a, manager: mgr)
+                        async let docResult = PhotoFlags.isDocumentResult(a, manager: mgr)
                         async let shp = PhotoFlags.sharpness(a, manager: mgr)
-                        return (id, await doc, await shp)
+                        let (isDoc, degraded) = await docResult
+                        return (id, isDoc, degraded, await shp)
                     }
                     return
                 }
             }
             for _ in 0..<limit { add() }
-            for await (id, doc, shp) in group {
-                docs[id] = doc; sharps[id] = shp
+            for await (id, doc, degraded, shp) in group {
+                docs[id] = doc
+                docsDegraded[id] = degraded
+                sharps[id] = shp
                 done += 1
                 if done % 25 == 0 { progress(done, uuids.count) }
                 add()
@@ -386,7 +401,8 @@ final class LibraryModel: ObservableObject {
                       kind: p.kind, favorite: p.favorite, quality: p.quality,
                       edited: p.edited, isDocument: docs[p.uuid] ?? p.isDocument,
                       sharpness: sharps[p.uuid] ?? p.sharpness,
-                      originalCamera: p.originalCamera)
+                      originalCamera: p.originalCamera,
+                      documentEvalDegraded: docsDegraded[p.uuid] ?? p.documentEvalDegraded)
             }
         }
     }
@@ -864,6 +880,33 @@ final class LibraryModel: ObservableObject {
             ng.includeProtected = false
             return ng
         }
+
+        // FIX #5 — refresh assetsByID after a successful delete.
+        //
+        // After the delete pass the assetsByID map still holds the pre-delete
+        // snapshot: any asset that was removed is still in the map (stale), and if
+        // the library was mutated by another process between the scan and now there
+        // may be IDs in the map that no longer exist. We do a cheap metadata-only
+        // re-fetch of all IDs that SURVIVED into the remaining groups and rebuild
+        // the map from what actually exists. No pixel/image request; no network.
+        //
+        // Defensive: any surviving group member whose asset no longer resolves is
+        // dropped from the group (the group may then resolve to <2 frames and be
+        // removed on the next user-facing rescan — we don't compact further here
+        // to avoid introducing a second silent mutation).
+        let survivingIDs = Set(groups.flatMap { $0.photos.map(\.uuid) })
+        if !survivingIDs.isEmpty {
+            let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(survivingIDs), options: nil)
+            var freshMap: [String: PHAsset] = [:]
+            freshMap.reserveCapacity(fetched.count)
+            fetched.enumerateObjects { asset, _, _ in
+                freshMap[asset.localIdentifier] = asset
+            }
+            assetsByID = freshMap
+        } else {
+            assetsByID = [:]
+        }
+
         return assets.count
     }
 }

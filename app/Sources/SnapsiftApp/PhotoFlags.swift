@@ -87,11 +87,20 @@ enum PhotoFlags {
     ///   • Network is disabled (`isNetworkAccessAllowed = false` on all requests) —
     ///     100 % on-device, consistent with the rest of the scan pipeline.
     ///
-    /// Failure direction: unreadable image, ambiguous result, or insufficient text
-    /// → `false` (NOT a document). Over-protecting on a genuine miss is harmless;
-    /// wrongly protecting a normal photo defeats the scan.
-    static func isDocument(_ asset: PHAsset, manager: PHCachingImageManager) async -> Bool {
-        guard let cg = await cgImage(asset, manager) else { return false }   // unreadable → not a document (safe)
+    /// FIX #4 — iCloud-eviction: when `cgImage()` returns nil (image not on-device
+    /// / 2 s timeout) we cannot determine whether this frame is a document. Rather
+    /// than silently returning `false` (which could let a real document slip into
+    /// the auto-reject set), the primary entry point `isDocumentResult` returns
+    /// `degraded = true` so the caller knows to withhold auto-seeding.
+    ///
+    /// Failure direction: unreadable image → `(false, degraded: true)`.
+    ///                    ambiguous result / insufficient text → `(false, false)`.
+    static func isDocumentResult(_ asset: PHAsset,
+                                 manager: PHCachingImageManager) async -> (isDocument: Bool, degraded: Bool) {
+        guard let cg = await cgImage(asset, manager) else {
+            // Image not on-device / timed out → we genuinely do not know.
+            return (false, true)
+        }
 
         // Minimum number of distinct word-level text observations required.
         // A receipt / scan / ID card comfortably exceeds 5; a photo of a person
@@ -100,7 +109,7 @@ enum PhotoFlags {
         // Per-observation recognition confidence floor.
         let minTextConfidence: Float = 0.5
 
-        return await withCheckedContinuation { cont in
+        let docResult: Bool = await withCheckedContinuation { cont in
             visionQueue.async {
                 let handler = VNImageRequestHandler(cgImage: cg, options: [:])
 
@@ -134,6 +143,12 @@ enum PhotoFlags {
                 cont.resume(returning: highConfidenceWords.count >= minTextObservations)
             }
         }
+        return (docResult, false)
+    }
+
+    /// Convenience bool-only wrapper (for callers that do not need the degraded flag).
+    static func isDocument(_ asset: PHAsset, manager: PHCachingImageManager) async -> Bool {
+        await isDocumentResult(asset, manager: manager).isDocument
     }
 
     /// On-device sharpness estimate (higher = sharper) via Laplacian variance over

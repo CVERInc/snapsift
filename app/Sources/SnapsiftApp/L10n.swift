@@ -326,6 +326,20 @@ struct L10n: Sendable {
         }
     }
 
+    // FIX #4: iCloud-eviction degraded eval indicator tooltip.
+
+    /// Tooltip for the `icloud.slash` badge shown on cards whose document
+    /// classification was skipped because the original image wasn't on-device
+    /// (iCloud-evicted or timed out). The frame is left un-marked (not
+    /// auto-seeded for deletion) because we couldn't confirm it is not a document.
+    func tipDocumentEvalDegraded() -> String {
+        switch language {
+        case .en:   return "Couldn't fully check this photo — its original isn't on this Mac. Left un-marked to be safe."
+        case .ja:   return "この写真を完全に確認できませんでした — オリジナルがこの Mac にありません。安全のためマークなしのままにしています。"
+        case .zhTW: return "無法完整檢查這張照片 — 原始檔不在這台 Mac 上。為了安全起見，保持未標記狀態。"
+        }
+    }
+
     // FIX C: include-protected override strings.
 
     /// Button label for the per-group "include protected" toggle (N = protected frame count).

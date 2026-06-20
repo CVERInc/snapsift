@@ -45,11 +45,30 @@ public struct Photo: Sendable, Equatable, Identifiable {
     /// guarantees.
     public let originalCamera: Bool
 
+    // ── iCloud-eviction sentinel (FIX #4) ────────────────────────────────────
+    // When the document/sharpness eval ran but the underlying image was
+    // unavailable on-device (iCloud-evicted or timed out), we cannot determine
+    // whether this frame is a document. We record that uncertainty here so the
+    // caller can avoid auto-seeding such a frame into the rejected set — we must
+    // stay in the safe keep-by-default direction.
+    //
+    // Sharpness-only degradation is NOT tracked here (sharpness is just a
+    // tiebreaker; getting it wrong only reorders the keeper, never auto-deletes
+    // a frame that might deserve protection). This flag means specifically:
+    //   "document classification could NOT be performed — isDocument may be wrong".
+
+    /// True when the pixel-based document eval (Vision) ran but the underlying
+    /// image was not available on-device (iCloud-evicted / timeout), so
+    /// `isDocument` may be incorrectly `false`. Such a frame must NOT be
+    /// auto-seeded into the rejected set.
+    public let documentEvalDegraded: Bool
+
     public init(uuid: String, filename: String, takenAt: Double,
                 width: Int, height: Int, size: Int, uti: String,
                 kind: Int = 0, favorite: Bool = false, quality: Double = 0,
                 edited: Bool = false, isDocument: Bool = false,
-                sharpness: Double = 0, originalCamera: Bool = false) {
+                sharpness: Double = 0, originalCamera: Bool = false,
+                documentEvalDegraded: Bool = false) {
         self.uuid = uuid
         self.filename = filename
         self.takenAt = takenAt
@@ -64,6 +83,7 @@ public struct Photo: Sendable, Equatable, Identifiable {
         self.isDocument = isDocument
         self.sharpness = sharpness
         self.originalCamera = originalCamera
+        self.documentEvalDegraded = documentEvalDegraded
     }
 
     /// A frame a human likely wants to keep regardless of keeper choice: a
