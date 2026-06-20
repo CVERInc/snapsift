@@ -139,46 +139,56 @@ struct L10n: Sendable {
     func helpRows() -> [(String, String)] {
         switch language {
         case .en: return [
-            ("↑ ↓ / j k", "Move between groups"),
-            ("1 – 9", "Keep the Nth frame"),
-            ("→ / l / ⏎", "Enter the frames"),
-            ("← → / h l", "Move between frames"),
-            ("⏎", "Keep the focused frame"),
-            ("Space", "Full-res preview · zoom"),
-            ("A", "Keep the whole group"),
-            ("D", "Delete the whole group"),
-            ("Esc", "Back to the list"),
-            ("⌘1 ⌘2 ⌘3", "Scan / Look-alikes / Similar sets"),
-            ("⌘⌫", "Delete the marked photos"),
-            ("?", "This cheat sheet"),
+            // List zone
+            ("↑ ↓ / j k",     "Move between groups"),
+            ("→ / l / ⏎",     "Enter frames"),
+            ("a",              "Keep whole group"),
+            ("d",              "Reject whole group"),
+            // Grid zone
+            ("← → ↑ ↓ / hjkl","Move between frames"),
+            ("Space",          "Open loupe"),
+            ("X / ⌫",          "Reject frame · toggle"),
+            ("⏎",              "Keep frame + set keeper ★"),
+            ("⇧X",             "Force-reject protected frame"),
+            ("Esc",            "Back to list"),
+            // Loupe zone
+            ("← → / h l",     "Loupe: prev / next frame"),
+            ("Space / Esc",    "Close loupe"),
+            // Global
+            ("⌘⌫",             "Commit — delete all rejected"),
+            ("?",              "This cheat sheet"),
         ]
         case .ja: return [
-            ("↑ ↓ / j k", "グループを移動"),
-            ("1 – 9", "N枚目を残す"),
-            ("→ / l / ⏎", "写真へ入る"),
-            ("← → / h l", "写真を移動"),
-            ("⏎", "選択中の1枚を残す"),
-            ("スペース", "原本プレビュー・拡大"),
-            ("A", "グループ全部を残す"),
-            ("D", "グループ全部を削除"),
-            ("Esc", "リストへ戻る"),
-            ("⌘1 ⌘2 ⌘3", "スキャン / そっくり / テーマ別"),
-            ("⌘⌫", "選択した写真を削除"),
-            ("?", "このキー一覧"),
+            ("↑ ↓ / j k",     "グループを移動"),
+            ("→ / l / ⏎",     "写真へ入る"),
+            ("a",              "グループ全部を残す"),
+            ("d",              "グループ全部を却下"),
+            ("← → ↑ ↓ / hjkl","写真を移動"),
+            ("スペース",        "ルーペを開く"),
+            ("X / ⌫",          "フレームを却下・切替"),
+            ("⏎",              "このフレームを残す ★"),
+            ("⇧X",             "保護フレームを強制削除"),
+            ("Esc",            "リストへ戻る"),
+            ("← → / h l",     "ルーペ：前／次"),
+            ("スペース / Esc", "ルーペを閉じる"),
+            ("⌘⌫",             "削除を実行"),
+            ("?",              "このキー一覧"),
         ]
         case .zhTW: return [
-            ("↑ ↓ / j k", "上一群／下一群"),
-            ("1 – 9", "留第 N 張"),
-            ("→ / l / ⏎", "進入格子"),
-            ("← → / h l", "格子間移動"),
-            ("⏎", "把焦點這張設成保留"),
-            ("空白", "原檔預覽・可放大"),
-            ("A", "整群保留"),
-            ("D", "整群刪除"),
-            ("Esc", "回到清單"),
-            ("⌘1 ⌘2 ⌘3", "掃描／找相似／同主題"),
-            ("⌘⌫", "刪掉標記的照片"),
-            ("?", "這張快捷小抄"),
+            ("↑ ↓ / j k",     "上一群／下一群"),
+            ("→ / l / ⏎",     "進入格子"),
+            ("a",              "整群保留"),
+            ("d",              "整群標刪"),
+            ("← → ↑ ↓ / hjkl","格子間移動"),
+            ("空白",            "開啟放大鏡"),
+            ("X / ⌫",          "標刪這張・切換"),
+            ("⏎",              "保留這張並設為主保留 ★"),
+            ("⇧X",             "強制標刪受保護的張"),
+            ("Esc",            "回到清單"),
+            ("← → / h l",     "放大鏡：前一張／後一張"),
+            ("空白 / Esc",     "關閉放大鏡"),
+            ("⌘⌫",             "執行刪除所有標刪"),
+            ("?",              "這張快捷小抄"),
         ]
         }
     }
@@ -378,6 +388,26 @@ struct L10n: Sendable {
         case .en: return "Cancel"
         case .ja: return "キャンセル"
         case .zhTW: return "取消"
+        }
+    }
+
+    // MARK: per-frame keyboard actions
+
+    /// Inline hint shown when the user presses X on a protected frame.
+    func protectedHint() -> String {
+        switch language {
+        case .en: return "Protected — ⇧X to force-reject"
+        case .ja: return "保護対象 — ⇧X で強制却下"
+        case .zhTW: return "受保護 — ⇧X 強制標刪"
+        }
+    }
+
+    /// Alert body for the ⇧X force-reject confirmation (single frame).
+    func forceRejectAlertBody() -> String {
+        switch language {
+        case .en: return "This photo is protected (favorite, edited, or document). Force-rejecting it adds it to the deletion set — it will go to Recently Deleted and can be recovered within 30 days."
+        case .ja: return "この写真は保護対象（お気に入り・編集済み・書類）です。強制却下すると削除対象に追加されます。「最近削除した項目」に移動し、30日以内は復元できます。"
+        case .zhTW: return "這張照片受保護（最愛、已編輯或文件）。強制標刪後會加入刪除清單，移到「最近刪除」，30 天內可復原。"
         }
     }
 

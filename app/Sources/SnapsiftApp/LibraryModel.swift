@@ -6,69 +6,61 @@ import SnapsiftCore
 /// One reviewable near-duplicate cluster: the Core photos plus the currently
 /// chosen keeper. Protected frames (favorite / edited / document — `Photo
 /// .isProtected`) are never deletable by DEFAULT; the user can explicitly
-/// opt in via `includeProtected` for a deliberate override.
+/// force-reject them via the keyboard `⇧X` path or the mouse "include protected"
+/// button, which both funnel through `setIncludeProtected` + a confirm dialog.
 struct ReviewGroup: Identifiable {
     let id = UUID()
     let photos: [Photo]
     var keeperID: String
-    /// When set, the whole group is kept — nothing is deleted. For groups that
-    /// are perceptually similar but that the user wants to keep in full (e.g.
-    /// several poses of the same subject).
-    var keepAll = false
-    /// Human override: the user looked and wants the whole group gone (machine
-    /// kept them apart, but to the eye they're redundant — or simply unwanted).
-    /// Protected frames are still excluded UNLESS `includeProtected` is also on.
-    /// Mutually exclusive with ``keepAll``.
-    var deleteAll = false
-    /// A confident, near-identical burst (members barely differ) → safe to
-    /// pre-mark for deletion. When false the frames differ enough that they may
-    /// be distinct moments, so we don't pre-mark anything (keepAll defaults on).
+    /// Per-frame reject set: asset uuids the user wants deleted.
+    /// SEEDED at scan time: confident groups seed all non-keeper non-protected
+    /// frames; uncertain groups seed empty (keep all).
+    /// A frame is a deletion iff its uuid is in this set — `isDelete` and
+    /// `deletionIDs` derive purely from here.
+    var rejected: Set<String> = []
+    /// A confident, near-identical burst → safe to pre-seed rejections.
+    /// When false the frames differ enough that the user should decide.
     var confidentDupe = true
 
-    // FIX C — Informed-consent override for protected frames.
-    //
-    // The protection guarantee ("never auto-delete favorites / edited / documents")
-    // is the STRONG DEFAULT and is never bypassed by the automatic scan. However a
-    // human must be able to explicitly say "yes, delete these too" for their own
-    // deliberate cleanup — otherwise the tool can't help a user who consciously
-    // wants a protected duplicate gone.
-    //
-    // INVARIANT (slice-1 guarantee, unchanged):
-    //   • `includeProtected` defaults to `false`.
-    //   • The scanner NEVER sets it to `true` — only explicit user action does.
-    //   • A protected frame is only in `deletionIDs` when BOTH `deleteAll` AND
-    //     `includeProtected` are `true`, and the user confirmed a dialog.
-    //   • Auto-marking (non-deleteAll path) NEVER deletes protected frames even
-    //     when `includeProtected` is on — the user must arm the group via `deleteAll`
-    //     first.
-
-    /// Explicit user opt-in to include protected frames (favorites / edited /
-    /// documents) in the deletion set for this group. Never set by the scanner.
-    /// Must be paired with `deleteAll` to have any effect.
+    // SLICE-1 INVARIANT (unchanged from prior model):
+    //   • The scanner NEVER seeds a protected frame into `rejected`.
+    //   • A protected frame can only enter `rejected` via explicit user action
+    //     (keyboard ⇧X or mouse "include protected") — both require confirmation.
+    //   • `includeProtected` = true is the signal that the user has confirmed
+    //     the override for this group. It gates the commit dialog.
+    /// Set to true only after explicit user confirmation. Required for the
+    /// final commit-delete to include any protected frame in this group.
     var includeProtected = false
 
-    func isKeeper(_ p: Photo) -> Bool { !keepAll && !deleteAll && p.uuid == keeperID }
-    func isDelete(_ p: Photo) -> Bool {
-        guard !keepAll else { return false }
-        // Protected frames are excluded UNLESS the user explicitly opted in AND
-        // the group is armed (deleteAll). This two-condition guard means neither
-        // flag alone can accidentally cause a protected frame to be deleted.
-        if p.isProtected && !(deleteAll && includeProtected) { return false }
-        return deleteAll || p.uuid != keeperID
+    // MARK: - Derived state
+
+    /// True when the user has explicitly cleared all rejections for this group.
+    var keepAll: Bool { rejected.isEmpty }
+    /// True when every non-protected frame (that isn't the keeper) is rejected.
+    var deleteAll: Bool {
+        let nonKeeperNonProtected = photos.filter { $0.uuid != keeperID && !$0.isProtected }
+        guard !nonKeeperNonProtected.isEmpty else { return false }
+        return nonKeeperNonProtected.allSatisfy { rejected.contains($0.uuid) }
     }
+
+    func isKeeper(_ p: Photo) -> Bool { p.uuid == keeperID && !rejected.contains(p.uuid) }
+    func isDelete(_ p: Photo) -> Bool {
+        guard rejected.contains(p.uuid) else { return false }
+        // Protected frames only deletable when explicitly opted in.
+        if p.isProtected && !includeProtected { return false }
+        return true
+    }
+
     var spanSec: Double { (photos.last?.takenAt ?? 0) - (photos.first?.takenAt ?? 0) }
     var hasFavorite: Bool { photos.contains { $0.favorite } }
     var hasVideo: Bool { photos.contains { $0.kind == 1 } }
     var deletionIDs: [String] { photos.filter(isDelete).map(\.uuid) }
-    /// Count of protected frames that would be deleted when includeProtected + deleteAll are both on.
-    var protectedDeletionCount: Int { photos.filter { $0.isProtected && deleteAll }.count }
+    /// Count of protected frames that are in `rejected` (regardless of includeProtected).
+    var protectedDeletionCount: Int { photos.filter { $0.isProtected && rejected.contains($0.uuid) }.count }
     /// Count of protected frames in this group (regardless of armed state).
     var protectedCount: Int { photos.filter(\.isProtected).count }
-    /// FIX 4: True when the group is armed for deletion AND actually has frames
-    /// that can be deleted. A group where every frame is protected (favorite /
-    /// edited / document) turns amber on `d` but contributes 0 deletions by default
-    /// — the visual armed state must reflect real deletability, not just the flag.
-    var effectivelyArmed: Bool { deleteAll && !deletionIDs.isEmpty }
+    /// True when there are real frames that would be deleted.
+    var effectivelyArmed: Bool { !deletionIDs.isEmpty }
 }
 
 /// A semantic bucket from the "Similar sets" pass: all photos Vision tagged with
@@ -180,7 +172,8 @@ final class LibraryModel: ObservableObject {
     /// quality sidecar — which carries real file sizes — wasn't readable).
     var reclaimableBytes: Int {
         groups.reduce(0) { acc, g in
-            acc + g.photos.filter { g.isDelete($0) }.reduce(0) { $0 + $1.size }
+            acc + g.deletionIDs.compactMap { id in g.photos.first { $0.uuid == id } }
+                .reduce(0) { $0 + $1.size }
         }
     }
 
@@ -286,9 +279,17 @@ final class LibraryModel: ObservableObject {
         var built: [ReviewGroup] = []
         for (idx, photos) in flagged.enumerated() {
             let confident = neuralConfident.contains(idx)
-            var g = ReviewGroup(photos: photos, keeperID: keeper(photos).uuid)
+            let keep = keeper(photos)
+            var g = ReviewGroup(photos: photos, keeperID: keep.uuid)
             g.confidentDupe = confident
-            g.keepAll = !confident            // uncertain groups: keep all, pre-mark nothing
+            if confident {
+                // Seed rejections: all non-keeper, non-protected frames.
+                // SLICE-1 INVARIANT: protected frames are NEVER auto-seeded.
+                g.rejected = Set(photos.compactMap { p in
+                    (p.uuid != keep.uuid && !p.isProtected) ? p.uuid : nil
+                })
+            }
+            // Uncertain groups: rejected stays empty (keep all, user decides).
             built.append(g)
         }
         groups = built
@@ -409,7 +410,10 @@ final class LibraryModel: ObservableObject {
         let enriched = await enrichFlags(raw) { done, total in
             self.progress = t.progVerifying(done, total)
         }
-        groups = enriched.map { ReviewGroup(photos: $0, keeperID: keeper($0).uuid) }
+        groups = enriched.map { photos in
+            // Look-alike groups are not auto-pre-marked (user decides).
+            ReviewGroup(photos: photos, keeperID: keeper(photos).uuid)
+        }
     }
 
     /// "Similar sets": find sets of photos you took of the same thing — several
@@ -481,43 +485,109 @@ final class LibraryModel: ObservableObject {
         return CategoryScanner.displayName(top)
     }
 
-    /// Promote a frame to keeper (favorites stay protected either way).
+    /// Promote a frame to keeper: clear its rejection AND set it as keeper ★.
+    /// ⏎ action in grid and loupe.
     func promote(group groupID: ReviewGroup.ID, to photoID: String) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
-        groups[i].keepAll = false
-        groups[i].deleteAll = false
         groups[i].keeperID = photoID
+        groups[i].rejected.remove(photoID)   // un-reject the new keeper
     }
 
-    /// Keep the entire group — exclude it from deletion. Toggles back off.
+    /// Keep the entire group — clear all rejections. `a` key.
+    func keepAll(group groupID: ReviewGroup.ID) {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        groups[i].rejected = []
+        groups[i].includeProtected = false
+    }
+
+    /// Toggle keep-all: if there are rejections, clear them; if already clear, re-seed.
     func toggleKeepAll(group groupID: ReviewGroup.ID) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
-        groups[i].keepAll.toggle()
-        if groups[i].keepAll { groups[i].deleteAll = false }   // mutually exclusive
-    }
-
-    /// Human override: delete the whole group (protected frames excluded by default).
-    /// Toggles back off; clears keepAll so the two never both apply.
-    /// When toggling OFF, also clears includeProtected so the user has to
-    /// explicitly re-opt-in if they re-arm the group.
-    func toggleDeleteAll(group groupID: ReviewGroup.ID) {
-        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
-        groups[i].deleteAll.toggle()
-        if groups[i].deleteAll {
-            groups[i].keepAll = false
+        if groups[i].rejected.isEmpty {
+            // Already keeping all — re-seed as if confident (reject non-keeper non-protected).
+            let photos = groups[i].photos
+            let keep = photos.first { $0.uuid == groups[i].keeperID } ?? photos[0]
+            groups[i].rejected = Set(photos.compactMap { p in
+                (p.uuid != keep.uuid && !p.isProtected) ? p.uuid : nil
+            })
         } else {
-            // Disarming resets the protected override — must be deliberate each time.
+            groups[i].rejected = []
             groups[i].includeProtected = false
         }
     }
 
-    /// FIX C: Explicit opt-in to include protected frames (favorites / edited /
-    /// documents) in the deletion set for this group. Only meaningful when
-    /// `deleteAll` is already true. NEVER called by the scanner; UI-only action
-    /// that requires prior confirmation from the user.
+    /// Reject whole group: seed rejected = all non-keeper non-protected frames. `d` key.
+    func rejectAll(group groupID: ReviewGroup.ID) {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        let photos = groups[i].photos
+        let keep = photos.first { $0.uuid == groups[i].keeperID } ?? photos[0]
+        groups[i].rejected = Set(photos.compactMap { p in
+            (p.uuid != keep.uuid && !p.isProtected) ? p.uuid : nil
+        })
+    }
+
+    /// Toggle reject-all: if not all non-protected are rejected, reject them;
+    /// if already fully rejected, clear all rejections (bulk toggle). `d` key via UI.
+    func toggleDeleteAll(group groupID: ReviewGroup.ID) {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        if groups[i].deleteAll {
+            // Was fully rejected — clear all.
+            groups[i].rejected = []
+            groups[i].includeProtected = false
+        } else {
+            rejectAll(group: groupID)
+        }
+    }
+
+    /// Toggle reject on a single frame. `X` / `⌫` key.
+    /// Protected frames: plain toggle is a NO-OP (returns false, caller shows hint).
+    /// Returns true if the toggle happened, false if blocked (protected frame).
+    @discardableResult
+    func toggleReject(group groupID: ReviewGroup.ID, frameID: String) -> Bool {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return false }
+        guard let p = groups[i].photos.first(where: { $0.uuid == frameID }) else { return false }
+        if p.isProtected { return false }   // blocked — caller shows hint
+        if groups[i].rejected.contains(frameID) {
+            groups[i].rejected.remove(frameID)
+        } else {
+            groups[i].rejected.insert(frameID)
+            // If rejecting the current keeper, promote to next best.
+            if frameID == groups[i].keeperID {
+                let remaining = groups[i].photos.filter { !groups[i].rejected.contains($0.uuid) }
+                if let next = remaining.max(by: { rankKey($0) < rankKey($1) }) {
+                    groups[i].keeperID = next.uuid
+                }
+            }
+        }
+        return true
+    }
+
+    /// Force-reject a protected frame — the ⇧X informed-consent path.
+    /// Caller MUST show confirmation dialog before calling this.
+    /// Sets includeProtected=true for this group (flags the group needs confirm on commit).
+    func forceReject(group groupID: ReviewGroup.ID, frameID: String) {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        groups[i].rejected.insert(frameID)
+        groups[i].includeProtected = true   // flag: this group now has protected rejections
+        // If rejecting the keeper, re-derive keeper from remaining non-rejected frames.
+        if frameID == groups[i].keeperID {
+            let remaining = groups[i].photos.filter { !groups[i].rejected.contains($0.uuid) }
+            if let next = remaining.max(by: { rankKey($0) < rankKey($1) }) {
+                groups[i].keeperID = next.uuid
+            }
+        }
+    }
+
+    /// Explicit opt-in to include protected frames in the deletion set for this group.
+    /// NEVER called by the scanner; UI-only action that requires prior confirmation.
     func setIncludeProtected(group groupID: ReviewGroup.ID, value: Bool) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
         groups[i].includeProtected = value
+        if !value {
+            // Removing override: un-reject all protected frames.
+            let protectedIDs = Set(groups[i].photos.filter(\.isProtected).map(\.uuid))
+            groups[i].rejected.subtract(protectedIDs)
+        }
     }
 
     /// Combined keeper key: an app-level extension of Core's `RankKey` that slots
@@ -683,9 +753,9 @@ final class LibraryModel: ObservableObject {
                                                keeperID: g.keeperID,
                                                removed: removed) else { return nil }
             var ng = ReviewGroup(photos: r.photos, keeperID: r.keeperID)
-            ng.keepAll = g.keepAll
-            ng.deleteAll = g.deleteAll
             ng.confidentDupe = g.confidentDupe
+            // Carry forward only the rejections that still exist in the remaining photos.
+            ng.rejected = g.rejected.filter { id in r.photos.contains { $0.uuid == id } }
             // includeProtected is intentionally NOT carried forward: after a delete
             // pass the protected frames that were opted-in are already gone, and the
             // remaining group should start fresh (default = protected, as always).

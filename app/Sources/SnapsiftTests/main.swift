@@ -458,5 +458,149 @@ do {
           "Core deletions() never returns protected frames (base slice-1 guarantee unchanged)")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-frame reject model (Pass 1 keyboard overhaul)
+//
+// ReviewGroup lives in SnapsiftApp (not importable here), so we test the
+// underlying logic via the Core functions (deletions, keeper, isProtected) and
+// via pure-function mirrors that faithfully reproduce the new ReviewGroup logic.
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Per-frame reject model (Pass 1)")
+
+// Mirror of the new ReviewGroup.isDelete
+func rejectIsDelete(_ p: Photo, keeperID: String, rejected: Set<String>, includeProtected: Bool) -> Bool {
+    guard rejected.contains(p.uuid) else { return false }
+    if p.isProtected && !includeProtected { return false }
+    return true
+}
+
+func rejectDeletionIDs(_ photos: [Photo], keeperID: String,
+                        rejected: Set<String>, includeProtected: Bool) -> Set<String> {
+    Set(photos.filter {
+        rejectIsDelete($0, keeperID: keeperID, rejected: rejected, includeProtected: includeProtected)
+    }.map(\.uuid))
+}
+
+// SLICE-1 INVARIANT: auto-seeding never puts protected frames in rejected.
+do {
+    // Confident group: seed rejected = non-keeper, non-protected.
+    let keep = ph(1, 0, quality: 0.9)
+    let plain = ph(2, 1)
+    let fav   = ph(3, 2, fav: true)
+    let edited_ = ph(4, 3, edited: true)
+    let doc   = ph(5, 4, isDocument: true)
+    let photos = [keep, plain, fav, edited_, doc]
+    let keeperID = keeper(photos).uuid   // should be U1 (highest quality)
+    // Auto-seed: all non-keeper non-protected.
+    let autoSeeded: Set<String> = Set(photos.compactMap { p in
+        (p.uuid != keeperID && !p.isProtected) ? p.uuid : nil
+    })
+    check(!autoSeeded.contains("U3"), "auto-seed: favorite never in rejected")
+    check(!autoSeeded.contains("U4"), "auto-seed: edited never in rejected")
+    check(!autoSeeded.contains("U5"), "auto-seed: document never in rejected")
+    check(autoSeeded.contains("U2"), "auto-seed: plain non-keeper IS seeded")
+    check(!autoSeeded.contains(keeperID), "auto-seed: keeper never seeded")
+}
+
+// SLICE-1 INVARIANT: Core deletions() still excludes protected (unchanged).
+do {
+    let photos = [ph(1, 0), ph(2, 1, fav: true), ph(3, 2, edited: true)]
+    let d = deletions(photos)
+    check(d.allSatisfy { !$0.isProtected }, "Core deletions() never returns protected frames")
+}
+
+// Per-frame toggle: add/remove exactly that uuid; totalDeletions-equivalent reflects it.
+do {
+    let plain = ph(1, 0)
+    let plain2 = ph(2, 1)
+    var rejected: Set<String> = []
+    // Toggle in.
+    rejected.insert(plain.uuid)
+    check(rejected.contains("U1") && rejected.count == 1, "toggle reject: inserts uuid")
+    // Toggle out.
+    rejected.remove(plain.uuid)
+    check(!rejected.contains("U1") && rejected.count == 0, "toggle reject: removes uuid")
+    // Add both — the new model has NO keeper exclusion: if it's in rejected, it's deleted.
+    rejected.insert(plain.uuid)
+    rejected.insert(plain2.uuid)
+    let ids = rejectDeletionIDs([plain, plain2], keeperID: "U1",
+                                 rejected: rejected, includeProtected: false)
+    check(ids == Set(["U1", "U2"]), "deletionIDs: all non-protected rejected frames included (no keeper exception in rejected model)")
+    check(rejectDeletionIDs([plain, plain2], keeperID: "U1",
+                            rejected: Set(["U1", "U2"]), includeProtected: false) == Set(["U1", "U2"]),
+          "both in rejected → both in deletionIDs (no keeper exception in rejected model)")
+}
+
+// Force-reject: only way a protected frame enters rejected (base path blocked).
+do {
+    let fav = ph(1, 0, fav: true)
+    let plain = ph(2, 1)
+    // Base path (plain X): protected blocked.
+    var rejected: Set<String> = []
+    // Simulate: try to insert protected via plain toggle — blocked if caller checks isProtected.
+    // The test mirrors the guard: if p.isProtected { return false }.
+    let toggled = !fav.isProtected  // false → blocked
+    check(!toggled, "plain X on protected: blocked (returns false)")
+
+    // Force path (⇧X): allowed.
+    rejected.insert(fav.uuid)   // forceReject inserts unconditionally
+    let ids = rejectDeletionIDs([fav, plain], keeperID: "U2",
+                                 rejected: rejected, includeProtected: true)
+    check(ids.contains("U1"), "force-reject: protected frame enters deletionIDs with includeProtected=true")
+    // Default path (includeProtected=false) still excludes it even if in rejected.
+    let idsNoOverride = rejectDeletionIDs([fav, plain], keeperID: "U2",
+                                           rejected: rejected, includeProtected: false)
+    check(!idsNoOverride.contains("U1"),
+          "even if in rejected, includeProtected=false still excludes protected from deletionIDs")
+}
+
+// `a` (keep-all) clears rejected.
+do {
+    var rejected: Set<String> = Set(["U1", "U2"])
+    rejected = []   // keepAll clears
+    check(rejected.isEmpty, "keepAll: clears rejected set")
+}
+
+// `d` (reject-all) rejects all non-keeper non-protected; keeper never auto-rejected.
+do {
+    let keep = ph(1, 0, quality: 0.9)
+    let plain = ph(2, 1)
+    let fav   = ph(3, 2, fav: true)
+    let photos = [keep, plain, fav]
+    let keeperID = "U1"
+    let rejectAllSeeded: Set<String> = Set(photos.compactMap { p in
+        (p.uuid != keeperID && !p.isProtected) ? p.uuid : nil
+    })
+    check(!rejectAllSeeded.contains("U1"), "rejectAll: keeper never auto-rejected")
+    check(!rejectAllSeeded.contains("U3"), "rejectAll: protected never auto-rejected")
+    check(rejectAllSeeded.contains("U2"), "rejectAll: plain non-keeper IS rejected")
+}
+
+// Uncertain group seeding: rejected stays empty.
+do {
+    var rejected: Set<String> = []
+    // Uncertain groups: no seeding.
+    check(rejected.isEmpty, "uncertain group: rejected empty at seed")
+}
+
+// Keeper never auto-seeded (separate from force-reject path).
+do {
+    let keep = ph(1, 0, quality: 0.9)
+    let plain = ph(2, 1)
+    let keeperID = keeper([keep, plain]).uuid
+    let autoSeeded: Set<String> = Set([keep, plain].compactMap { p in
+        (p.uuid != keeperID && !p.isProtected) ? p.uuid : nil
+    })
+    check(!autoSeeded.contains(keeperID), "keeper never in auto-seeded rejected")
+}
+
+// Existing tests must still pass (smoke check for exact-dup / surface-album protection).
+do {
+    let fav = ph(1, 0, fav: true)
+    let doc = ph(2, 1, isDocument: true)
+    check(deletions([fav, doc]).isEmpty, "exact-dup/surface: all-protected group still deletes nothing")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

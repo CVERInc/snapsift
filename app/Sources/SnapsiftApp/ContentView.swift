@@ -9,7 +9,11 @@ struct ContentView: View {
     @State private var categorySelection: CategoryBucket.ID?
     @State private var deleting = false
     @State private var focusedFrame: String?     // uuid of the focused grid cell
-    @State private var previewID: String?        // big-preview overlay
+    @State private var previewID: String?        // big-preview overlay (loupe)
+    @State private var loupeOpen = false          // true when loupe is showing
+    @State private var protectedHintFrame: String? // frame showing "protected — ⇧X" hint
+    @State private var showForceRejectAlert = false // ⇧X confirmation alert
+    @State private var forceRejectTarget: (groupID: ReviewGroup.ID, frameID: String)? = nil
     @State private var showHelp = false
     @FocusState private var sidebarFocused: Bool
     @FocusState private var gridFocused: Bool
@@ -157,15 +161,39 @@ struct ContentView: View {
         } message: {
             Text(t.deleteErrorBody())
         }
+        // ⇧X force-reject confirmation: same dialog path as mouse "include protected".
+        .alert(t.deleteProtectedAlertTitle(), isPresented: $showForceRejectAlert) {
+            Button(t.deleteProtectedAlertConfirm(), role: .destructive) {
+                if let target = forceRejectTarget {
+                    model.forceReject(group: target.groupID, frameID: target.frameID)
+                }
+                forceRejectTarget = nil
+            }
+            Button(t.deleteProtectedAlertCancel(), role: .cancel) {
+                forceRejectTarget = nil
+            }
+        } message: {
+            Text(t.forceRejectAlertBody())
+        }
     }
 
     @ViewBuilder private var previewOverlay: some View {
-        if let previewID {
-            // Space opens this — the one deliberate moment we DO fetch the full
-            // original from iCloud, so the user can zoom in and be sure before
-            // deciding keep/delete. The scan itself stays fully offline.
-            BigPreview(asset: model.asset(for: previewID), manager: model.imageManager, t: t) {
-                self.previewID = nil
+        if loupeOpen, let previewID, let g = selectedGroup {
+            LoupeOverlay(
+                group: g,
+                currentID: previewID,
+                model: model,
+                t: t,
+                onClose: {
+                    loupeOpen = false
+                    self.previewID = nil
+                },
+                onPrev: { moveFrame(-1, g) },
+                onNext: { moveFrame(1, g) }
+            )
+            // Keep the focused frame in sync with the loupe's displayed frame.
+            .onChange(of: focusedFrame) { _, new in
+                if loupeOpen, let new { self.previewID = new }
             }
         }
     }
@@ -267,8 +295,8 @@ struct ContentView: View {
         case "k": moveSelection(-1, proxy); return .handled
         case "j": moveSelection(1, proxy);  return .handled
         case "l": enterGrid(); return .handled
-        case "a": if let id = selection { model.toggleKeepAll(group: id) }; return .handled
-        case "d": if let id = selection { model.toggleDeleteAll(group: id) }; return .handled
+        case "a": if let id = selection { model.keepAll(group: id) }; return .handled
+        case "d": if let id = selection { model.rejectAll(group: id) }; return .handled
         case let c where c.count == 1 && c.first!.isNumber:
             if let n = Int(c), n >= 1 { pickNth(n - 1) }; return .handled
         default: return .ignored
@@ -284,6 +312,8 @@ struct ContentView: View {
         guard !model.browseMode, let g = selectedGroup, !g.photos.isEmpty else { return }
         focusedFrame = g.keeperID
         gridFocused = true
+        loupeOpen = false
+        previewID = nil
     }
 
     // MARK: keyboard — grid zone
@@ -291,20 +321,89 @@ struct ContentView: View {
     private func handleGridKey(_ kp: KeyPress) -> KeyPress.Result {
         if kp.characters == "?" { toggleHelp(); return .handled }
         guard let g = selectedGroup else { return .ignored }
+
+        // If loupe is open, route navigation + frame actions through loupe.
+        if loupeOpen {
+            return handleLoupeKey(kp, g)
+        }
+
         switch kp.key {
         case .leftArrow, .upArrow:   moveFrame(-1, g); return .handled
         case .rightArrow, .downArrow: moveFrame(1, g); return .handled
-        case .escape:  sidebarFocused = true; return .handled
-        case .return:  if let f = focusedFrame { model.promote(group: g.id, to: f) }; return .handled
+        case .escape:
+            sidebarFocused = true; return .handled
+        case .return:
+            if let f = focusedFrame { model.promote(group: g.id, to: f) }
+            return .handled
+        case .delete:
+            handleRejectKey(g, modifiers: kp.modifiers); return .handled
         default: break
         }
         switch kp.characters {
         case "h", "k": moveFrame(-1, g); return .handled
         case "l", "j": moveFrame(1, g);  return .handled
-        case " ":      previewID = focusedFrame; return .handled
-        case "a":      model.toggleKeepAll(group: g.id); return .handled
-        case "d":      model.toggleDeleteAll(group: g.id); return .handled
+        case " ":
+            if let f = focusedFrame { previewID = f; loupeOpen = true }
+            return .handled
+        case "a":      model.keepAll(group: g.id); return .handled
+        case "d":      model.rejectAll(group: g.id); return .handled
+        case "x", "X":
+            handleRejectKey(g, modifiers: kp.modifiers); return .handled
         default: return .ignored
+        }
+    }
+
+    /// Key handler while the loupe is open — same frame actions + prev/next + close.
+    private func handleLoupeKey(_ kp: KeyPress, _ g: ReviewGroup) -> KeyPress.Result {
+        switch kp.key {
+        case .leftArrow:  moveFrame(-1, g); return .handled
+        case .rightArrow: moveFrame(1, g);  return .handled
+        case .escape:
+            loupeOpen = false; previewID = nil; return .handled
+        case .return:
+            if let f = focusedFrame { model.promote(group: g.id, to: f) }
+            return .handled
+        case .delete:
+            handleRejectKey(g, modifiers: kp.modifiers); return .handled
+        default: break
+        }
+        switch kp.characters {
+        case "h": moveFrame(-1, g); return .handled
+        case "l": moveFrame(1, g);  return .handled
+        case " ":
+            loupeOpen = false; previewID = nil; return .handled
+        case "x", "X":
+            handleRejectKey(g, modifiers: kp.modifiers); return .handled
+        default: return .ignored
+        }
+    }
+
+    /// Shared reject-key logic for grid and loupe.
+    /// Plain X/⌫: toggle reject. Protected → show inline hint instead.
+    /// ⇧X: force-reject a protected frame → show confirmation alert.
+    private func handleRejectKey(_ g: ReviewGroup, modifiers: EventModifiers) {
+        guard let f = focusedFrame else { return }
+        let isShift = modifiers.contains(.shift)
+        if isShift {
+            // ⇧X path: force-reject (may target a protected frame).
+            if let p = g.photos.first(where: { $0.uuid == f }), p.isProtected {
+                forceRejectTarget = (groupID: g.id, frameID: f)
+                showForceRejectAlert = true
+            } else {
+                // Not protected — behaves same as plain X.
+                model.toggleReject(group: g.id, frameID: f)
+            }
+        } else {
+            // Plain X: toggle reject, but block on protected frames.
+            let toggled = model.toggleReject(group: g.id, frameID: f)
+            if !toggled {
+                // Show inline hint.
+                protectedHintFrame = f
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    if protectedHintFrame == f { protectedHintFrame = nil }
+                }
+            }
         }
     }
 
@@ -414,7 +513,8 @@ struct ContentView: View {
         } else if let id = selection, let g = model.groups.first(where: { $0.id == id }) {
             GroupReview(group: g, model: model, t: t,
                         focusedFrame: gridFocused ? focusedFrame : nil,
-                        isExactDupeGroup: model.exactDupeGroupIDs.contains(g.id))
+                        isExactDupeGroup: model.exactDupeGroupIDs.contains(g.id),
+                        protectedHintFrame: protectedHintFrame)
                 .focusable()
                 .focused($gridFocused)
                 .onKeyPress { handleGridKey($0) }
@@ -771,6 +871,8 @@ struct GroupReview: View {
     var focusedFrame: String? = nil
     /// True when the parent confirmed this group as an exact-duplicate cluster.
     var isExactDupeGroup: Bool = false
+    /// Frame currently showing the "protected — ⇧X to force" hint (from keyboard handler).
+    var protectedHintFrame: String? = nil
 
     // FIX C: confirmation alert state for including protected frames in deletion.
     @State private var showDeleteProtectedAlert = false
@@ -847,7 +949,7 @@ struct GroupReview: View {
                         .tint(group.deleteAll ? .reefRed : .reefTeal)
                         .help(t.tipDeleteAll())
                     }
-                    Button { model.toggleKeepAll(group: group.id) } label: {
+                    Button { model.keepAll(group: group.id) } label: {
                         Label(group.keepAll ? t.keepingAll() : t.keepAll(),
                               systemImage: group.keepAll ? "checkmark.circle.fill" : "checkmark.circle")
                     }
@@ -926,6 +1028,17 @@ struct GroupReview: View {
                 RoundedRectangle(cornerRadius: 10)
                     .strokeBorder(.white, style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
                     .padding(2)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if protectedHintFrame == p.uuid {
+                Text(t.protectedHint())
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8).padding(.vertical, 5)
+                    .background(Color.reefAmber.opacity(0.92), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.bottom, 6)
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
         .contentShape(Rectangle())
@@ -1013,6 +1126,82 @@ struct CategoryBrowse: View {
         }
         .background(Color.reefGround)
         .navigationTitle(category.display)
+    }
+}
+
+/// Full-screen loupe overlay with position HUD, nav, and frame-action keys.
+/// Space / Esc close it; ←→ / h l navigate; X/⌫/⏎/⇧X judge from here.
+struct LoupeOverlay: View {
+    let group: ReviewGroup
+    let currentID: String
+    @ObservedObject var model: LibraryModel
+    let t: L10n
+    let onClose: () -> Void
+    let onPrev: () -> Void
+    let onNext: () -> Void
+
+    private var currentIndex: Int {
+        group.photos.firstIndex { $0.uuid == currentID } ?? 0
+    }
+    private var currentPhoto: Photo? {
+        group.photos.first { $0.uuid == currentID }
+    }
+
+    var body: some View {
+        ZStack {
+            // Dim background.
+            Color.black.opacity(0.88)
+                .ignoresSafeArea()
+                .onTapGesture { onClose() }
+
+            // Photo.
+            if let asset = model.asset(for: currentID) {
+                BigPreview(asset: asset, manager: model.imageManager, t: t, onClose: onClose)
+            } else {
+                ProgressView().tint(.white)
+            }
+
+            // Top-left HUD: "<i> / <n> · <filename> · <status>"
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Text(hudText)
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.top, 14).padding(.leading, 14)
+                    Spacer()
+                    // Close button.
+                    Button(action: onClose) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(.white.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 14).padding(.trailing, 14)
+                }
+                Spacer()
+            }
+        }
+    }
+
+    /// "<i> / <n> · <filename> · <status>" — always legible.
+    private var hudText: String {
+        let i = currentIndex + 1
+        let n = group.photos.count
+        let fname = currentPhoto.map { p in
+            p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename
+        } ?? "?"
+        var parts: [String] = []
+        if let p = currentPhoto {
+            if p.uuid == group.keeperID && !group.rejected.contains(p.uuid) { parts.append("★ keeper") }
+            else if group.isDelete(p) { parts.append("✕ reject") }
+            if p.favorite   { parts.append("★ fav") }
+            if p.edited     { parts.append("✎ edited") }
+            if p.isDocument { parts.append("doc") }
+        }
+        let status = parts.isEmpty ? "no decision" : parts.joined(separator: " · ")
+        return "\(i) / \(n)  ·  \(fname)  ·  \(status)"
     }
 }
 
