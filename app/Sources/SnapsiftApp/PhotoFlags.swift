@@ -61,31 +61,77 @@ enum PhotoFlags {
 
     // MARK: - pixel-based, cluster-members only
 
-    /// Document/scan/receipt/ID detection — conservative on purpose. Vision's
-    /// on-device `VNDetectDocumentSegmentationRequest` (macOS 12+) finds a
-    /// rectangular document region; we only flag when it returns a region with
-    /// HIGH confidence. If unsure we return `false` (NOT a document): over-
-    /// protecting is safe, but wrongly protecting everything would defeat the
-    /// scan — so the bar to call something a document is deliberately high, and
-    /// the failure direction (can't read the image → not a document) just means
-    /// the frame stays in the normal keep/delete flow where the other protections
-    /// (favorite, edited) and the keeper logic still apply.
+    /// Document/scan/receipt/ID detection — conservative on purpose, with TWO
+    /// corroborating signals required.
+    ///
+    /// Background: `VNDetectDocumentSegmentationRequest` returns a high-confidence
+    /// near-full-frame rectangle for many NORMAL photos (a painting on a wall, a
+    /// whiteboard in the background, a landscape framed by edges) — relying on it
+    /// alone caused ordinary burst frames to be wrongly protected as "documents".
+    ///
+    /// Fix (FIX B): require BOTH:
+    ///   1. A high-confidence document rectangle (≥0.9) from
+    ///      `VNDetectDocumentSegmentationRequest`, AND
+    ///   2. Substantial recognised text from `VNRecognizeTextRequest` — at least
+    ///      `minTextObservations` distinct word-level observations, each with
+    ///      confidence ≥ `minTextConfidence`.
+    ///
+    /// Rationale for thresholds:
+    ///   • A genuine receipt/ID/scan has many text regions; ≥5 observations is a
+    ///     conservative bar that a handwritten label on a box or a poster headline
+    ///     won't clear but a receipt or form will.
+    ///   • Per-observation confidence ≥ 0.5 filters OCR noise without being so
+    ///     strict that difficult scan angles fail.
+    ///   • Fast language correction is off (`usesLanguageCorrection = false`) to
+    ///     avoid hallucinated words inflating the count.
+    ///   • Network is disabled (`isNetworkAccessAllowed = false` on all requests) —
+    ///     100 % on-device, consistent with the rest of the scan pipeline.
+    ///
+    /// Failure direction: unreadable image, ambiguous result, or insufficient text
+    /// → `false` (NOT a document). Over-protecting on a genuine miss is harmless;
+    /// wrongly protecting a normal photo defeats the scan.
     static func isDocument(_ asset: PHAsset, manager: PHCachingImageManager) async -> Bool {
         guard let cg = await cgImage(asset, manager) else { return false }   // unreadable → not a document (safe)
+
+        // Minimum number of distinct word-level text observations required.
+        // A receipt / scan / ID card comfortably exceeds 5; a photo of a person
+        // in front of a building sign does not.
+        let minTextObservations = 5
+        // Per-observation recognition confidence floor.
+        let minTextConfidence: Float = 0.5
+
         return await withCheckedContinuation { cont in
             visionQueue.async {
-                let request = VNDetectDocumentSegmentationRequest()
                 let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+
+                // Pass 1: document segmentation.
+                let docRequest = VNDetectDocumentSegmentationRequest()
                 do {
-                    try handler.perform([request])
-                    let rect = request.results?.first
-                    // High-confidence rectangular document only. The threshold is
-                    // intentionally strict — a casual photo that happens to have a
-                    // rectangle in it must NOT be flagged.
-                    cont.resume(returning: (rect?.confidence ?? 0) >= 0.9)
+                    try handler.perform([docRequest])
                 } catch {
-                    cont.resume(returning: false)
+                    cont.resume(returning: false); return
                 }
+                guard (docRequest.results?.first?.confidence ?? 0) >= 0.9 else {
+                    cont.resume(returning: false); return
+                }
+
+                // Pass 2: text recognition on the same cached CGImage.
+                // Only run this (cheaper but still non-trivial) pass when the
+                // document rectangle already passed — avoids running OCR on every
+                // cluster member.
+                let textRequest = VNRecognizeTextRequest()
+                textRequest.recognitionLevel = .fast   // fast: lower latency, still good for counting
+                textRequest.usesLanguageCorrection = false   // no hallucinated words
+                do {
+                    try handler.perform([textRequest])
+                } catch {
+                    cont.resume(returning: false); return
+                }
+                let observations = textRequest.results ?? []
+                let highConfidenceWords = observations.filter { $0.confidence >= minTextConfidence }
+                // Require at least `minTextObservations` confident text regions.
+                // A photo of a person / scene may have 0–2; a scan has many more.
+                cont.resume(returning: highConfidenceWords.count >= minTextObservations)
             }
         }
     }

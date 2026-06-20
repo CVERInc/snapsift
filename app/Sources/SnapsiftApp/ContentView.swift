@@ -772,6 +772,9 @@ struct GroupReview: View {
     /// True when the parent confirmed this group as an exact-duplicate cluster.
     var isExactDupeGroup: Bool = false
 
+    // FIX C: confirmation alert state for including protected frames in deletion.
+    @State private var showDeleteProtectedAlert = false
+
     private let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
 
     var body: some View {
@@ -787,6 +790,34 @@ struct GroupReview: View {
                             .help(t.tipAppleRanked())
                     }
                     Spacer()
+                    // FIX C: "Include protected" toggle — only shown when the group
+                    // has protected frames AND is armed (deleteAll). Hidden otherwise
+                    // so it doesn't clutter groups that have no protected content.
+                    if group.deleteAll && group.protectedCount > 0 {
+                        if group.includeProtected {
+                            // Toggling OFF clears the override immediately — no confirm needed.
+                            Button {
+                                model.setIncludeProtected(group: group.id, value: false)
+                            } label: {
+                                Label(t.includingProtected(group.protectedCount),
+                                      systemImage: "lock.open.fill")
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.reefAmber)
+                            .help(t.tipIncludeProtected())
+                        } else {
+                            // Toggling ON shows a confirmation alert before taking effect.
+                            Button {
+                                showDeleteProtectedAlert = true
+                            } label: {
+                                Label(t.includeProtected(group.protectedCount),
+                                      systemImage: "lock.open")
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(Color.reefTextDim)
+                            .help(t.tipIncludeProtected())
+                        }
+                    }
                     // FIX 4: distinguish "armed with actual deletions" from
                     // "armed but all frames are protected → nothing will be deleted".
                     // The all-protected case must NOT show a solid-red "Deleting all"
@@ -834,31 +865,43 @@ struct GroupReview: View {
         }
         .background(Color.reefGround)
         .navigationTitle(t.frames(group.photos.count))
+        // FIX C: confirmation alert before protected frames enter the deletion set.
+        // The model is only updated when the user explicitly confirms — Cancel is a
+        // full no-op so accidentally tapping "Include protected" is reversible.
+        .alert(t.deleteProtectedAlertTitle(), isPresented: $showDeleteProtectedAlert) {
+            Button(t.deleteProtectedAlertConfirm(), role: .destructive) {
+                model.setIncludeProtected(group: group.id, value: true)
+            }
+            Button(t.deleteProtectedAlertCancel(), role: .cancel) { }
+        } message: {
+            Text(t.deleteProtectedAlertBody(group.protectedCount))
+        }
     }
 
     private func card(for p: Photo, index: Int) -> some View {
         let keep = group.isKeeper(p)
         let del = group.isDelete(p)
         let focused = p.uuid == focusedFrame
-        // An exact-dup non-keeper earns the orange "可安心清" badge ONLY when the
-        // group passed the strict predicate (dHash 0 + feature ≈0 + same size).
-        // Protected frames are shown amber regardless — they are never deletable.
+        // An exact-dup non-keeper earns the teal "safe to remove" badge ONLY when
+        // the group passed the strict predicate (dHash 0 + feature ≈0 + same size).
+        // Protected frames stay amber regardless — they are never auto-deletable.
+        // FIX D: exact-dup suggestions now use TEAL (reefTeal) not amber, to avoid
+        // the color collision where "protected" and "interchangeable safe copy" both
+        // showed amber despite having opposite meanings.
         let isExactSuggested = isExactDupeGroup && !keep && !p.isProtected
-        // Protected frames (favorite / edited / document) are never deletable —
-        // show them amber, never red, so the UI can't imply a protected frame
-        // will be removed.
+        // Protected frames (favorite / edited / document) are never auto-deletable
+        // — show them amber + lock/reason badges, never red.
         let border: Color = keep ? .reefGreen
             : (p.isProtected ? .reefAmber
-            : (isExactSuggested ? Color.reefAmber   // amber = "interchangeable" not red
+            : (isExactSuggested ? Color.reefTeal   // FIX D: teal = "safe to remove", not amber
             : (del ? .reefRed : .clear)))
-        // Exact-dup non-keepers dim just like regular delete candidates so it's
-        // visually clear they are "the redundant copy".
+        // Exact-dup non-keepers dim just like regular delete candidates.
         let dimmed = del || isExactSuggested
         return VStack(spacing: 0) {
             ZStack(alignment: .topLeading) {
                 AssetThumbnail(asset: model.asset(for: p.uuid), manager: model.imageManager, side: 160)
                     .opacity(dimmed ? 0.34 : 1)
-                badge(keep: keep, del: del, fav: p.favorite, exactSuggested: isExactSuggested)
+                badge(p: p, keep: keep, del: del, exactSuggested: isExactSuggested)
                 if index < 9 {
                     Text("\(index + 1)")
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
@@ -889,22 +932,37 @@ struct GroupReview: View {
         .onTapGesture { model.promote(group: group.id, to: p.uuid) }
         .help(
             p.isProtected && isExactDupeGroup ? t.tipExactDupeProtected()
-            : p.isProtected ? t.tipFavorite()
+            : p.isProtected ? t.tipProtectedFrame()
             : isExactSuggested ? t.tipExactDupe()
             : keep ? t.tipKeeper()
             : t.tipDelete()
         )
     }
 
-    private func badge(keep: Bool, del: Bool, fav: Bool, exactSuggested: Bool) -> some View {
+    /// Badge row for a single frame card.
+    ///
+    /// FIX A: protected frames show individual reason badges so the user always
+    ///        knows exactly WHY a frame won't be deleted:
+    ///          ★   = favorite
+    ///          ✎   = edited (user applied adjustments)
+    ///          doc = document / scan / receipt / ID
+    ///        A frame can have multiple reasons (e.g. a favorited edited photo
+    ///        shows both ★ and ✎). The shared amber badge color + tooltip
+    ///        makes it clear these are all "protected" states.
+    ///
+    /// FIX D: exact-dup "safe to remove" badge moves from amber to TEAL so it is
+    ///        never confused with the amber protection badges.
+    private func badge(p: Photo, keep: Bool, del: Bool, exactSuggested: Bool) -> some View {
         HStack(spacing: 4) {
             if keep { tag(t.keep(), .reefGreen, Color(hex: 0x04110a)) }
-            // Exact-dup badge: orange-amber label distinct from the generic red DELETE.
-            // This is the ONLY place in the app where a "safe to delete" affordance
-            // appears — and only for frames that passed the strict predicate.
-            if exactSuggested { tag(t.exactDupeBadge(), .reefAmber, Color(hex: 0x1a1203)) }
+            // FIX D: exact-dup badge is now teal, not amber — "safe to remove" ≠ "protected".
+            if exactSuggested { tag(t.exactDupeBadge(), .reefTeal, Color(hex: 0x04181a)) }
             else if del { tag(t.delete(), .reefRed, .white) }
-            if fav { tag("★", .reefAmber, Color(hex: 0x1a1203)) }
+            // FIX A: per-reason protection badges (amber, consistent with the border).
+            // Show each applicable badge independently so the reason is never guessed.
+            if p.favorite  { tag("★",       .reefAmber, Color(hex: 0x1a1203)) }
+            if p.edited    { tag("✎",       .reefAmber, Color(hex: 0x1a1203)) }
+            if p.isDocument { tag("doc",    .reefAmber, Color(hex: 0x1a1203)) }
         }
         .padding(6)
     }

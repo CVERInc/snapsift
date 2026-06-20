@@ -303,6 +303,84 @@ struct L10n: Sendable {
         }
     }
 
+    // FIX A: per-frame protection reason badge tooltip.
+
+    /// Tooltip shown on a protected frame's reason badge(s) — explains why it
+    /// won't be deleted and what the badges mean. Shown as a single help string
+    /// since macOS only surfaces one tooltip per view.
+    func tipProtectedFrame() -> String {
+        switch language {
+        case .en: return "Protected — snapsift won't delete favorites (★), edited photos (✎), or documents (doc) unless you choose to."
+        case .ja: return "保護対象 — お気に入り（★）・編集済み（✎）・書類（doc）はあなたが選ばない限り削除しません。"
+        case .zhTW: return "受保護 — snapsift 不會刪最愛（★）、已編輯（✎）或文件（doc）照片，除非你主動選擇。"
+        }
+    }
+
+    // FIX C: include-protected override strings.
+
+    /// Button label for the per-group "include protected" toggle (N = protected frame count).
+    func includeProtected(_ n: Int) -> String {
+        switch language {
+        case .en: return "Include protected (\(n))"
+        case .ja: return "保護対象も削除 (\(n))"
+        case .zhTW: return "也刪受保護的 (\(n))"
+        }
+    }
+
+    /// Button label when include-protected is already ON for this group.
+    func includingProtected(_ n: Int) -> String {
+        switch language {
+        case .en: return "Including protected (\(n))"
+        case .ja: return "保護対象も含む (\(n))"
+        case .zhTW: return "受保護也列入 (\(n))"
+        }
+    }
+
+    /// Tooltip for the include-protected toggle button.
+    func tipIncludeProtected() -> String {
+        switch language {
+        case .en: return "Explicitly include favorites, edited photos, and documents in the deletion set for this group. Use with care — this overrides snapsift's protection for frames you've usually marked as special."
+        case .ja: return "このグループのお気に入り・編集済み・書類を削除対象に含めます。通常は特別にマークしたフレームの保護が解除されます。慎重に使ってください。"
+        case .zhTW: return "把這群的最愛、已編輯、文件也列入刪除範圍。這會解除 snapsift 對你平時標為特別的照片的保護，請謹慎操作。"
+        }
+    }
+
+    /// Alert title shown before deleting protected frames (after user toggled include-protected).
+    func deleteProtectedAlertTitle() -> String {
+        switch language {
+        case .en: return "Delete protected photos?"
+        case .ja: return "保護された写真を削除しますか？"
+        case .zhTW: return "確定刪除受保護的照片？"
+        }
+    }
+
+    /// Alert body — N = count of protected frames about to be deleted.
+    func deleteProtectedAlertBody(_ n: Int) -> String {
+        switch language {
+        case .en: return "This will delete \(n) protected photo\(n == 1 ? "" : "s") — favorites, edited photos, or documents you'd normally keep. They'll go to Recently Deleted and can be recovered within 30 days."
+        case .ja: return "保護された写真 \(n)枚（お気に入り・編集済み・書類）を削除します。通常は残しておくものです。「最近削除した項目」に移動され、30日以内は復元できます。"
+        case .zhTW: return "即將刪除 \(n) 張受保護的照片（最愛、已編輯或文件），這些通常是你會保留的。它們會移到「最近刪除」，30 天內可以復原。"
+        }
+    }
+
+    /// Confirmation button for the delete-protected alert.
+    func deleteProtectedAlertConfirm() -> String {
+        switch language {
+        case .en: return "Delete Anyway"
+        case .ja: return "それでも削除"
+        case .zhTW: return "仍然刪除"
+        }
+    }
+
+    /// Cancel button for the delete-protected alert.
+    func deleteProtectedAlertCancel() -> String {
+        switch language {
+        case .en: return "Cancel"
+        case .ja: return "キャンセル"
+        case .zhTW: return "取消"
+        }
+    }
+
     // MARK: sidebar / detail
 
     func frames(_ n: Int) -> String {

@@ -5,7 +5,8 @@ import SnapsiftCore
 
 /// One reviewable near-duplicate cluster: the Core photos plus the currently
 /// chosen keeper. Protected frames (favorite / edited / document — `Photo
-/// .isProtected`) are never deletable regardless of keeper choice.
+/// .isProtected`) are never deletable by DEFAULT; the user can explicitly
+/// opt in via `includeProtected` for a deliberate override.
 struct ReviewGroup: Identifiable {
     let id = UUID()
     let photos: [Photo]
@@ -16,26 +17,57 @@ struct ReviewGroup: Identifiable {
     var keepAll = false
     /// Human override: the user looked and wants the whole group gone (machine
     /// kept them apart, but to the eye they're redundant — or simply unwanted).
-    /// Favourites are still protected. Mutually exclusive with ``keepAll``.
+    /// Protected frames are still excluded UNLESS `includeProtected` is also on.
+    /// Mutually exclusive with ``keepAll``.
     var deleteAll = false
     /// A confident, near-identical burst (members barely differ) → safe to
     /// pre-mark for deletion. When false the frames differ enough that they may
     /// be distinct moments, so we don't pre-mark anything (keepAll defaults on).
     var confidentDupe = true
 
+    // FIX C — Informed-consent override for protected frames.
+    //
+    // The protection guarantee ("never auto-delete favorites / edited / documents")
+    // is the STRONG DEFAULT and is never bypassed by the automatic scan. However a
+    // human must be able to explicitly say "yes, delete these too" for their own
+    // deliberate cleanup — otherwise the tool can't help a user who consciously
+    // wants a protected duplicate gone.
+    //
+    // INVARIANT (slice-1 guarantee, unchanged):
+    //   • `includeProtected` defaults to `false`.
+    //   • The scanner NEVER sets it to `true` — only explicit user action does.
+    //   • A protected frame is only in `deletionIDs` when BOTH `deleteAll` AND
+    //     `includeProtected` are `true`, and the user confirmed a dialog.
+    //   • Auto-marking (non-deleteAll path) NEVER deletes protected frames even
+    //     when `includeProtected` is on — the user must arm the group via `deleteAll`
+    //     first.
+
+    /// Explicit user opt-in to include protected frames (favorites / edited /
+    /// documents) in the deletion set for this group. Never set by the scanner.
+    /// Must be paired with `deleteAll` to have any effect.
+    var includeProtected = false
+
     func isKeeper(_ p: Photo) -> Bool { !keepAll && !deleteAll && p.uuid == keeperID }
     func isDelete(_ p: Photo) -> Bool {
-        guard !keepAll, !p.isProtected else { return false }   // ★ protected (favorite/edited/document) never deleted
+        guard !keepAll else { return false }
+        // Protected frames are excluded UNLESS the user explicitly opted in AND
+        // the group is armed (deleteAll). This two-condition guard means neither
+        // flag alone can accidentally cause a protected frame to be deleted.
+        if p.isProtected && !(deleteAll && includeProtected) { return false }
         return deleteAll || p.uuid != keeperID
     }
     var spanSec: Double { (photos.last?.takenAt ?? 0) - (photos.first?.takenAt ?? 0) }
     var hasFavorite: Bool { photos.contains { $0.favorite } }
     var hasVideo: Bool { photos.contains { $0.kind == 1 } }
     var deletionIDs: [String] { photos.filter(isDelete).map(\.uuid) }
+    /// Count of protected frames that would be deleted when includeProtected + deleteAll are both on.
+    var protectedDeletionCount: Int { photos.filter { $0.isProtected && deleteAll }.count }
+    /// Count of protected frames in this group (regardless of armed state).
+    var protectedCount: Int { photos.filter(\.isProtected).count }
     /// FIX 4: True when the group is armed for deletion AND actually has frames
     /// that can be deleted. A group where every frame is protected (favorite /
-    /// edited / document) turns red on `d` but contributes 0 deletions — the
-    /// visual armed state must reflect real deletability, not just the flag.
+    /// edited / document) turns amber on `d` but contributes 0 deletions by default
+    /// — the visual armed state must reflect real deletability, not just the flag.
     var effectivelyArmed: Bool { deleteAll && !deletionIDs.isEmpty }
 }
 
@@ -464,12 +496,28 @@ final class LibraryModel: ObservableObject {
         if groups[i].keepAll { groups[i].deleteAll = false }   // mutually exclusive
     }
 
-    /// Human override: delete the whole group (favourites stay protected).
+    /// Human override: delete the whole group (protected frames excluded by default).
     /// Toggles back off; clears keepAll so the two never both apply.
+    /// When toggling OFF, also clears includeProtected so the user has to
+    /// explicitly re-opt-in if they re-arm the group.
     func toggleDeleteAll(group groupID: ReviewGroup.ID) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
         groups[i].deleteAll.toggle()
-        if groups[i].deleteAll { groups[i].keepAll = false }
+        if groups[i].deleteAll {
+            groups[i].keepAll = false
+        } else {
+            // Disarming resets the protected override — must be deliberate each time.
+            groups[i].includeProtected = false
+        }
+    }
+
+    /// FIX C: Explicit opt-in to include protected frames (favorites / edited /
+    /// documents) in the deletion set for this group. Only meaningful when
+    /// `deleteAll` is already true. NEVER called by the scanner; UI-only action
+    /// that requires prior confirmation from the user.
+    func setIncludeProtected(group groupID: ReviewGroup.ID, value: Bool) {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        groups[i].includeProtected = value
     }
 
     /// Combined keeper key: an app-level extension of Core's `RankKey` that slots
@@ -638,6 +686,10 @@ final class LibraryModel: ObservableObject {
             ng.keepAll = g.keepAll
             ng.deleteAll = g.deleteAll
             ng.confidentDupe = g.confidentDupe
+            // includeProtected is intentionally NOT carried forward: after a delete
+            // pass the protected frames that were opted-in are already gone, and the
+            // remaining group should start fresh (default = protected, as always).
+            ng.includeProtected = false
             return ng
         }
         return assets.count

@@ -349,5 +349,114 @@ do {
           "effectivelyArmed: false when deleteAll flag is off")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX C — includeProtected: informed-consent override (pure-Core tests)
+//
+// ReviewGroup (the App-layer struct carrying includeProtected) lives in
+// SnapsiftApp and isn't visible here. We test the underlying slice-1 guarantee
+// via Core's `deletions()` (unchanged) and via the isDelete predicate logic
+// inlined as a pure function that mirrors ReviewGroup.isDelete exactly.
+//
+// Slice-1 guarantee (must hold in Core):
+//   • Core's `deletions()` NEVER returns protected frames — the base is safe.
+//   • The App-layer isDelete extension of Core's logic only includes protected
+//     frames when BOTH deleteAll AND includeProtected are true.
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("FIX C — includeProtected override (slice-1 guarantee, pure-Core)")
+
+/// Pure-function mirror of ReviewGroup.isDelete — tests the override logic
+/// without depending on the App-layer type.
+func reviewIsDelete(_ p: Photo, keeperID: String,
+                    keepAll: Bool, deleteAll: Bool, includeProtected: Bool) -> Bool {
+    guard !keepAll else { return false }
+    // Protected frames excluded UNLESS user opted in AND group is armed.
+    if p.isProtected && !(deleteAll && includeProtected) { return false }
+    return deleteAll || p.uuid != keeperID
+}
+
+func reviewDeletionIDs(_ photos: [Photo], keeperID: String,
+                       deleteAll: Bool, includeProtected: Bool) -> Set<String> {
+    Set(photos.filter {
+        reviewIsDelete($0, keeperID: keeperID, keepAll: false,
+                       deleteAll: deleteAll, includeProtected: includeProtected)
+    }.map(\.uuid))
+}
+
+do {
+    // (1) Default (includeProtected=false): protected frames NEVER in deletions,
+    //     even when armed — slice-1 guarantee intact. In deleteAll mode the keeper
+    //     (a plain frame) IS deleted — that's correct: "delete the whole group"
+    //     means all frames go, with the sole exception being protected ones.
+    let fav = ph(1, 0, fav: true)
+    let plain = ph(2, 1)
+    let edited_ = ph(3, 2, edited: true)
+    let ids = reviewDeletionIDs([fav, plain, edited_], keeperID: "U2",
+                                deleteAll: true, includeProtected: false)
+    check(!ids.contains("U1") && !ids.contains("U3"),
+          "includeProtected=false: favorite + edited never in deletionIDs when armed (default guarantee)")
+    check(ids.contains("U2"),
+          "plain keeper IS in deletionIDs when deleteAll=true (whole group goes)")
+}
+
+do {
+    // (2) includeProtected=true + armed: protected frames become deletable.
+    //     All frames including the keeper enter deletionIDs in deleteAll mode.
+    let fav = ph(1, 0, fav: true)
+    let edited_ = ph(2, 1, edited: true)
+    let doc = ph(3, 2, isDocument: true)
+    let plain = ph(4, 3)   // keeper
+    let ids = reviewDeletionIDs([fav, edited_, doc, plain], keeperID: "U4",
+                                deleteAll: true, includeProtected: true)
+    check(ids.contains("U1") && ids.contains("U2") && ids.contains("U3"),
+          "includeProtected=true + armed: favorite, edited, document all enter deletionIDs")
+    check(ids.contains("U4"),
+          "keeper also in deletionIDs in deleteAll mode (whole group goes)")
+}
+
+do {
+    // (3) includeProtected=true on an all-protected group + armed: now has deletable
+    //     frames — the "All protected" dead-state is resolved.
+    let fav = ph(1, 0, fav: true)
+    let edited_ = ph(2, 1, edited: true)
+    let ids = reviewDeletionIDs([fav, edited_], keeperID: "U1",
+                                deleteAll: true, includeProtected: true)
+    check(!ids.isEmpty,
+          "includeProtected=true, all-protected + armed: non-keeper protected frame now deletable")
+}
+
+do {
+    // (4) Auto-mark path (deleteAll=false): protected NEVER deleted even when
+    //     includeProtected=true — the user must first arm the group.
+    let fav = ph(1, 0, fav: true)
+    let plain = ph(2, 1)
+    let ids = reviewDeletionIDs([fav, plain], keeperID: "U2",
+                                deleteAll: false, includeProtected: true)
+    check(!ids.contains("U1"),
+          "includeProtected=true but deleteAll=false: protected safe in auto-mark path")
+}
+
+do {
+    // (5) Disarming: clearing both flags removes protected frames from deletions.
+    let fav = ph(1, 0, fav: true)
+    let plain = ph(2, 1)
+    let armed = reviewDeletionIDs([fav, plain], keeperID: "U2",
+                                  deleteAll: true, includeProtected: true)
+    check(armed.contains("U1"), "sanity: armed+includeProtected → fav in deletions")
+    let disarmed = reviewDeletionIDs([fav, plain], keeperID: "U2",
+                                     deleteAll: false, includeProtected: false)
+    check(!disarmed.contains("U1"),
+          "after disarm: protected frame no longer in deletionIDs")
+}
+
+do {
+    // (6) Core's deletions() is unchanged — the base guarantee never includes protected.
+    let fav = ph(1, 0, fav: true)
+    let edited_ = ph(2, 1, edited: true)
+    let plain = ph(3, 2)
+    check(deletions([fav, edited_, plain]).allSatisfy { !$0.isProtected },
+          "Core deletions() never returns protected frames (base slice-1 guarantee unchanged)")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)
