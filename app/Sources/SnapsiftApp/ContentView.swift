@@ -16,6 +16,8 @@ struct ContentView: View {
     @State private var banner: String?
     @State private var writingAlbums = false
     @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
+    // FIX 2: persistent delete-failure alert
+    @State private var deleteErrorAlert = false
 
     private var language: Language { Language(rawValue: langRaw) ?? .en }
     private var t: L10n { L10n(language) }
@@ -23,8 +25,17 @@ struct ContentView: View {
     var body: some View {
         Group {
             switch model.auth {
-            case .authorized, .limited:
+            case .authorized:
                 main
+            // FIX 1: .limited ("Selected Photos") is iOS-only in practice, but
+            // PHAuthorizationStatus includes the case in the enum on all platforms.
+            // On macOS, requestAuthorization(for: .readWrite) never returns .limited
+            // today, but we guard it explicitly: snapsift's whole purpose is
+            // library-wide dedup+delete, which "Selected Photos" fundamentally
+            // cannot do. Route it to a clear gate instead of the review UI where
+            // deletes would silently fail.
+            case .limited:
+                limitedGate
             case .denied, .restricted:
                 gate(message: t.gateDeniedBody(), button: nil)
             default:
@@ -60,6 +71,45 @@ struct ContentView: View {
         .background(Color.reefGround)
         // The permission screen has no main toolbar, so carry the language menu
         // here too — otherwise a non-default-language user is stuck on the gate.
+        .toolbar { ToolbarItem { languageMenu } }
+    }
+
+    // FIX 1: gate shown when the user granted "Selected Photos" (limited) access.
+    // snapsift needs to read and delete across the WHOLE library; limited access
+    // fundamentally cannot satisfy that — and deleteAssets silently fails under it.
+    // The only correct path is to ask the user to upgrade to Full Access in System
+    // Settings. NSWorkspace.shared.open is the correct macOS API (no UIKit).
+    private var limitedGate: some View {
+        gate(message: t.gateLimitedBody(),
+             button: t.gateLimitedButton()) {
+            openPhotosPrivacySettings()
+        }
+    }
+
+    /// Opens System Settings ▸ Privacy & Security ▸ Photos on macOS 13+.
+    /// The `x-apple.systempreferences:com.apple.preference.security?Privacy_Photos`
+    /// URL scheme is the documented macOS deep-link; NSWorkspace is the correct
+    /// macOS-native API (no UIKit / no iOS-only PHPhotoLibrary picker).
+    private func openPhotosPrivacySettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Photos") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// gate() variant that also accepts an action closure for the button.
+    private func gate(message: String, button: String?, action: @escaping () -> Void) -> some View {
+        VStack(spacing: 18) {
+            Text("snapsift").font(.system(size: 30, weight: .bold)).foregroundStyle(Color.reefMint)
+            Text(message)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(Color.reefTextDim)
+                .frame(maxWidth: 460)
+            if let button {
+                Button(button, action: action)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.reefGround)
         .toolbar { ToolbarItem { languageMenu } }
     }
 
@@ -99,6 +149,14 @@ struct ContentView: View {
         .overlay(alignment: .top) { bannerView }
         .overlay { if previewID != nil { previewOverlay } }
         .onAppear { model.loadAlbums() }
+        // FIX 2: persistent alert when delete fails — never let a destructive
+        // action fail silently. Gives the user a direct path to fix the permission.
+        .alert(t.deleteErrorTitle(), isPresented: $deleteErrorAlert) {
+            Button(t.deleteErrorOpenSettings()) { openPhotosPrivacySettings() }
+            Button(t.deleteErrorDismiss(), role: .cancel) {}
+        } message: {
+            Text(t.deleteErrorBody())
+        }
     }
 
     @ViewBuilder private var previewOverlay: some View {
@@ -572,6 +630,23 @@ struct ContentView: View {
             }
             Text("snapsift v\(appVersion)")
                 .foregroundStyle(Color.reefTextDim.opacity(0.55))
+            // FIX 3: always-visible commit button in the status bar.
+            // The toolbar Delete button is the last of ~6 primaryAction items and
+            // collapses into the » overflow on narrow windows, making it
+            // unreachable. This button is ALWAYS visible and calls the same
+            // runDelete() so the user can always commit their marked deletions.
+            if model.totalDeletions > 0 {
+                Button(role: .destructive) {
+                    Task { await runDelete() }
+                } label: {
+                    Label(t.statusBarDeleteN(model.totalDeletions), systemImage: "trash.fill")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.reefRed)
+                .disabled(deleting)
+                .keyboardShortcut(.delete, modifiers: .command)
+            }
         }
         .font(.caption)
         .padding(.horizontal, 14).padding(.vertical, 7)
@@ -633,13 +708,15 @@ struct ContentView: View {
             .disabled(model.groups.isEmpty || model.isWritingAlbums || writingAlbums || model.isScanning)
             .keyboardShortcut("5", modifiers: .command)
         }
+        // FIX 3: The toolbar Delete button stays for discoverability, but the
+        // keyboard shortcut moves to the always-visible status-bar button so it
+        // never disappears in » overflow. The toolbar button is a secondary path.
         ToolbarItem(placement: .primaryAction) {
             Button(role: .destructive) { Task { await runDelete() } } label: {
                 Label(t.deleteN(model.totalDeletions), systemImage: "trash")
             }
             .tint(.reefRed)
             .disabled(model.totalDeletions == 0 || deleting)
-            .keyboardShortcut(.delete, modifiers: .command)
         }
         ToolbarItem {
             Button { toggleHelp() } label: {
@@ -670,7 +747,10 @@ struct ContentView: View {
             if !model.groups.contains(where: { $0.id == selection }) { selection = nil }
             if n > 0 { showBanner(t.deletedBanner(n)) }
         } catch {
-            showBanner(error.localizedDescription)
+            // FIX 2: failed delete must be LOUD and actionable, not a silent 3s banner.
+            // A destructive action that fails invisibly breaks trust completely.
+            // Show a persistent, dismissible alert with a direct fix path.
+            deleteErrorAlert = true
         }
     }
 
@@ -707,13 +787,35 @@ struct GroupReview: View {
                             .help(t.tipAppleRanked())
                     }
                     Spacer()
-                    Button { model.toggleDeleteAll(group: group.id) } label: {
-                        Label(group.deleteAll ? t.deletingAll() : t.deleteAll(),
-                              systemImage: group.deleteAll ? "trash.fill" : "trash")
+                    // FIX 4: distinguish "armed with actual deletions" from
+                    // "armed but all frames are protected → nothing will be deleted".
+                    // The all-protected case must NOT show a solid-red "Deleting all"
+                    // label — that implies a delete will happen, which it won't.
+                    // Use amber + a distinct "All protected" label instead so the
+                    // visual state truthfully reflects what will happen.
+                    if group.deleteAll && group.deletionIDs.isEmpty {
+                        // Armed but all-protected: show a non-red "all protected" pill.
+                        Label(t.deleteAllProtected(), systemImage: "lock.fill")
+                            .font(.callout)
+                            .foregroundStyle(Color.reefAmber)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(Color.reefAmber.opacity(0.15),
+                                        in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(Color.reefAmber.opacity(0.4), lineWidth: 1)
+                            )
+                            .help(t.tipDeleteAllProtected())
+                            .onTapGesture { model.toggleDeleteAll(group: group.id) }
+                    } else {
+                        Button { model.toggleDeleteAll(group: group.id) } label: {
+                            Label(group.deleteAll ? t.deletingAll() : t.deleteAll(),
+                                  systemImage: group.deleteAll ? "trash.fill" : "trash")
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(group.deleteAll ? .reefRed : .reefTeal)
+                        .help(t.tipDeleteAll())
                     }
-                    .buttonStyle(.bordered)
-                    .tint(group.deleteAll ? .reefRed : .reefTeal)
-                    .help(t.tipDeleteAll())
                     Button { model.toggleKeepAll(group: group.id) } label: {
                         Label(group.keepAll ? t.keepingAll() : t.keepAll(),
                               systemImage: group.keepAll ? "checkmark.circle.fill" : "checkmark.circle")

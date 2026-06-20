@@ -32,6 +32,11 @@ struct ReviewGroup: Identifiable {
     var hasFavorite: Bool { photos.contains { $0.favorite } }
     var hasVideo: Bool { photos.contains { $0.kind == 1 } }
     var deletionIDs: [String] { photos.filter(isDelete).map(\.uuid) }
+    /// FIX 4: True when the group is armed for deletion AND actually has frames
+    /// that can be deleted. A group where every frame is protected (favorite /
+    /// edited / document) turns red on `d` but contributes 0 deletions — the
+    /// visual armed state must reflect real deletability, not just the flag.
+    var effectivelyArmed: Bool { deleteAll && !deletionIDs.isEmpty }
 }
 
 /// A semantic bucket from the "Similar sets" pass: all photos Vision tagged with

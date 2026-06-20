@@ -304,5 +304,50 @@ do {
           "single-frame group → no exact-dup suggestions")
 }
 
+print("Armed-but-all-protected groups (Fix 4)")
+// effectivelyArmed = deleteAll && !deletionIDs.isEmpty.
+// deletionIDs is driven by Photo.isProtected; Core's deletions() is the SSOT.
+// An all-protected group armed for deletion contributes 0 actual deletions —
+// the visual "armed" state must not imply a real delete will happen.
+do {
+    // All-favorite group: armed (deleteAll conceptually) but 0 deletable frames.
+    let allFav = [ph(1, 0, fav: true), ph(2, 1, fav: true)]
+    check(deletions(allFav).isEmpty,
+          "all-favorite group: no deletable frames even if armed")
+}
+do {
+    // All-edited group: armed but 0 deletable.
+    let allEdited = [ph(1, 0, edited: true), ph(2, 1, edited: true)]
+    check(deletions(allEdited).isEmpty,
+          "all-edited group: no deletable frames even if armed")
+}
+do {
+    // All-document group: armed but 0 deletable.
+    let allDoc = [ph(1, 0, isDocument: true), ph(2, 1, isDocument: true)]
+    check(deletions(allDoc).isEmpty,
+          "all-document group: no deletable frames even if armed")
+}
+do {
+    // Mixed protection: one favorite, one plain → armed yields 1 deletion,
+    // so effectivelyArmed would be true (non-empty deletionIDs). The visual
+    // red state IS correct here because something will actually be deleted.
+    let mixed = [ph(1, 0, fav: true), ph(2, 1)]
+    check(deletions(mixed).count == 1,
+          "mixed group: 1 deletable (non-protected) frame when armed")
+}
+do {
+    // Helper that mirrors effectivelyArmed logic: deleteAll flag + deletionIDs check.
+    // A group is "effectively armed" only when there are real frames to delete.
+    func effectivelyArmed(deletionCount: Int, deleteAll: Bool) -> Bool {
+        deleteAll && deletionCount > 0
+    }
+    check(!effectivelyArmed(deletionCount: 0, deleteAll: true),
+          "effectivelyArmed: false when all frames protected (0 deletions)")
+    check(effectivelyArmed(deletionCount: 2, deleteAll: true),
+          "effectivelyArmed: true when real deletions exist")
+    check(!effectivelyArmed(deletionCount: 2, deleteAll: false),
+          "effectivelyArmed: false when deleteAll flag is off")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

@@ -211,6 +211,98 @@ struct L10n: Sendable {
         }
     }
 
+    // FIX 1: Limited ("Selected Photos") access gate strings.
+    // snapsift needs Full Photos access to find and delete duplicates across
+    // the whole library; "Selected Photos" fundamentally cannot satisfy that.
+
+    /// Body text shown when the user granted "Selected Photos" (limited) access.
+    func gateLimitedBody() -> String {
+        switch language {
+        case .en: return "snapsift needs Full Photos access to find and remove duplicates across your whole library.\n\nYou've currently granted \"Selected Photos\" — snapsift can't see or delete photos outside that selection. Open System Settings ▸ Privacy & Security ▸ Photos and set snapsift to Full Access."
+        case .ja: return "snapsift は重複写真をライブラリ全体で検索・削除するために、「すべての写真」へのアクセスが必要です。\n\n現在「選択した写真」のみが許可されています。システム設定 ▸ プライバシーとセキュリティ ▸ 写真 を開き、snapsift を「フルアクセス」に変更してください。"
+        case .zhTW: return "snapsift 需要「完整照片」存取權限，才能掃描整個圖庫並刪除重複照片。\n\n你目前授予的是「已選取的照片」—— snapsift 無法看到或刪除選取範圍以外的照片。請到 系統設定 ▸ 隱私權與安全性 ▸ 照片，把 snapsift 改成「完整存取」。"
+        }
+    }
+
+    /// Button label on the limited-access gate — opens System Settings Photos pane.
+    func gateLimitedButton() -> String {
+        switch language {
+        case .en: return "Open System Settings ▸ Photos"
+        case .ja: return "システム設定 ▸ 写真 を開く"
+        case .zhTW: return "開啟系統設定 ▸ 照片"
+        }
+    }
+
+    // FIX 2: delete-failure alert strings.
+
+    /// Alert title when deleteAssets fails.
+    func deleteErrorTitle() -> String {
+        switch language {
+        case .en: return "Photos couldn't be deleted"
+        case .ja: return "写真を削除できませんでした"
+        case .zhTW: return "無法刪除照片"
+        }
+    }
+
+    /// Alert body — plain-language explanation with a fix path.
+    func deleteErrorBody() -> String {
+        switch language {
+        case .en: return "snapsift couldn't delete the photos. This usually means Photos access is set to \"Selected Photos\" rather than Full Access.\n\nOpen System Settings ▸ Privacy & Security ▸ Photos and set snapsift to Full Access, then try again."
+        case .ja: return "写真を削除できませんでした。多くの場合、写真のアクセスが「フルアクセス」ではなく「選択した写真」に設定されているのが原因です。\n\nシステム設定 ▸ プライバシーとセキュリティ ▸ 写真 で snapsift を「フルアクセス」に変更してから再試行してください。"
+        case .zhTW: return "snapsift 無法刪除照片。通常是因為照片存取權限設為「已選取的照片」而非「完整存取」。\n\n請到 系統設定 ▸ 隱私權與安全性 ▸ 照片，把 snapsift 改成「完整存取」，再試一次。"
+        }
+    }
+
+    /// Alert button that opens System Settings Photos pane.
+    func deleteErrorOpenSettings() -> String {
+        switch language {
+        case .en: return "Open System Settings"
+        case .ja: return "システム設定を開く"
+        case .zhTW: return "開啟系統設定"
+        }
+    }
+
+    /// Alert dismiss button.
+    func deleteErrorDismiss() -> String {
+        switch language {
+        case .en: return "Dismiss"
+        case .ja: return "閉じる"
+        case .zhTW: return "關閉"
+        }
+    }
+
+    // FIX 3: status-bar commit button label.
+
+    /// Always-visible commit button in the status bar: "Delete N · ⌘⌫"
+    func statusBarDeleteN(_ n: Int) -> String {
+        switch language {
+        case .en: return "Delete \(n) · ⌘⌫"
+        case .ja: return "\(n)枚を削除 · ⌘⌫"
+        case .zhTW: return "刪除 \(n) · ⌘⌫"
+        }
+    }
+
+    // FIX 4: all-protected group label.
+
+    /// Label shown instead of "Deleting all" when the group is armed (deleteAll)
+    /// but every frame is protected — nothing can actually be deleted.
+    func deleteAllProtected() -> String {
+        switch language {
+        case .en: return "All protected"
+        case .ja: return "すべて保護済み"
+        case .zhTW: return "全部受保護"
+        }
+    }
+
+    /// Tooltip for the "All protected" label on an all-protected armed group.
+    func tipDeleteAllProtected() -> String {
+        switch language {
+        case .en: return "Every frame in this group is protected (favorite / edited / document) — nothing will be deleted. Tap to disarm."
+        case .ja: return "このグループのすべてのフレームは保護されています（お気に入り・編集済み・書類）。何も削除されません。タップで解除。"
+        case .zhTW: return "這群的每張都受保護（最愛／已編輯／文件）—— 不會刪任何東西。點一下可解除。"
+        }
+    }
+
     // MARK: sidebar / detail
 
     func frames(_ n: Int) -> String {
