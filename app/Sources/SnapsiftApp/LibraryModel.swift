@@ -738,8 +738,38 @@ final class LibraryModel: ObservableObject {
         let assets = ids.compactMap { assetsByID[$0] }
         guard !assets.isEmpty else { return 0 }
 
+        // Build audit records BEFORE the delete (photos still exist in model).
+        let timestamp = DeletionAuditLog.nowTimestamp()
+        var auditRecords: [DeletionRecord] = []
+        for g in groups {
+            let deletionIDs = g.deletionIDs
+            guard !deletionIDs.isEmpty else { continue }
+            let keeperPhoto = g.photos.first { $0.uuid == g.keeperID }
+            let keeperID = g.keeperID
+            let keeperFilename = keeperPhoto?.filename ?? ""
+            for deletedID in deletionIDs {
+                guard let p = g.photos.first(where: { $0.uuid == deletedID }) else { continue }
+                let reason = DeletionAuditLog.reason(for: p, includeProtectedActive: g.includeProtected)
+                auditRecords.append(DeletionRecord(
+                    timestamp: timestamp,
+                    assetIdentifier: p.uuid,
+                    filename: p.filename,
+                    sizeBytes: p.size,
+                    keeperIdentifier: keeperID,
+                    keeperFilename: keeperFilename,
+                    reason: reason
+                ))
+            }
+        }
+
         try await PHPhotoLibrary.shared().performChanges {
             PHAssetChangeRequest.deleteAssets(assets as NSArray)
+        }
+
+        // Append audit log (best-effort, never aborts the deletion).
+        if !auditRecords.isEmpty {
+            let session = DeletionSession(timestamp: timestamp, records: auditRecords)
+            DeletionAuditLog.append(session)
         }
 
         // Drop deleted frames; a group that loses all but its keeper is resolved.

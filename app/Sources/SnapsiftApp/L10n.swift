@@ -858,4 +858,217 @@ struct L10n: Sendable {
         case .zhTW: return "完全相同，但受保護（最愛／已編輯／文件）—— 絕對不刪"
         }
     }
+
+    // MARK: - Pre-commit review sheet (Feature 1)
+
+    /// Sheet title — "Move N photos to Recently Deleted?"
+    func preCommitTitle(_ n: Int) -> String {
+        switch language {
+        case .en:   return "Move \(n) photo\(n == 1 ? "" : "s") to Recently Deleted?"
+        case .ja:   return "\(n)枚を「最近削除した項目」へ移動しますか？"
+        case .zhTW: return "將 \(n) 張照片移到「最近刪除」？"
+        }
+    }
+
+    /// Sheet subtitle — "≈X MB freed · recoverable for 30 days"
+    func preCommitSubtitle(bytes: Int) -> String {
+        let size = bytes > 0
+            ? ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) + " freed · "
+            : ""
+        switch language {
+        case .en:   return "\(size)recoverable for 30 days"
+        case .ja:   return "\(size)30日間は復元可能"
+        case .zhTW: return "\(size)30 天內可復原"
+        }
+    }
+
+    /// Label for the keeper section inside each group row.
+    func preCommitKept() -> String {
+        switch language {
+        case .en:   return "Kept"
+        case .ja:   return "残す"
+        case .zhTW: return "保留"
+        }
+    }
+
+    /// Label for the removing section inside each group row.
+    func preCommitRemoving() -> String {
+        switch language {
+        case .en:   return "Removing"
+        case .ja:   return "削除"
+        case .zhTW: return "移除"
+        }
+    }
+
+    /// Confirm button label.
+    func preCommitConfirm() -> String {
+        switch language {
+        case .en:   return "Move to Recently Deleted"
+        case .ja:   return "「最近削除した項目」へ移動"
+        case .zhTW: return "移到「最近刪除」"
+        }
+    }
+
+    /// Cancel button label.
+    func preCommitCancel() -> String {
+        switch language {
+        case .en:   return "Cancel"
+        case .ja:   return "キャンセル"
+        case .zhTW: return "取消"
+        }
+    }
+
+    /// Protected-frames warning shown in the review sheet in red.
+    func preCommitProtectedWarning(_ m: Int) -> String {
+        switch language {
+        case .en:   return "Includes \(m) protected photo\(m == 1 ? "" : "s") — favorites / edited / documents"
+        case .ja:   return "保護対象 \(m)枚を含む — お気に入り・編集済み・書類"
+        case .zhTW: return "包含 \(m) 張受保護照片 — 最愛／已編輯／文件"
+        }
+    }
+
+    // MARK: - Keeper "why" labels (Feature 2)
+
+    func keeperWhyFavorite() -> String {
+        switch language {
+        case .en:   return "kept: favorite ★"
+        case .ja:   return "保持：お気に入り ★"
+        case .zhTW: return "保留：最愛 ★"
+        }
+    }
+    func keeperWhyQuality() -> String {
+        switch language {
+        case .en:   return "kept: best quality"
+        case .ja:   return "保持：品質最高"
+        case .zhTW: return "保留：品質最佳"
+        }
+    }
+    func keeperWhyOriginalCamera() -> String {
+        switch language {
+        case .en:   return "kept: original capture"
+        case .ja:   return "保持：元のカメラ撮影"
+        case .zhTW: return "保留：原始拍攝"
+        }
+    }
+    func keeperWhySharpness() -> String {
+        switch language {
+        case .en:   return "kept: sharpest"
+        case .ja:   return "保持：最もシャープ"
+        case .zhTW: return "保留：最清晰"
+        }
+    }
+    func keeperWhyFormat() -> String {
+        switch language {
+        case .en:   return "kept: best format"
+        case .ja:   return "保持：フォーマット優先"
+        case .zhTW: return "保留：格式最佳"
+        }
+    }
+    func keeperWhySize() -> String {
+        switch language {
+        case .en:   return "kept: largest file"
+        case .ja:   return "保持：ファイル最大"
+        case .zhTW: return "保留：檔案最大"
+        }
+    }
+    func keeperWhyEarliest() -> String {
+        switch language {
+        case .en:   return "kept: earliest"
+        case .ja:   return "保持：最も古い"
+        case .zhTW: return "保留：最早拍攝"
+        }
+    }
+
+    // MARK: - No-survivor guard (Feature 3)
+
+    /// Warning shown in the pre-commit sheet when N groups will have no photo left.
+    func preCommitNoSurvivorWarning(_ n: Int) -> String {
+        switch language {
+        case .en:   return "⚠️ \(n) group\(n == 1 ? "" : "s") will have no photo left — the whole set goes to Recently Deleted"
+        case .ja:   return "⚠️ \(n)つのグループに写真が残りません — グループ全体が「最近削除した項目」へ"
+        case .zhTW: return "⚠️ \(n) 個群組將不留任何照片 — 整個群組都會移到「最近刪除」"
+        }
+    }
+
+    /// Checkbox label the user must tick before the confirm button enables.
+    func preCommitNoSurvivorAcknowledge() -> String {
+        switch language {
+        case .en:   return "I understand the entire cluster will be removed"
+        case .ja:   return "グループ全体が削除されることを理解しました"
+        case .zhTW: return "我了解整個群組都將被移除"
+        }
+    }
+
+    // MARK: - History view (Feature 4)
+
+    func historyTitle() -> String {
+        switch language {
+        case .en:   return "Removed"
+        case .ja:   return "削除済み"
+        case .zhTW: return "已移除"
+        }
+    }
+    func historyEmpty() -> String {
+        switch language {
+        case .en:   return "No deletion history yet.\nDelete photos to see a record here."
+        case .ja:   return "削除履歴はまだありません。\n写真を削除すると記録が表示されます。"
+        case .zhTW: return "還沒有刪除記錄。\n刪除照片後就會在這裡顯示。"
+        }
+    }
+    func historySessionHeader(date: String, count: Int) -> String {
+        switch language {
+        case .en:   return "\(date) · \(count) photo\(count == 1 ? "" : "s") removed"
+        case .ja:   return "\(date) · \(count)枚を削除"
+        case .zhTW: return "\(date) · 移除 \(count) 張"
+        }
+    }
+    func historyRecoverable(until: String) -> String {
+        switch language {
+        case .en:   return "In Recently Deleted — recoverable until \(until)"
+        case .ja:   return "「最近削除した項目」に保存中 — \(until) まで復元可能"
+        case .zhTW: return "在「最近刪除」中 — 可在 \(until) 前復原"
+        }
+    }
+    func historyExpired() -> String {
+        switch language {
+        case .en:   return "Recovery window expired"
+        case .ja:   return "復元期限切れ"
+        case .zhTW: return "復原期限已過"
+        }
+    }
+    func historyExportLog() -> String {
+        switch language {
+        case .en:   return "Export Log…"
+        case .ja:   return "ログをエクスポート…"
+        case .zhTW: return "匯出記錄…"
+        }
+    }
+    func historyExportFilename() -> String {
+        switch language {
+        case .en:   return "snapsift-deletion-history"
+        case .ja:   return "snapsift-削除履歴"
+        case .zhTW: return "snapsift-刪除記錄"
+        }
+    }
+    func historyClose() -> String {
+        switch language {
+        case .en:   return "Close"
+        case .ja:   return "閉じる"
+        case .zhTW: return "關閉"
+        }
+    }
+    func historyKeeperLabel() -> String {
+        switch language {
+        case .en:   return "keeper:"
+        case .ja:   return "残した："
+        case .zhTW: return "保留："
+        }
+    }
+    func historyReasonLabel() -> String {
+        switch language {
+        case .en:   return "reason:"
+        case .ja:   return "理由："
+        case .zhTW: return "原因："
+        }
+    }
 }

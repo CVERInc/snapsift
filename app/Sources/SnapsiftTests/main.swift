@@ -602,5 +602,187 @@ do {
     check(deletions([fav, doc]).isEmpty, "exact-dup/surface: all-protected group still deletes nothing")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature 2: keeper-why helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Keeper-why helper (Feature 2)")
+
+do {
+    // Favorite always wins regardless of other signals.
+    let fav = ph(1, 0, size: 100, uti: "public.jpeg", fav: true, quality: 0.1)
+    let better = ph(2, 1, size: 9_000_000, uti: "public.heic", quality: 0.99)
+    let reason = keeperReason(photos: [fav, better], keeperID: "U1")
+    check(reason == .favorite, "keeper-why: favorite wins → .favorite")
+}
+do {
+    // Quality dominant: keeper has strictly higher quality bucket.
+    let highQ = ph(1, 0, quality: 0.9)
+    let lowQ  = ph(2, 1, quality: 0.1)
+    check(keeperReason(photos: [highQ, lowQ], keeperID: "U1") == .quality,
+          "keeper-why: higher quality → .quality")
+}
+do {
+    // Sharpness dominant (quality tied, no fav, no originalCamera, same format/size).
+    let sharp = ph(1, 0, uti: "public.heic", quality: 0.5, sharpness: 0.9)
+    let blur  = ph(2, 1, uti: "public.heic", quality: 0.5, sharpness: 0.1)
+    check(keeperReason(photos: [sharp, blur], keeperID: "U1") == .sharpness,
+          "keeper-why: sharper frame → .sharpness")
+}
+do {
+    // Format dominant: same quality, sharpness; keeper has better UTI.
+    let heic = ph(1, 0, uti: "public.heic", quality: 0.5, sharpness: 0.5)
+    let jpeg = ph(2, 1, uti: "public.jpeg", quality: 0.5, sharpness: 0.5)
+    check(keeperReason(photos: [heic, jpeg], keeperID: "U1") == .format,
+          "keeper-why: better format → .format")
+}
+do {
+    // Size dominant: same everything except file size.
+    let big   = ph(1, 0, size: 9_000_000, uti: "public.heic", quality: 0.5, sharpness: 0.5)
+    let small = ph(2, 1, size: 1_000_000, uti: "public.heic", quality: 0.5, sharpness: 0.5)
+    check(keeperReason(photos: [big, small], keeperID: "U1") == .size,
+          "keeper-why: larger file → .size")
+}
+do {
+    // Earliest fallback: everything identical → earliest (negTakenAt wins).
+    let first  = ph(1, 0, uti: "public.heic", quality: 0.5, sharpness: 0.5)   // takenAt=0
+    let second = ph(2, 1, uti: "public.heic", quality: 0.5, sharpness: 0.5)   // takenAt=1
+    // first is the keeper: takenAt=0 < takenAt=1 → negTakenAt(-0) > negTakenAt(-1) → wins
+    check(keeperReason(photos: [first, second], keeperID: "U1") == .earliest,
+          "keeper-why: all equal → .earliest")
+}
+do {
+    // Single photo: returns .earliest (degenerate group, no comparison).
+    check(keeperReason(photos: [ph(1, 0)], keeperID: "U1") == .earliest,
+          "keeper-why: single-member group → .earliest")
+}
+do {
+    // originalCamera dominant (quality tied, no fav, keeper has camera).
+    let cam  = ph(1, 0, uti: "public.heic", quality: 0.5, sharpness: 0.5, originalCamera: true)
+    let resave = ph(2, 1, uti: "public.heic", quality: 0.5, sharpness: 0.5, originalCamera: false)
+    check(keeperReason(photos: [cam, resave], keeperID: "U1") == .originalCamera,
+          "keeper-why: originalCamera → .originalCamera")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature 3: no-survivor guard
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("No-survivor guard (Feature 3)")
+
+do {
+    // Group where every frame is rejected + includeProtected=true → 1 empty group.
+    let p1 = ph(1, 0)
+    let p2 = ph(2, 1)
+    let rejected: Set<String> = ["U1", "U2"]
+    let count = noSurvivorGroupCount([
+        (photos: [p1, p2], rejected: rejected, includeProtected: true)
+    ])
+    check(count == 1, "no-survivor: all frames rejected + includeProtected=true → 1 empty group")
+}
+do {
+    // Keeper itself was force-rejected (keeper in rejected set).
+    let keep = ph(1, 0, quality: 0.9)
+    let other = ph(2, 1)
+    // Both rejected; includeProtected=true so nothing survives.
+    let count = noSurvivorGroupCount([
+        (photos: [keep, other], rejected: Set(["U1", "U2"]), includeProtected: true)
+    ])
+    check(count == 1, "no-survivor: keeper itself force-rejected + no survivors → counted")
+}
+do {
+    // Protected frame in rejected but includeProtected=false → protected survives → not empty.
+    let fav = ph(1, 0, fav: true)
+    let plain = ph(2, 1)
+    // Both in rejected, but includeProtected=false so fav survives.
+    let count = noSurvivorGroupCount([
+        (photos: [fav, plain], rejected: Set(["U1", "U2"]), includeProtected: false)
+    ])
+    check(count == 0, "no-survivor: protected survives (includeProtected=false) → not empty")
+}
+do {
+    // Mix of two groups: one empty, one not.
+    let p1 = ph(1, 0)
+    let p2 = ph(2, 1)
+    let p3 = ph(3, 2)
+    let count = noSurvivorGroupCount([
+        (photos: [p1, p2], rejected: Set(["U1", "U2"]), includeProtected: true),   // empty
+        (photos: [p3, ph(4, 3)], rejected: Set(["U4"]), includeProtected: false),   // p3 survives
+    ])
+    check(count == 1, "no-survivor: 2 groups, only 1 empty → count=1")
+}
+do {
+    // Nothing rejected → zero empty groups.
+    let count = noSurvivorGroupCount([
+        (photos: [ph(1, 0), ph(2, 1)], rejected: [], includeProtected: false)
+    ])
+    check(count == 0, "no-survivor: nothing rejected → 0 empty groups")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature 4: audit record construction
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Audit record construction (Feature 4)")
+
+do {
+    // Plain non-protected frame → .userRejected
+    let plain = ph(1, 0)
+    let reason = DeletionAuditLog.reason(for: plain, includeProtectedActive: false)
+    check(reason == .userRejected, "audit: plain frame → .userRejected")
+}
+do {
+    // Protected + includeProtected=false → .userRejected (protection not overridden)
+    let fav = ph(1, 0, fav: true)
+    let reason = DeletionAuditLog.reason(for: fav, includeProtectedActive: false)
+    check(reason == .userRejected, "audit: protected + includeProtectedActive=false → .userRejected")
+}
+do {
+    // Favorite force-included → .forceIncludedProtectedFavorite
+    let fav = ph(1, 0, fav: true)
+    let reason = DeletionAuditLog.reason(for: fav, includeProtectedActive: true)
+    check(reason == .forceIncludedProtectedFavorite, "audit: favorite + includeProtected=true → .forceIncludedProtectedFavorite")
+}
+do {
+    // Edited force-included → .forceIncludedProtectedEdited
+    let edited_ = ph(1, 0, edited: true)
+    let reason = DeletionAuditLog.reason(for: edited_, includeProtectedActive: true)
+    check(reason == .forceIncludedProtectedEdited, "audit: edited + includeProtected=true → .forceIncludedProtectedEdited")
+}
+do {
+    // Document force-included → .forceIncludedProtectedDocument
+    let doc = ph(1, 0, isDocument: true)
+    let reason = DeletionAuditLog.reason(for: doc, includeProtectedActive: true)
+    check(reason == .forceIncludedProtectedDocument, "audit: document + includeProtected=true → .forceIncludedProtectedDocument")
+}
+do {
+    // Multiple protections (favorite + edited) → .forceIncludedProtectedMultiple
+    let both = Photo(uuid: "Ux", filename: "both.heic", takenAt: 0,
+                     width: 100, height: 100, size: 1000, uti: "public.heic",
+                     kind: 0, favorite: true, quality: 0,
+                     edited: true, isDocument: false,
+                     sharpness: 0, originalCamera: false)
+    let reason = DeletionAuditLog.reason(for: both, includeProtectedActive: true)
+    check(reason == .forceIncludedProtectedMultiple, "audit: favorite+edited + includeProtected=true → .forceIncludedProtectedMultiple")
+}
+do {
+    // nowTimestamp returns non-empty ISO string.
+    let ts = DeletionAuditLog.nowTimestamp()
+    check(!ts.isEmpty && ts.contains("T"), "audit: nowTimestamp() returns ISO-8601 string")
+}
+do {
+    // DeletionSession recoverableUntil is ~30 days after timestamp.
+    let ts = DeletionAuditLog.nowTimestamp()
+    let session = DeletionSession(timestamp: ts, records: [])
+    let until = session.recoverableUntil
+    check(until != nil, "audit: DeletionSession.recoverableUntil is non-nil for valid timestamp")
+    if let d = until {
+        let diff = d.timeIntervalSinceNow
+        // Should be approximately 30 days (allow 29–31 days for clock skew in tests)
+        check(diff > 29 * 24 * 3600 && diff < 31 * 24 * 3600,
+              "audit: recoverableUntil is approximately 30 days from now")
+    }
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

@@ -22,6 +22,11 @@ struct ContentView: View {
     @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
     // FIX 2: persistent delete-failure alert
     @State private var deleteErrorAlert = false
+    // Feature 1: pre-commit review sheet
+    @State private var showPreCommitSheet = false
+    @State private var pendingPreCommitGroups: [PreCommitGroup] = []
+    // Feature 4: deletion history sheet
+    @State private var showHistorySheet = false
 
     private var language: Language { Language(rawValue: langRaw) ?? .en }
     private var t: L10n { L10n(language) }
@@ -153,6 +158,31 @@ struct ContentView: View {
         .overlay(alignment: .top) { bannerView }
         .overlay { if previewID != nil { previewOverlay } }
         .onAppear { model.loadAlbums() }
+        // Feature 1: pre-commit review sheet
+        .sheet(isPresented: $showPreCommitSheet) {
+            PreCommitReviewSheet(
+                groups: pendingPreCommitGroups,
+                totalDeletions: model.totalDeletions,
+                reclaimableBytes: model.reclaimableBytes,
+                totalProtected: pendingPreCommitGroups.reduce(0) {
+                    $0 + $1.toRemove.filter(\.isProtected).count
+                },
+                noSurvivorCount: noSurvivorCountForCurrentGroups(),
+                model: model,
+                t: t,
+                onConfirm: {
+                    showPreCommitSheet = false
+                    Task { await performDelete() }
+                },
+                onCancel: {
+                    showPreCommitSheet = false
+                }
+            )
+        }
+        // Feature 4: history sheet
+        .sheet(isPresented: $showHistorySheet) {
+            DeletionHistoryView(t: t, onClose: { showHistorySheet = false })
+        }
         // FIX 2: persistent alert when delete fails — never let a destructive
         // action fail silently. Gives the user a direct path to fix the permission.
         .alert(t.deleteErrorTitle(), isPresented: $deleteErrorAlert) {
@@ -818,6 +848,13 @@ struct ContentView: View {
             .tint(.reefRed)
             .disabled(model.totalDeletions == 0 || deleting)
         }
+        // Feature 4: history toolbar button
+        ToolbarItem {
+            Button { showHistorySheet = true } label: {
+                Label(t.historyTitle(), systemImage: "clock.arrow.circlepath")
+            }
+            .help(t.historyTitle())
+        }
         ToolbarItem {
             Button { toggleHelp() } label: {
                 Image(systemName: "questionmark.circle")
@@ -839,7 +876,29 @@ struct ContentView: View {
         }
     }
 
+    /// Step 1: build the pre-commit data and show the review sheet.
+    /// The actual PHPhotoLibrary delete only happens after the user confirms.
     private func runDelete() async {
+        guard model.totalDeletions > 0 else { return }
+        // Build PreCommitGroup snapshots from current group state.
+        pendingPreCommitGroups = model.groups.compactMap { g -> PreCommitGroup? in
+            let toRemove = g.photos.filter { g.isDelete($0) }
+            guard !toRemove.isEmpty else { return nil }
+            guard let keeper = g.photos.first(where: { g.isKeeper($0) }) else { return nil }
+            let why = keeperReason(photos: g.photos, keeperID: g.keeperID)
+            return PreCommitGroup(
+                id: g.id,
+                keeper: keeper,
+                keeperReason: why,
+                toRemove: toRemove,
+                includeProtected: g.includeProtected
+            )
+        }
+        showPreCommitSheet = true
+    }
+
+    /// Step 2: the actual delete — called only after the user confirmed the sheet.
+    private func performDelete() async {
         deleting = true
         defer { deleting = false }
         do {
@@ -852,6 +911,14 @@ struct ContentView: View {
             // Show a persistent, dismissible alert with a direct fix path.
             deleteErrorAlert = true
         }
+    }
+
+    /// Compute no-survivor group count for the current model state.
+    private func noSurvivorCountForCurrentGroups() -> Int {
+        let inputs = model.groups.map { g in
+            (photos: g.photos, rejected: g.rejected, includeProtected: g.includeProtected)
+        }
+        return noSurvivorGroupCount(inputs)
     }
 
     private func showBanner(_ text: String) {
@@ -1047,7 +1114,7 @@ struct GroupReview: View {
             p.isProtected && isExactDupeGroup ? t.tipExactDupeProtected()
             : p.isProtected ? t.tipProtectedFrame()
             : isExactSuggested ? t.tipExactDupe()
-            : keep ? t.tipKeeper()
+            : keep ? keeperWhyTooltip(for: p, group: group, t: t)
             : t.tipDelete()
         )
     }
@@ -1216,4 +1283,23 @@ private extension View {
             liquidGlassCard(cornerRadius: CVERRadius.card)
         }
     }
+}
+
+// MARK: - Feature 2: keeper-why tooltip helper
+
+/// Build a tooltip for the keeper card that explains WHY this frame was chosen.
+/// Calls SnapsiftCore's keeperReason() and maps to a localized label.
+private func keeperWhyTooltip(for photo: Photo, group: ReviewGroup, t: L10n) -> String {
+    let reason = keeperReason(photos: group.photos, keeperID: photo.uuid)
+    let whyLabel: String
+    switch reason {
+    case .favorite:       whyLabel = t.keeperWhyFavorite()
+    case .quality:        whyLabel = t.keeperWhyQuality()
+    case .originalCamera: whyLabel = t.keeperWhyOriginalCamera()
+    case .sharpness:      whyLabel = t.keeperWhySharpness()
+    case .format:         whyLabel = t.keeperWhyFormat()
+    case .size:           whyLabel = t.keeperWhySize()
+    case .earliest:       whyLabel = t.keeperWhyEarliest()
+    }
+    return "\(t.tipKeeper()) · \(whyLabel)"
 }

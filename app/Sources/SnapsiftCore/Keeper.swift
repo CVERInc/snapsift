@@ -94,6 +94,77 @@ public func deletions(_ group: [Photo]) -> [Photo] {
     return group.filter { $0.uuid != keep.uuid && !$0.isProtected }
 }
 
+// MARK: - Keeper "Why" transparency
+
+/// The dominant reason a frame was chosen as the keeper.
+/// Ordered from highest to lowest priority, matching `RankKey`.
+public enum KeeperReason: String, Sendable, Equatable {
+    case favorite        // user starred it — always wins
+    case quality         // highest Apple quality bucket
+    case originalCamera  // intact EXIF Make/Model — not a re-save
+    case sharpness       // sharpest within an otherwise-tied group
+    case format          // best format (HEIC > JPEG > …)
+    case size            // largest file (less compression)
+    case earliest        // earliest capture — the original take
+}
+
+/// Derive the dominant reason a keeper was chosen from the signals in `RankKey`.
+/// Returns the highest-priority signal where the keeper strictly beats at least one
+/// other frame in the group — so the label always reflects a real decision.
+///
+/// If the group has only one member (degenerate), defaults to `.earliest`.
+public func keeperReason(photos: [Photo], keeperID: String) -> KeeperReason {
+    guard let keeper = photos.first(where: { $0.uuid == keeperID }) else { return .earliest }
+    let others = photos.filter { $0.uuid != keeperID }
+    guard !others.isEmpty else { return .earliest }
+
+    // Check priority from highest to lowest — first signal where keeper wins vs any other.
+    if keeper.favorite { return .favorite }
+
+    let kQ = qualityBucket(keeper.quality)
+    if others.contains(where: { qualityBucket($0.quality) < kQ }) { return .quality }
+
+    if keeper.originalCamera && others.contains(where: { !$0.originalCamera }) { return .originalCamera }
+
+    let kS = qualityBucket(keeper.sharpness)
+    if others.contains(where: { qualityBucket($0.sharpness) < kS }) { return .sharpness }
+
+    let kU = utiPriority[keeper.uti] ?? 0
+    if others.contains(where: { (utiPriority[$0.uti] ?? 0) < kU }) { return .format }
+
+    if others.contains(where: { $0.size < keeper.size }) { return .size }
+
+    return .earliest
+}
+
+// MARK: - No-survivor guard
+
+/// Count the number of review groups that would be completely emptied —
+/// every frame marked for deletion, leaving zero survivors — after applying
+/// the given per-group rejected sets.
+///
+/// A group has no survivor when ALL its photos are in `rejected` AND
+/// `includeProtected` is true for that group (otherwise protected frames survive).
+///
+/// This is a pure, testable helper that takes the minimum inputs required
+/// by the UI guard so it doesn't need to import the App layer.
+///
+/// Parameters match the App layer's `ReviewGroup`:
+///   - `groups`: sequence of (photos, rejected, includeProtected) tuples
+public func noSurvivorGroupCount(
+    _ groups: [(photos: [Photo], rejected: Set<String>, includeProtected: Bool)]
+) -> Int {
+    groups.filter { g in
+        // A frame "survives" if it is NOT effectively deleted.
+        let survivors = g.photos.filter { p in
+            guard g.rejected.contains(p.uuid) else { return true }  // not rejected → survives
+            if p.isProtected && !g.includeProtected { return true }  // protected & not overridden → survives
+            return false  // would be deleted
+        }
+        return survivors.isEmpty
+    }.count
+}
+
 /// The carry-forward state of a reviewed cluster after some of its frames were
 /// deleted. `nil` `photos` means the cluster is resolved (fewer than two frames
 /// remain) and should be dropped entirely.
