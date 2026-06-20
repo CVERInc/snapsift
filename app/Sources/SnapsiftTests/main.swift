@@ -1052,5 +1052,153 @@ do {
           "degraded: documentEvalDegraded alone does not set isProtected (user can still force-reject)")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Pass 2a — Justified-rows gallery layout (pure row-packing math)
+//
+// JustifiedLayout.rows() is the UI-free helper that drives the aspect-true
+// gallery: frames keep their real aspect ratio, pack into rows of a target
+// height, and each FULL row is uniformly scaled so its total width exactly
+// equals the container. The trailing row keeps the target height (not
+// stretched). These tests pin that contract; the SwiftUI view consumes the
+// result verbatim, so getting the math right here means correct on-screen rows.
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Pass 2a — Justified-rows layout")
+
+func approx(_ a: Double, _ b: Double, _ eps: Double = 1e-6) -> Bool { abs(a - b) <= eps }
+
+do {
+    // Empty input → no rows.
+    check(JustifiedLayout.rows(aspectRatios: [], containerWidth: 1000,
+                               targetHeight: 200, spacing: 8).isEmpty,
+          "justified: empty input → no rows")
+}
+
+do {
+    // A single frame is the trailing row → keeps the TARGET height, not stretched.
+    // 3:2 landscape at H=200 → width 300, well under a 1000-wide container.
+    let rows = JustifiedLayout.rows(aspectRatios: [1.5], containerWidth: 1000,
+                                    targetHeight: 200, spacing: 8)
+    check(rows.count == 1 && rows[0].items.count == 1, "justified: single frame → 1 row, 1 item")
+    check(approx(rows[0].height, 200) && approx(rows[0].items[0].width, 300),
+          "justified: lone trailing frame keeps target height (not stretched)")
+}
+
+do {
+    // A FULL row (one that overflowed and got finalized) fills the container
+    // width EXACTLY. Use many wide frames so the first row fills before the end.
+    let aspects = Array(repeating: 1.5, count: 10)   // 10 landscape frames
+    let W = 1000.0, gap = 8.0, H = 200.0
+    let rows = JustifiedLayout.rows(aspectRatios: aspects, containerWidth: W,
+                                    targetHeight: H, spacing: gap)
+    check(rows.count >= 2, "justified: 10 wide frames wrap into ≥2 rows")
+    // Every row EXCEPT the last must fill the width exactly.
+    let nonLast = rows.dropLast()
+    check(nonLast.allSatisfy { approx($0.totalWidth(spacing: gap), W, 1e-4) },
+          "justified: every full (non-trailing) row fills the container width exactly")
+    // Within a justified row, all items share the row height.
+    check(rows.allSatisfy { r in r.items.allSatisfy { approx($0.height, r.height) } },
+          "justified: all items in a row share the row height")
+    // Aspect ratio is preserved for every item: width/height == input aspect.
+    check(rows.allSatisfy { r in r.items.allSatisfy { approx($0.width / $0.height, aspects[$0.index]) } },
+          "justified: every item preserves its true aspect ratio")
+}
+
+do {
+    // Mixed portrait + landscape. Portrait (aspect < 1) must stay narrow/tall;
+    // landscape wide/short. The justify must still fill non-trailing rows.
+    let aspects = [0.75, 1.5, 0.6, 1.78, 1.0, 0.75, 1.33, 1.5]
+    let W = 900.0, gap = 6.0, H = 180.0
+    let rows = JustifiedLayout.rows(aspectRatios: aspects, containerWidth: W,
+                                    targetHeight: H, spacing: gap)
+    // Indices are a partition of 0..<n in order (no drops, no dupes, in order).
+    let flatIdx = rows.flatMap { $0.items.map(\.index) }
+    check(flatIdx == Array(0..<aspects.count),
+          "justified: indices partition input in original order (no drops/dupes)")
+    check(rows.dropLast().allSatisfy { approx($0.totalWidth(spacing: gap), W, 1e-3) },
+          "justified: mixed-orientation full rows still fill the width")
+    // A portrait frame (aspect 0.75) is taller than wide at any row height.
+    check(rows.allSatisfy { r in r.items.allSatisfy { p in
+        aspects[p.index] < 1 ? p.width < p.height : true } },
+          "justified: portrait frames stay taller than wide (true orientation)")
+}
+
+do {
+    // A single frame WIDER than the container gets its own row scaled DOWN to fit
+    // (never overflows). aspect 5.0 at H=200 → 1000 wide, container only 600.
+    let rows = JustifiedLayout.rows(aspectRatios: [5.0], containerWidth: 600,
+                                    targetHeight: 200, spacing: 8)
+    check(rows.count == 1, "justified: one oversized frame → single row")
+    check(rows[0].items[0].width <= 600 + 1e-6,
+          "justified: oversized lone frame is scaled down to fit (no overflow)")
+}
+
+do {
+    // Bad / missing aspect ratios (0, NaN, negative) are treated as square (1).
+    let rows = JustifiedLayout.rows(aspectRatios: [0, .nan, -3, 1.5],
+                                    containerWidth: 1000, targetHeight: 200, spacing: 8)
+    let flat = rows.flatMap(\.items)
+    check(flat.count == 4, "justified: degenerate aspects still produce all 4 items")
+    // The three bad ones should be square at the trailing row height.
+    let squares = flat.prefix(3)
+    check(squares.allSatisfy { approx($0.width, $0.height) },
+          "justified: non-finite / non-positive aspect → square (1:1)")
+}
+
+do {
+    // Degenerate container width (≤0) must not crash or divide-by-zero — it falls
+    // back to a tall single column at the target height.
+    let rows = JustifiedLayout.rows(aspectRatios: [1.5, 0.8], containerWidth: 0,
+                                    targetHeight: 200, spacing: 8)
+    check(!rows.isEmpty && rows.allSatisfy { $0.height.isFinite && $0.height > 0 },
+          "justified: zero container width degrades gracefully (finite heights)")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pass 2a — display rotation reflows the aspect ratio
+//
+// Non-destructive display-rotate stores quarter-turns per frame and applies them
+// to BOTH the rendered image and the aspect ratio fed into the justified layout,
+// so a rotated portrait reflows as a landscape (and vice-versa). The aspect math
+// is pure (a 90°/270° turn inverts w/h; 0°/180° leaves it) so we test it here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Pass 2a — rotated aspect reflow")
+
+/// Pure mirror of the view's rotated-aspect rule: an odd quarter-turn swaps
+/// width and height; an even quarter-turn leaves the aspect unchanged.
+func rotatedAspect(_ aspect: Double, quarterTurns: Int) -> Double {
+    let q = ((quarterTurns % 4) + 4) % 4
+    return (q == 1 || q == 3) ? 1.0 / aspect : aspect
+}
+
+do {
+    let landscape = 1.5    // 3:2
+    check(approx(rotatedAspect(landscape, quarterTurns: 0), 1.5), "rotate 0 → unchanged")
+    check(approx(rotatedAspect(landscape, quarterTurns: 1), 1.0 / 1.5),
+          "rotate 90 → aspect inverts (landscape → portrait)")
+    check(approx(rotatedAspect(landscape, quarterTurns: 2), 1.5), "rotate 180 → unchanged")
+    check(approx(rotatedAspect(landscape, quarterTurns: 3), 1.0 / 1.5),
+          "rotate 270 → aspect inverts")
+    // Normalisation: negative and >4 turns wrap correctly.
+    check(approx(rotatedAspect(landscape, quarterTurns: -1), 1.0 / 1.5),
+          "rotate -90 normalises to 270 → inverts")
+    check(approx(rotatedAspect(landscape, quarterTurns: 5), 1.0 / 1.5),
+          "rotate 450 normalises to 90 → inverts")
+    check(approx(rotatedAspect(landscape, quarterTurns: 4), 1.5),
+          "rotate 360 normalises to 0 → unchanged")
+}
+
+do {
+    // A rotated portrait reflows in the justified layout as a landscape: feeding
+    // the rotated aspect into rows() yields a wider-than-tall placed frame.
+    let portrait = 0.75
+    let rotated = rotatedAspect(portrait, quarterTurns: 1)   // → 1.333…
+    let rows = JustifiedLayout.rows(aspectRatios: [rotated], containerWidth: 1000,
+                                    targetHeight: 200, spacing: 8)
+    check(rows[0].items[0].width > rows[0].items[0].height,
+          "rotate: a rotated portrait reflows wider-than-tall in the layout")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

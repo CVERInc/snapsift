@@ -409,6 +409,9 @@ struct ContentView: View {
         case "d":      model.rejectAll(group: g.id); return .handled
         case "x", "X":
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
+        // FIX 3: display-only rotate. R = clockwise, ⇧R = counter-clockwise.
+        case "r", "R":
+            handleRotateKey(modifiers: kp.modifiers); return .handled
         default: return .ignored
         }
     }
@@ -434,8 +437,20 @@ struct ContentView: View {
             loupeOpen = false; previewID = nil; return .handled
         case "x", "X":
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
+        // FIX 3: display-only rotate works in the loupe too.
+        case "r", "R":
+            handleRotateKey(modifiers: kp.modifiers); return .handled
         default: return .ignored
         }
+    }
+
+    /// FIX 3 — non-destructive display rotate of the focused frame.
+    /// R = 90° clockwise, ⇧R = 90° counter-clockwise. Session-only (never written
+    /// back to Photos — that is the Pass 2b hook). Works in grid and loupe; the
+    /// justified layout reflows because the rotated aspect is recomputed.
+    private func handleRotateKey(modifiers: EventModifiers) {
+        guard let f = focusedFrame else { return }
+        model.rotate(frameID: f, clockwise: !modifiers.contains(.shift))
     }
 
     /// Shared reject-key logic for grid and loupe.
@@ -988,7 +1003,11 @@ struct GroupReview: View {
     // FIX C: confirmation alert state for including protected frames in deletion.
     @State private var showDeleteProtectedAlert = false
 
-    private let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
+    // Pass 2a (FIX 2): measured content width for the justified-rows layout.
+    @State private var contentWidth: CGFloat = 0
+
+    /// Horizontal gap between frames in a row (and vertical gap between rows).
+    private let gallerySpacing: CGFloat = 8
 
     var body: some View {
         ScrollView {
@@ -1068,11 +1087,12 @@ struct GroupReview: View {
                     .tint(group.keepAll ? .reefGreen : .reefTeal)
                     .help(t.tipKeepAll())
                 }
-                LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(Array(group.photos.enumerated()), id: \.element.id) { idx, p in
-                        card(for: p, index: idx)
-                    }
-                }
+                // Pass 2a (FIX 2): aspect-true JUSTIFIED-ROWS gallery (Photos.app /
+                // Lightroom pattern) replaces the square-crop LazyVGrid. Frames keep
+                // their real shape; the pure JustifiedLayout helper packs them into
+                // rows that fill the width. Width is captured via a background reader
+                // so the row math reflows on window resize.
+                justifiedGallery
             }
             .padding(16)
         }
@@ -1091,7 +1111,54 @@ struct GroupReview: View {
         }
     }
 
-    private func card(for p: Photo, index: Int) -> some View {
+    // MARK: - Pass 2a — justified-rows gallery (FIX 2)
+
+    /// Nominal row height, responsive to window width: a bit shorter on a slim
+    /// pane, taller on a wide one, clamped to a sensible band.
+    private var targetRowHeight: CGFloat {
+        let w = contentWidth
+        guard w > 0 else { return 200 }
+        // ~200pt baseline; scale gently with width so wide windows breathe.
+        return min(260, max(150, w / 4.2))
+    }
+
+    /// The aspect-true gallery: pure JustifiedLayout math packs frames (using
+    /// each frame's orientation- + rotation-corrected aspect) into rows that fill
+    /// the measured content width; the trailing row keeps the target height. The
+    /// focus highlight, keeper/reject/protected borders, reason badges, keyboard
+    /// focus model and click-to-focus are all preserved per card.
+    private var justifiedGallery: some View {
+        let aspects = group.photos.map { model.displayAspect(for: $0) }
+        let rows = JustifiedLayout.rows(
+            aspectRatios: aspects,
+            containerWidth: Double(contentWidth),
+            targetHeight: Double(targetRowHeight),
+            spacing: Double(gallerySpacing)
+        )
+        return VStack(alignment: .leading, spacing: gallerySpacing) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(alignment: .top, spacing: gallerySpacing) {
+                    ForEach(row.items, id: \.index) { item in
+                        let p = group.photos[item.index]
+                        card(for: p, index: item.index,
+                             imageSize: CGSize(width: item.width, height: row.height))
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Measure the available content width (already inside the .padding(16)).
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: GalleryWidthKey.self, value: geo.size.width)
+            }
+        )
+        .onPreferenceChange(GalleryWidthKey.self) { w in
+            if abs(w - contentWidth) > 0.5 { contentWidth = w }
+        }
+    }
+
+    private func card(for p: Photo, index: Int, imageSize: CGSize) -> some View {
         let keep = group.isKeeper(p)
         let del = group.isDelete(p)
         let focused = p.uuid == focusedFrame
@@ -1110,27 +1177,41 @@ struct GroupReview: View {
             : (del ? .reefRed : .clear)))
         // Exact-dup non-keepers dim just like regular delete candidates.
         let dimmed = del || isExactSuggested
-        return VStack(spacing: 0) {
-            ZStack(alignment: .topLeading) {
-                AssetThumbnail(asset: model.asset(for: p.uuid), manager: model.imageManager, side: 160)
-                    .opacity(dimmed ? 0.34 : 1)
-                badge(p: p, keep: keep, del: del, exactSuggested: isExactSuggested)
-                if index < 9 {
-                    Text("\(index + 1)")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .frame(width: 18, height: 18)
-                        .background(Color.reefGround.opacity(0.75), in: Circle())
-                        .foregroundStyle(Color.reefMint)
-                        .padding(6)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                }
+        return ZStack(alignment: .topLeading) {
+            // True-aspect, orientation-upright, display-rotatable image (FIX 1 + 3).
+            // The thumbnail self-sizes to `box` and applies rotation correctly
+            // (it swaps the pre-rotation layout box internally, so an odd turn is
+            // never fill-cropped against the wrong shape).
+            AssetThumbnail(asset: model.asset(for: p.uuid),
+                           manager: model.imageManager,
+                           box: imageSize,
+                           quarterTurns: model.rotation(for: p.uuid),
+                           fill: true)   // fill the exact aspect-true box (no letterbox)
+                .opacity(dimmed ? 0.34 : 1)
+            badge(p: p, keep: keep, del: del, exactSuggested: isExactSuggested)
+            if index < 9 {
+                Text("\(index + 1)")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .frame(width: 18, height: 18)
+                    .background(Color.reefGround.opacity(0.75), in: Circle())
+                    .foregroundStyle(Color.reefMint)
+                    .padding(6)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
+            // Filename caption overlaid on a gradient strip so the card height
+            // stays equal to the row height (justified rows need uniform height).
             Text(p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
                 .font(.caption2).lineLimit(1).truncationMode(.middle)
-                .foregroundStyle(Color.reefTextDim)
+                .foregroundStyle(Color.reefText)
+                .padding(.horizontal, 6).padding(.vertical, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 6).padding(.vertical, 5)
+                .background(
+                    LinearGradient(colors: [.clear, Color.reefGround.opacity(0.85)],
+                                   startPoint: .top, endPoint: .bottom)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         }
+        .frame(width: imageSize.width, height: imageSize.height)
         .background(Color.reefDeep)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(border, lineWidth: 2))
@@ -1176,38 +1257,66 @@ struct GroupReview: View {
     ///
     /// FIX D: exact-dup "safe to remove" badge moves from amber to TEAL so it is
     ///        never confused with the amber protection badges.
+    ///
+    /// Pass 2a (FIX 4): the per-frame reason badges were too small to read at tile
+    /// size on the real app. They are now legible icon CHIPS — a proper SF Symbol
+    /// glyph + larger type, solid high-contrast fill, a subtle shadow so they read
+    /// over any photo, corner-anchored top-leading. Keeper ★ and reject ✕ get the
+    /// same chip treatment so the WHY of every state is always obvious.
     private func badge(p: Photo, keep: Bool, del: Bool, exactSuggested: Bool) -> some View {
-        HStack(spacing: 4) {
-            if keep { tag(t.keep(), .reefGreen, Color(hex: 0x04110a)) }
-            // FIX D: exact-dup badge is now teal, not amber — "safe to remove" ≠ "protected".
-            if exactSuggested { tag(t.exactDupeBadge(), .reefTeal, Color(hex: 0x04181a)) }
-            else if del { tag(t.delete(), .reefRed, .white) }
-            // FIX A: per-reason protection badges (amber, consistent with the border).
-            // Show each applicable badge independently so the reason is never guessed.
-            if p.favorite  { tag("★",       .reefAmber, Color(hex: 0x1a1203)) }
-            if p.edited    { tag("✎",       .reefAmber, Color(hex: 0x1a1203)) }
-            if p.isDocument { tag("doc",    .reefAmber, Color(hex: 0x1a1203)) }
-            // FIX #4: iCloud-eviction indicator — document classification was
-            // skipped (original not on-device), so we couldn't confirm this isn't
-            // a document. The frame is left un-marked to stay safe.
+        HStack(spacing: 5) {
+            if keep { chip(symbol: "checkmark", text: t.keep(), .reefGreen, Color(hex: 0x04110a)) }
+            // FIX D: exact-dup badge is teal, not amber — "safe to remove" ≠ "protected".
+            if exactSuggested { chip(symbol: "doc.on.doc", text: t.exactDupeBadge(), .reefTeal, Color(hex: 0x04181a)) }
+            else if del { chip(symbol: "xmark", text: t.delete(), .reefRed, .white) }
+            // FIX A + FIX 4: per-reason protection chips (amber) — each applicable
+            // reason shown independently with an icon so it's never guessed.
+            if p.favorite   { chip(symbol: "star.fill",        text: nil, .reefAmber, Color(hex: 0x1a1203)) }
+            if p.edited     { chip(symbol: "slider.horizontal.3", text: nil, .reefAmber, Color(hex: 0x1a1203)) }
+            if p.isDocument { chip(symbol: "doc.text.fill",    text: nil, .reefAmber, Color(hex: 0x1a1203)) }
+            // FIX #4 (slice 1): iCloud-eviction indicator — document classification
+            // was skipped (original not on-device); the frame is left un-marked.
             if p.documentEvalDegraded {
-                Image(systemName: "icloud.slash")
-                    .font(.system(size: 9, weight: .semibold))
-                    .padding(.horizontal, 5).padding(.vertical, 2)
-                    .background(Color.reefTextDim.opacity(0.18))
-                    .foregroundStyle(Color.reefTextDim)
-                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                chip(symbol: "icloud.slash", text: nil,
+                     Color.reefTextDim.opacity(0.9), Color.reefGround)
                     .help(t.tipDocumentEvalDegraded())
             }
         }
-        .padding(6)
+        .padding(7)
     }
 
-    private func tag(_ text: String, _ bg: Color, _ fg: Color) -> some View {
-        Text(text).font(.system(size: 10, weight: .bold))
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(bg).foregroundStyle(fg)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
+    /// A legible badge chip: SF Symbol glyph + optional label, solid fill, shadow.
+    /// Sized so it stays readable even on a small justified tile.
+    @ViewBuilder
+    private func chip(symbol: String, text: String?, _ bg: Color, _ fg: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: symbol).font(.system(size: 11, weight: .heavy))
+            if let text {
+                Text(text).font(.system(size: 11, weight: .bold))
+            }
+        }
+        .foregroundStyle(fg)
+        .padding(.horizontal, text == nil ? 5 : 7)
+        .padding(.vertical, 4)
+        .background(bg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(.white.opacity(0.22), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.45), radius: 2, y: 1)
+    }
+}
+
+/// Pass 2a (FIX 2): preference key that carries the measured content width up to
+/// the gallery so the justified row-packing math can reflow on window resize.
+private struct GalleryWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    // Last-writer wins: there is a single background reader, and a narrowing
+    // window must be able to REDUCE the width (a `max` reducer would latch to the
+    // widest value ever seen and overflow the rows).
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 { value = next }
     }
 }
 
@@ -1232,7 +1341,11 @@ struct CategoryBrowse: View {
                 }
                 LazyVGrid(columns: columns, spacing: 10) {
                     ForEach(shown) { p in
-                        AssetThumbnail(asset: model.asset(for: p.uuid), manager: model.imageManager, side: 130)
+                        // Curation grid stays square-cropped (fill) — this is a
+                        // contact-sheet, not the aspect-true review gallery.
+                        AssetThumbnail(asset: model.asset(for: p.uuid),
+                                       manager: model.imageManager,
+                                       box: CGSize(width: 130, height: 130), fill: true)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                             .overlay(alignment: .topTrailing) {
                                 if p.favorite {
@@ -1279,7 +1392,9 @@ struct LoupeOverlay: View {
 
             // Photo.
             if let asset = model.asset(for: currentID) {
-                BigPreview(asset: asset, manager: model.imageManager, t: t, onClose: onClose)
+                BigPreview(asset: asset, manager: model.imageManager, t: t,
+                           quarterTurns: model.rotation(for: currentID),
+                           onClose: onClose)
             } else {
                 ProgressView().tint(.white)
             }

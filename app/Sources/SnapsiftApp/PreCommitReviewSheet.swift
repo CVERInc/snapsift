@@ -149,7 +149,10 @@ private struct GroupPreCommitRow: View {
             HStack(spacing: 10) {
                 // Keeper thumbnail (not dimmed)
                 AssetThumbnail(asset: model.asset(for: group.keeper.uuid),
-                               manager: model.imageManager, side: 64)
+                               manager: model.imageManager,
+                               box: CGSize(width: 64, height: 64),
+                               quarterTurns: model.rotation(for: group.keeper.uuid),
+                               fill: true)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(
                         RoundedRectangle(cornerRadius: 6)
@@ -190,7 +193,10 @@ private struct GroupPreCommitRow: View {
                             ForEach(group.toRemove) { p in
                                 ZStack {
                                     AssetThumbnail(asset: model.asset(for: p.uuid),
-                                                   manager: model.imageManager, side: 52)
+                                                   manager: model.imageManager,
+                                                   box: CGSize(width: 52, height: 52),
+                                                   quarterTurns: model.rotation(for: p.uuid),
+                                                   fill: true)
                                         .opacity(0.34)
                                         .clipShape(RoundedRectangle(cornerRadius: 5))
                                         .overlay(

@@ -168,6 +168,45 @@ final class LibraryModel: ObservableObject {
     let imageManager = PHCachingImageManager()
     private var assetsByID: [String: PHAsset] = [:]
 
+    // MARK: - Pass 2a — non-destructive display rotation
+    //
+    // Session-only clockwise quarter-turns (0…3) per asset uuid, applied to the
+    // RENDERED thumbnail + loupe and to the aspect ratio fed into the justified
+    // gallery (so a rotated portrait reflows as a landscape). This is purely a
+    // display transform — NOTHING is ever written back to Photos in this pass.
+    // The map is cleared on every rescan (rotations don't survive a fresh scan).
+    //
+    // TODO(Pass 2b — save rotation to Photos): a future pass will let the user
+    // COMMIT these display rotations back to the asset via a
+    // `PHAssetChangeRequest` adjustment (e.g. building a rotated derivative /
+    // orientation adjustment). That is a DESTRUCTIVE, opt-in, informed-consent
+    // action and is deliberately NOT implemented here. When wired, read from
+    // `displayRotation` and apply `floor(turns)·90°` as the saved orientation.
+    @Published private(set) var displayRotation: [String: Int] = [:]
+
+    /// Current display quarter-turns for a frame (0 when unrotated).
+    func rotation(for id: String) -> Int { displayRotation[id] ?? 0 }
+
+    /// Rotate a frame 90° for display only. `clockwise` false = counter-clockwise
+    /// (⇧R). Normalised into 0…3. Session-only; never written to Photos.
+    func rotate(frameID: String, clockwise: Bool) {
+        let cur = displayRotation[frameID] ?? 0
+        let next = (((cur + (clockwise ? 1 : -1)) % 4) + 4) % 4
+        if next == 0 { displayRotation.removeValue(forKey: frameID) }
+        else { displayRotation[frameID] = next }
+    }
+
+    /// Aspect ratio (width / height) for layout, orientation-corrected by the
+    /// asset's natural dimensions (PHAsset.pixelWidth/Height are already EXIF-
+    /// upright) AND by the current display rotation: an odd quarter-turn swaps
+    /// width and height so a rotated portrait reflows as a landscape.
+    func displayAspect(for p: Photo) -> Double {
+        let w = Double(max(p.width, 1)), h = Double(max(p.height, 1))
+        let base = w / h
+        let q = rotation(for: p.uuid)
+        return (q == 1 || q == 3) ? (1.0 / base) : base
+    }
+
     var totalDeletions: Int { groups.reduce(0) { $0 + $1.deletionIDs.count } }
 
     /// Confident, near-identical bursts (pre-marked) vs groups whose frames vary
@@ -204,6 +243,7 @@ final class LibraryModel: ObservableObject {
         categories = []
         assetsByID = [:]
         facesApplied = false
+        displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         defer { isScanning = false; progress = "" }
 
         let opts = PHFetchOptions()
@@ -416,6 +456,7 @@ final class LibraryModel: ObservableObject {
         groups = []
         categories = []
         facesApplied = false
+        displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         defer { isScanning = false; progress = "" }
 
         let opts = PHFetchOptions()
@@ -484,6 +525,7 @@ final class LibraryModel: ObservableObject {
         categories = []
         assetsByID = [:]
         facesApplied = false
+        displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         defer { isScanning = false; progress = "" }
 
         let opts = PHFetchOptions()
