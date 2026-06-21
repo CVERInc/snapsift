@@ -175,14 +175,25 @@ final class LibraryModel: ObservableObject {
     // gallery (so a rotated portrait reflows as a landscape). This is purely a
     // display transform — NOTHING is ever written back to Photos in this pass.
     // The map is cleared on every rescan (rotations don't survive a fresh scan).
-    //
-    // TODO(Pass 2b — save rotation to Photos): a future pass will let the user
-    // COMMIT these display rotations back to the asset via a
-    // `PHAssetChangeRequest` adjustment (e.g. building a rotated derivative /
-    // orientation adjustment). That is a DESTRUCTIVE, opt-in, informed-consent
-    // action and is deliberately NOT implemented here. When wired, read from
-    // `displayRotation` and apply `floor(turns)·90°` as the saved orientation.
     @Published private(set) var displayRotation: [String: Int] = [:]
+
+    // MARK: - Pass 2b — save rotation to Photos (reversible)
+    //
+    // User-initiated, deliberate, confirmed write of a display rotation back to
+    // Photos via PHContentEditingOutput + PHAdjustmentData. The original is
+    // preserved by Photos; the user can "Revert to Original" at any time.
+    //
+    // Saving marks the photo as edited (PHAdjustmentData present), so
+    // PhotoFlags.edited() will return true and snapsift will then treat the
+    // frame as a protected frame. This is expected and is disclosed in the
+    // confirmation dialog.
+
+    /// True when the save-rotation confirmation alert should be shown.
+    @Published var showSaveRotationConfirm = false
+    /// Set when a save-rotation write fails — shown as a persistent error alert.
+    @Published var saveRotationError: Error?
+    /// True after a successful save — drives the success banner.
+    @Published var saveRotationSuccess = false
 
     /// Current display quarter-turns for a frame (0 when unrotated).
     func rotation(for id: String) -> Int { displayRotation[id] ?? 0 }
@@ -205,6 +216,35 @@ final class LibraryModel: ObservableObject {
         let base = w / h
         let q = rotation(for: p.uuid)
         return (q == 1 || q == 3) ? (1.0 / base) : base
+    }
+
+    // MARK: - Pass 2b — save rotation to Photos
+
+    /// Save the focused frame's pending display rotation permanently to the
+    /// user's Photos library. Reversible: Photos retains the original and
+    /// surfaces "Revert to Original" because we write PHAdjustmentData.
+    ///
+    /// Must only be called after user confirmation (the UI shows an alert first).
+    /// On success, removes the frame from `displayRotation` (the rotation is now
+    /// baked into the asset; PhotoKit will return the photo upright on next fetch).
+    /// On failure, sets `saveRotationError` for the UI to surface.
+    @MainActor
+    func saveRotationToPhotos(frameID: String) async {
+        let quarterTurns = rotation(for: frameID)
+        let net = ((quarterTurns % 4) + 4) % 4
+        guard net != 0 else { return }
+        guard let asset = assetsByID[frameID] else {
+            saveRotationError = RotationSaveError.noEditingInput
+            return
+        }
+        do {
+            try await saveRotation(asset: asset, quarterTurns: net)
+            // Success: clear the display rotation — the asset is now baked.
+            displayRotation.removeValue(forKey: frameID)
+            saveRotationSuccess = true
+        } catch {
+            saveRotationError = error
+        }
     }
 
     var totalDeletions: Int { groups.reduce(0) { $0 + $1.deletionIDs.count } }

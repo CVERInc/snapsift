@@ -1135,4 +1135,91 @@ struct L10n: Sendable {
         case .zhTW: return "原因："
         }
     }
+
+    // MARK: - Pass 2b — save rotation to Photos
+
+    /// Button label for the "Save Rotation" affordance (grid + loupe).
+    func saveRotationButton() -> String {
+        switch language {
+        case .en:   return "Save Rotation"
+        case .ja:   return "回転を保存"
+        case .zhTW: return "儲存旋轉"
+        }
+    }
+
+    /// Alert title for the save-rotation confirmation.
+    func saveRotationConfirmTitle() -> String {
+        switch language {
+        case .en:   return "Save Rotation to Photos?"
+        case .ja:   return "写真に回転を保存しますか？"
+        case .zhTW: return "將旋轉儲存至「照片」？"
+        }
+    }
+
+    /// Alert body for the save-rotation confirmation — explains reversibility
+    /// and warns that saving marks the photo as edited (= becomes protected).
+    func saveRotationConfirmBody() -> String {
+        switch language {
+        case .en:
+            return "Saves the rotated view permanently to your Photos library. The original is preserved — you can Revert to Original in Photos anytime.\n\nNote: saving marks this photo as edited, so snapsift will treat it as a protected frame."
+        case .ja:
+            return "回転した表示を写真ライブラリに永久に保存します。オリジナルは保持されます — 写真アプリでいつでも「オリジナルに戻す」ことができます。\n\n注意：保存するとこの写真は「編集済み」扱いになり、snapsift は保護フレームとして扱います。"
+        case .zhTW:
+            return "將旋轉後的樣子永久儲存到你的「照片」圖庫。原始檔會被保留 — 你隨時可以在「照片」中選擇「回復到原始項目」。\n\n注意：儲存後這張照片會被標記為已編輯，snapsift 將把它視為受保護的格。"
+        }
+    }
+
+    /// Confirm button label in the save-rotation alert.
+    func saveRotationConfirmButton() -> String {
+        switch language {
+        case .en:   return "Save"
+        case .ja:   return "保存"
+        case .zhTW: return "儲存"
+        }
+    }
+
+    /// Cancel button label in the save-rotation alert (reuses global cancel).
+    func saveRotationCancelButton() -> String {
+        switch language {
+        case .en:   return "Cancel"
+        case .ja:   return "キャンセル"
+        case .zhTW: return "取消"
+        }
+    }
+
+    /// Success banner shown after a rotation is saved to Photos.
+    func saveRotationSuccessBanner() -> String {
+        switch language {
+        case .en:   return "Rotation saved to Photos · revert anytime in Photos"
+        case .ja:   return "写真に回転を保存しました · いつでも元に戻せます"
+        case .zhTW: return "旋轉已儲存至「照片」· 可隨時在「照片」中還原"
+        }
+    }
+
+    /// Alert title when save-rotation fails.
+    func saveRotationErrorTitle() -> String {
+        switch language {
+        case .en:   return "Couldn't save rotation"
+        case .ja:   return "回転を保存できませんでした"
+        case .zhTW: return "無法儲存旋轉"
+        }
+    }
+
+    /// Dismiss button for the save-rotation error alert.
+    func saveRotationErrorDismiss() -> String {
+        switch language {
+        case .en:   return "Dismiss"
+        case .ja:   return "閉じる"
+        case .zhTW: return "關閉"
+        }
+    }
+
+    /// Tooltip for the Save Rotation button.
+    func tipSaveRotation() -> String {
+        switch language {
+        case .en:   return "Save this display rotation permanently to Photos (⇧⌘R) · reversible via Revert to Original"
+        case .ja:   return "この表示回転を写真に永久保存（⇧⌘R）· オリジナルに戻すことで取り消せます"
+        case .zhTW: return "將此顯示旋轉永久儲存至「照片」（⇧⌘R）· 可透過「回復到原始項目」復原"
+        }
+    }
 }

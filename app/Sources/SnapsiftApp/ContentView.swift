@@ -22,6 +22,8 @@ struct ContentView: View {
     @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
     // FIX 2: persistent delete-failure alert
     @State private var deleteErrorAlert = false
+    // Pass 2b: save-rotation state
+    @State private var saveRotationErrorAlert = false
     // Feature 1: pre-commit review sheet
     @State private var showPreCommitSheet = false
     @State private var pendingPreCommitGroups: [PreCommitGroup] = []
@@ -61,6 +63,39 @@ struct ContentView: View {
         .background(Color.reefGround)
         .preferredColorScheme(.dark)
         .tint(.reefTeal)
+        // Pass 2b: save-rotation confirmation alert.
+        // Anchored at the outermost level so it fires regardless of which sub-view
+        // set `model.showSaveRotationConfirm = true` (grid button OR loupe button).
+        .alert(t.saveRotationConfirmTitle(), isPresented: $model.showSaveRotationConfirm) {
+            Button(t.saveRotationConfirmButton()) {
+                if let frameID = focusedFrame {
+                    Task { await model.saveRotationToPhotos(frameID: frameID) }
+                }
+            }
+            Button(t.saveRotationCancelButton(), role: .cancel) { }
+        } message: {
+            Text(t.saveRotationConfirmBody())
+        }
+        // Pass 2b: save-rotation error alert — persistent, never silent.
+        .alert(t.saveRotationErrorTitle(), isPresented: $saveRotationErrorAlert) {
+            Button(t.saveRotationErrorDismiss(), role: .cancel) {
+                model.saveRotationError = nil
+            }
+        } message: {
+            if let err = model.saveRotationError {
+                Text(err.localizedDescription)
+            }
+        }
+        // Pass 2b: observe save-rotation result published values.
+        .onReceive(model.$saveRotationError) { err in
+            if err != nil { saveRotationErrorAlert = true }
+        }
+        .onChange(of: model.saveRotationSuccess) { _, success in
+            if success {
+                showBanner(t.saveRotationSuccessBanner())
+                model.saveRotationSuccess = false
+            }
+        }
     }
 
     // MARK: permission gate
@@ -410,7 +445,11 @@ struct ContentView: View {
         case "x", "X":
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
         // FIX 3: display-only rotate. R = clockwise, ⇧R = counter-clockwise.
+        // Pass 2b: ⇧⌘R (Shift+Command+R) triggers save-rotation confirm.
         case "r", "R":
+            if kp.modifiers.contains(.shift) && kp.modifiers.contains(.command) {
+                handleSaveRotationKey(); return .handled
+            }
             handleRotateKey(modifiers: kp.modifiers); return .handled
         default: return .ignored
         }
@@ -438,10 +477,21 @@ struct ContentView: View {
         case "x", "X":
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
         // FIX 3: display-only rotate works in the loupe too.
+        // Pass 2b: ⇧⌘R in the loupe triggers save-rotation confirm.
         case "r", "R":
+            if kp.modifiers.contains(.shift) && kp.modifiers.contains(.command) {
+                handleSaveRotationKey(); return .handled
+            }
             handleRotateKey(modifiers: kp.modifiers); return .handled
         default: return .ignored
         }
+    }
+
+    /// Pass 2b — trigger save-rotation confirmation (⇧⌘R).
+    /// Only arms the confirm alert if the focused frame has a pending rotation.
+    private func handleSaveRotationKey() {
+        guard let f = focusedFrame, model.rotation(for: f) % 4 != 0 else { return }
+        model.showSaveRotationConfirm = true
     }
 
     /// FIX 3 — non-destructive display rotate of the focused frame.
@@ -1086,6 +1136,10 @@ struct GroupReview: View {
                     .buttonStyle(.bordered)
                     .tint(group.keepAll ? .reefGreen : .reefTeal)
                     .help(t.tipKeepAll())
+                    // Pass 2b: Save Rotation — visible only when the focused frame
+                    // has a pending display rotation. Tapping arms the confirmation
+                    // alert; ⇧⌘R is the keyboard path (handled via onKeyPress above).
+                    saveRotationButton
                 }
                 // Pass 2a (FIX 2): aspect-true JUSTIFIED-ROWS gallery (Photos.app /
                 // Lightroom pattern) replaces the square-crop LazyVGrid. Frames keep
@@ -1108,6 +1162,23 @@ struct GroupReview: View {
             Button(t.deleteProtectedAlertCancel(), role: .cancel) { }
         } message: {
             Text(t.deleteProtectedAlertBody(group.protectedCount))
+        }
+    }
+
+    // MARK: - Pass 2b — Save Rotation button
+
+    /// "Save Rotation" affordance: visible only when the focused frame has a
+    /// pending display rotation. Tapping sets model.showSaveRotationConfirm = true;
+    /// the actual confirmation alert is anchored at the top-level ContentView.
+    @ViewBuilder private var saveRotationButton: some View {
+        if let focused = focusedFrame, model.rotation(for: focused) % 4 != 0 {
+            Button { model.showSaveRotationConfirm = true } label: {
+                Label(t.saveRotationButton(), systemImage: "arrow.clockwise.circle.fill")
+            }
+            .buttonStyle(.bordered)
+            .tint(.reefMint)
+            .help(t.tipSaveRotation())
+            .keyboardShortcut("r", modifiers: [.shift, .command])
         }
     }
 
@@ -1409,6 +1480,26 @@ struct LoupeOverlay: View {
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
                         .padding(.top, 14).padding(.leading, 14)
                     Spacer()
+                    // Pass 2b: Save Rotation button in loupe HUD — visible only when
+                    // the current frame has a pending display rotation.
+                    if model.rotation(for: currentID) % 4 != 0 {
+                        Button {
+                            model.showSaveRotationConfirm = true
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.clockwise.circle.fill")
+                                    .font(.callout)
+                                Text(t.saveRotationButton())
+                                    .font(.callout.weight(.semibold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 14)
+                        .help(t.tipSaveRotation())
+                    }
                     // Close button.
                     Button(action: onClose) {
                         Image(systemName: "xmark.circle.fill")

@@ -1200,5 +1200,52 @@ do {
           "rotate: a rotated portrait reflows wider-than-tall in the layout")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Pass 2b — RotationEncoding pure helpers (Core-level, no PhotoKit)
+//
+// encodeQuarterTurns / decodeQuarterTurns live in SnapsiftCore/RotationEncoding.swift
+// and round-trip through the PHAdjustmentData payload format
+// (UTF-8 JSON {"quarterTurns":<n>}).
+//
+// ciRotationTransform (CoreGraphics-dependent) lives in SnapsiftApp and is not
+// importable here; its correctness is asserted via the CIImage integration in
+// the app. The encode/decode helpers are the pure-testable surface.
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Pass 2b — RotationEncoding helpers")
+
+// encodeQuarterTurns / decodeQuarterTurns round-trip
+do {
+    for q in [0, 1, 2, 3] {
+        let encoded = encodeQuarterTurns(q)
+        let decoded = decodeQuarterTurns(from: encoded)
+        check(decoded == q, "encode/decode round-trip: quarterTurns=\(q)")
+    }
+    // Values outside 0…3 normalise modulo 4.
+    check(decodeQuarterTurns(from: encodeQuarterTurns(4)) == 0,
+          "encode/decode: 4 normalises to 0")
+    check(decodeQuarterTurns(from: encodeQuarterTurns(-1)) == 3,
+          "encode/decode: -1 normalises to 3")
+    check(decodeQuarterTurns(from: encodeQuarterTurns(7)) == 3,
+          "encode/decode: 7 normalises to 3")
+}
+
+// encodeQuarterTurns produces valid UTF-8 JSON
+do {
+    let data = encodeQuarterTurns(2)
+    let str = String(data: data, encoding: .utf8)
+    check(str == "{\"quarterTurns\":2}", "encodeQuarterTurns produces correct JSON string")
+}
+
+// decodeQuarterTurns rejects corrupt data
+do {
+    let bad = "not json".data(using: .utf8)!
+    check(decodeQuarterTurns(from: bad) == nil,
+          "decodeQuarterTurns: corrupt data returns nil")
+    let missingKey = "{\"turns\":1}".data(using: .utf8)!
+    check(decodeQuarterTurns(from: missingKey) == nil,
+          "decodeQuarterTurns: wrong key returns nil")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)
