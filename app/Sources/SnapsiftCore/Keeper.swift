@@ -73,6 +73,10 @@ public struct RankKey: Comparable {
     public let uti: Int
     public let size: Int
     public let negTakenAt: Double
+    /// Final deterministic tie-break: when every real signal (including
+    /// takenAt) ties, keeper identity must not depend on input order — the
+    /// same library must always pick the same keeper across scans.
+    public let uuid: String
 
     public static func < (a: RankKey, b: RankKey) -> Bool {
         if a.favorite != b.favorite { return a.favorite < b.favorite }
@@ -81,7 +85,8 @@ public struct RankKey: Comparable {
         if a.sharpness != b.sharpness { return a.sharpness < b.sharpness }
         if a.uti != b.uti { return a.uti < b.uti }
         if a.size != b.size { return a.size < b.size }
-        return a.negTakenAt < b.negTakenAt
+        if a.negTakenAt != b.negTakenAt { return a.negTakenAt < b.negTakenAt }
+        return a.uuid < b.uuid
     }
 }
 
@@ -92,7 +97,8 @@ public func rankKey(_ p: Photo) -> RankKey {
             sharpness: qualityBucket(p.sharpness),
             uti: utiPriority[p.uti] ?? 0,
             size: p.size,
-            negTakenAt: -p.takenAt)
+            negTakenAt: -p.takenAt,
+            uuid: p.uuid)
 }
 
 /// The single frame to keep from a cluster.
@@ -138,7 +144,9 @@ public func keeperReason(photos: [Photo], keeperID: String) -> KeeperReason {
     guard !others.isEmpty else { return .earliest }
 
     // Check priority from highest to lowest — first signal where keeper wins vs any other.
-    if keeper.favorite { return .favorite }
+    // Favorite only counts as the reason when it actually broke a tie: in an
+    // all-favorite group the star decided nothing, so fall through.
+    if keeper.favorite && others.contains(where: { !$0.favorite }) { return .favorite }
 
     let kQ = qualityBucket(keeper.quality)
     if others.contains(where: { qualityBucket($0.quality) < kQ }) { return .quality }

@@ -4,9 +4,9 @@ import Foundation
 
 /// The reason a specific photo was included in a deletion batch.
 public enum DeletionReason: String, Codable, Sendable, Equatable {
-    case burstNonKeeper        // non-keeper in a near-identical burst
-    case exactDuplicate        // exact duplicate (dHash 0 + feature ≈0)
-    case blurry                // blurrier than the kept frame
+    case burstNonKeeper        // RESERVED (kept for decode compat) — bursts are never auto-seeded
+    case exactDuplicate        // app-seeded: byte-verified exact duplicate
+    case blurry                // RESERVED (kept for decode compat) — blur never marks a deletion
     case forceIncludedProtectedFavorite    // user explicitly force-rejected a favorite
     case forceIncludedProtectedEdited      // user explicitly force-rejected an edited photo
     case forceIncludedProtectedDocument   // user explicitly force-rejected a document
@@ -180,10 +180,17 @@ public struct DeletionAuditLog: Sendable {
     }
 
     /// Derive the `DeletionReason` for a photo being deleted, given its Photo
-    /// model and whether the group had `includeProtected` set.
-    public static func reason(for photo: Photo, includeProtectedActive: Bool) -> DeletionReason {
+    /// model, whether the group had `includeProtected` set, and whether the
+    /// rejection was seeded by the app's exact-duplicate pass (as opposed to an
+    /// explicit user action). The distinction is the point of the audit log:
+    /// the app must never book its own suggestions as the user's choices.
+    public static func reason(
+        for photo: Photo,
+        includeProtectedActive: Bool,
+        autoSeededExact: Bool = false
+    ) -> DeletionReason {
         guard photo.isProtected && includeProtectedActive else {
-            return .userRejected
+            return autoSeededExact ? .exactDuplicate : .userRejected
         }
         // Multiple protections — use most specific
         let flags = [photo.favorite, photo.edited, photo.isDocument]

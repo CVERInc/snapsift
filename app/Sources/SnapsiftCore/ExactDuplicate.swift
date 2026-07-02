@@ -49,6 +49,23 @@ public struct ExactDuplicatePredicate {
     }
 }
 
+// MARK: - Exact-duplicate group precheck
+
+/// Pixel-free eligibility check a group must pass BEFORE the perceptual and
+/// byte gates even run:
+///   - at least two members,
+///   - no videos (a single poster frame is not an identity test),
+///   - one single UTI (a RAW+JPEG or original+re-export pair from the same
+///     capture is never interchangeable, however identical it looks),
+///   - identical pixel dimensions across all members.
+public func exactGroupPrecheck(_ group: [Photo]) -> Bool {
+    guard group.count >= 2 else { return false }
+    guard !group.contains(where: { $0.kind == 1 }) else { return false }
+    guard Set(group.map(\.uti)).count == 1 else { return false }
+    let w0 = group[0].width, h0 = group[0].height
+    return group.allSatisfy { $0.width == w0 && $0.height == h0 }
+}
+
 // MARK: - Exact-duplicate suggestions
 
 /// Within a confirmed exact-duplicate group, the frames that MAY be suggested

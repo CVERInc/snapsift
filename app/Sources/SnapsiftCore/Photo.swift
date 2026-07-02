@@ -7,7 +7,12 @@ public struct Photo: Sendable, Equatable, Identifiable {
 
     public let uuid: String
     public let filename: String
-    /// Cocoa-epoch seconds (2001-01-01 UTC). Add `appleEpochOffset` for Unix.
+    /// Capture time in seconds. The epoch is the PRODUCER'S: the Python CLI
+    /// feeds Cocoa-epoch seconds straight from Photos.sqlite (add
+    /// `appleEpochOffset` for Unix), while the app's `LibraryModel.makePhoto`
+    /// feeds Unix seconds (`timeIntervalSince1970`). All Core math uses
+    /// differences and ordering only, so both are fine — just never compare a
+    /// CLI-produced `takenAt` with an app-produced one directly.
     public let takenAt: Double
     public let width: Int
     public let height: Int

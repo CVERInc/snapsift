@@ -661,7 +661,7 @@ do {
 
 // Uncertain group seeding: rejected stays empty.
 do {
-    var rejected: Set<String> = []
+    let rejected: Set<String> = []
     // Uncertain groups: no seeding.
     check(rejected.isEmpty, "uncertain group: rejected empty at seed")
 }
@@ -846,6 +846,21 @@ do {
                      sharpness: 0, originalCamera: false)
     let reason = DeletionAuditLog.reason(for: both, includeProtectedActive: true)
     check(reason == .forceIncludedProtectedMultiple, "audit: favorite+edited + includeProtected=true → .forceIncludedProtectedMultiple")
+}
+do {
+    // App-seeded exact-duplicate rejection → .exactDuplicate, never .userRejected.
+    let plain = ph(1, 0)
+    let reason = DeletionAuditLog.reason(for: plain, includeProtectedActive: false,
+                                         autoSeededExact: true)
+    check(reason == .exactDuplicate, "audit: auto-seeded exact → .exactDuplicate")
+}
+do {
+    // Force-included protection outranks the exact attribution: the user's
+    // explicit override is the more consequential fact to record.
+    let fav = ph(1, 0, fav: true)
+    let reason = DeletionAuditLog.reason(for: fav, includeProtectedActive: true,
+                                         autoSeededExact: true)
+    check(reason == .forceIncludedProtectedFavorite, "audit: force-included favorite outranks exact attribution")
 }
 do {
     // nowTimestamp returns non-empty ISO string.
@@ -1245,6 +1260,60 @@ do {
     let missingKey = "{\"turns\":1}".data(using: .utf8)!
     check(decodeQuarterTurns(from: missingKey) == nil,
           "decodeQuarterTurns: wrong key returns nil")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exact-duplicate group precheck (pixel-free eligibility)
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Exact-duplicate group precheck")
+
+do {
+    check(exactGroupPrecheck([ph(1, 0), ph(2, 1)]),
+          "precheck: two same-UTI same-size photos pass")
+    check(!exactGroupPrecheck([ph(1, 0)]),
+          "precheck: single frame fails")
+    check(!exactGroupPrecheck([ph(1, 0), ph(2, 1, w: 1024, h: 768)]),
+          "precheck: mixed dimensions fail")
+    check(!exactGroupPrecheck([ph(1, 0), ph(2, 1, uti: "public.jpeg")]),
+          "precheck: mixed UTI (RAW+JPEG-style pair) fails")
+    let video = Photo(uuid: "Uv", filename: "clip.mov", takenAt: 0,
+                      width: 4032, height: 3024, size: 2_000_000,
+                      uti: "com.apple.quicktime-movie", kind: 1,
+                      favorite: false, quality: 0, edited: false,
+                      isDocument: false, sharpness: 0, originalCamera: false)
+    check(!exactGroupPrecheck([ph(1, 0, uti: "com.apple.quicktime-movie"), video]),
+          "precheck: any video member fails")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keeper determinism + reason accuracy
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Keeper determinism + reason accuracy")
+
+do {
+    // All RankKey signals tied (same takenAt, size, quality…) — keeper must be
+    // the same photo regardless of input order.
+    let a = ph(1, 0), b = ph(2, 0), c = ph(3, 0)
+    let k1 = keeper([a, b, c]).uuid
+    let k2 = keeper([c, a, b]).uuid
+    let k3 = keeper([b, c, a]).uuid
+    check(k1 == k2 && k2 == k3, "keeper: full tie is order-independent (uuid tie-break)")
+}
+do {
+    // All-favorite group: the star broke no tie, so the reason must fall
+    // through to the signal that actually decided (here: size).
+    let a = ph(1, 0, size: 3_000_000, fav: true), b = ph(2, 0, fav: true)
+    let reason = keeperReason(photos: [a, b], keeperID: a.uuid)
+    check(reason != .favorite, "keeperReason: all-favorite group never reports .favorite")
+    check(reason == .size, "keeperReason: all-favorite group falls through to real signal")
+}
+do {
+    // Mixed group: favorite genuinely decided → .favorite is correct.
+    let a = ph(1, 0, fav: true), b = ph(2, 0)
+    check(keeperReason(photos: [a, b], keeperID: a.uuid) == .favorite,
+          "keeperReason: favorite-vs-plain still reports .favorite")
 }
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
