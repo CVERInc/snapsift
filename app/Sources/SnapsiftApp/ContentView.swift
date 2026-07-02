@@ -28,8 +28,19 @@ struct ContentView: View {
     // Pass 2b: save-rotation state
     @State private var saveRotationErrorAlert = false
     // Feature 1: pre-commit review sheet
-    @State private var showPreCommitSheet = false
-    @State private var pendingPreCommitGroups: [PreCommitGroup] = []
+    /// The pre-commit sheet's entire payload, built atomically in runDelete().
+    /// Presented via .sheet(item:) — with isPresented + separate @State the
+    /// sheet closure can capture the PREVIOUS tick's (empty) data and show
+    /// "delete 0 photos" over an empty list (observed live).
+    struct PreCommitPayload: Identifiable {
+        let id = UUID()
+        let groups: [PreCommitGroup]
+        let deletions: Int
+        let bytes: Int
+        let protectedCount: Int
+        let noSurvivor: Int
+    }
+    @State private var preCommitPayload: PreCommitPayload?
     // Feature 4: deletion history sheet
     @State private var showHistorySheet = false
     // FIX 3 (safety hardening): stale-asset warning alert state.
@@ -247,23 +258,24 @@ struct ContentView: View {
             }
         }
         // Feature 1: pre-commit review sheet
-        .sheet(isPresented: $showPreCommitSheet) {
+        .sheet(item: $preCommitPayload) { payload in
+            // All totals are precomputed once in runDelete(): recomputing them
+            // in this closure re-ran O(all groups) reductions on every parent
+            // render while the modal was open.
             PreCommitReviewSheet(
-                groups: pendingPreCommitGroups,
-                totalDeletions: model.totalDeletions,
-                reclaimableBytes: model.reclaimableBytes,
-                totalProtected: pendingPreCommitGroups.reduce(0) {
-                    $0 + $1.toRemove.filter(\.isProtected).count
-                },
-                noSurvivorCount: noSurvivorCountForCurrentGroups(),
+                groups: payload.groups,
+                totalDeletions: payload.deletions,
+                reclaimableBytes: payload.bytes,
+                totalProtected: payload.protectedCount,
+                noSurvivorCount: payload.noSurvivor,
                 model: model,
                 t: t,
                 onConfirm: {
-                    showPreCommitSheet = false
+                    preCommitPayload = nil
                     Task { await performDelete() }
                 },
                 onCancel: {
-                    showPreCommitSheet = false
+                    preCommitPayload = nil
                 }
             )
         }
@@ -1158,10 +1170,13 @@ struct ContentView: View {
     private func runDelete() async {
         guard model.totalDeletions > 0 else { return }
         // Build PreCommitGroup snapshots from current group state.
-        pendingPreCommitGroups = model.groups.compactMap { g -> PreCommitGroup? in
+        let pendingGroups = model.groups.compactMap { g -> PreCommitGroup? in
             let toRemove = g.photos.filter { g.isDelete($0) }
             guard !toRemove.isEmpty else { return nil }
-            guard let keeper = g.photos.first(where: { g.isKeeper($0) }) else { return nil }
+            // keeper == nil is the no-survivor case (user force-rejected every
+            // frame). Such groups MUST still appear in the sheet — dropping
+            // them here would delete photos the confirmation never displayed.
+            let keeper = g.photos.first(where: { g.isKeeper($0) })
             let why = keeperReason(photos: g.photos, keeperID: g.keeperID)
             return PreCommitGroup(
                 id: g.id,
@@ -1171,7 +1186,13 @@ struct ContentView: View {
                 includeProtected: g.includeProtected
             )
         }
-        showPreCommitSheet = true
+        preCommitPayload = PreCommitPayload(
+            groups: pendingGroups,
+            deletions: model.totalDeletions,
+            bytes: model.reclaimableBytes,
+            protectedCount: pendingGroups.reduce(0) { $0 + $1.toRemove.filter(\.isProtected).count },
+            noSurvivor: noSurvivorCountForCurrentGroups()
+        )
     }
 
     /// Step 2: the actual delete — called only after the user confirmed the sheet.

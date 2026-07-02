@@ -1391,6 +1391,16 @@ struct L10n: Sendable {
         }
     }
 
+    /// Per-group row header in the pre-commit sheet when the whole group is
+    /// being removed and no keeper survives.
+    func preCommitNoSurvivorRow() -> String {
+        switch language {
+        case .en: return "Entire group removed — no photo kept"
+        case .ja: return "グループ全体を削除 — 残る写真はありません"
+        case .zhTW: return "整組刪除：沒有任何一張會留下"
+        }
+    }
+
     // MARK: similar-set naming
 
     /// Fallback name when no Vision tag resolves for a similar-set bucket.

@@ -169,13 +169,20 @@ enum AlbumWriter {
 
     /// Non-keeper, non-protected frames from exact-duplicate groups only.
     /// This is the ONLY set that earns a delete suggestion in the UI.
+    /// Honors the group's ACTUAL keeperID (user promotion / face refine) —
+    /// re-deriving via Core's keeper() here could route the user's chosen
+    /// keeper into the suggest-delete album while sparing the ranked frame.
     private static func exactCandidates(
         groups: [ReviewGroup],
         exactGroups: Set<ReviewGroup.ID>
     ) -> [String] {
         groups
             .filter { exactGroups.contains($0.id) }
-            .flatMap { g in exactDuplicateSuggestions(g.photos).map(\.uuid) }
+            .flatMap { g in
+                g.photos
+                    .filter { $0.uuid != g.keeperID && !$0.isProtected }
+                    .map(\.uuid)
+            }
     }
 
     // MARK: - PhotoKit helpers (idempotent add)

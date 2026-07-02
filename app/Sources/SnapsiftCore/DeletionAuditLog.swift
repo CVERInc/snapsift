@@ -111,10 +111,15 @@ public struct DeletionAuditLog: Sendable {
             let lineData = Data(line.utf8)
             let url = logURL
             if fm.fileExists(atPath: url.path) {
+                // Throwing variants only: the legacy seekToEndOfFile()/write()
+                // raise ObjC exceptions on I/O failure that Swift's catch can't
+                // see — on a nearly-full disk (this app's primary use case!)
+                // that would CRASH right after the destructive commit, before
+                // group pruning and the snapshot sync run.
                 let handle = try FileHandle(forWritingTo: url)
-                handle.seekToEndOfFile()
-                handle.write(lineData)
-                handle.closeFile()
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: lineData)
             } else {
                 try lineData.write(to: url, options: .atomic)
             }

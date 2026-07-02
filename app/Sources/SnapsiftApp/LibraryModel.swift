@@ -172,6 +172,10 @@ final class LibraryModel: ObservableObject {
     /// Launch a scan as a cancellable task. UI entry point for all three kinds.
     func startScan(_ kind: ScanKind, _ t: L10n) {
         guard !isScanning else { return }
+        // A debounced decision-save must never fire after the scan wipes
+        // `groups` — it would atomically replace the snapshot (thousands of
+        // review decisions) with an empty one.
+        snapshotSaveTask?.cancel()
         lastScanKind = kind
         abortFlag = AbortFlag()
         scanTask = Task { [weak self] in
@@ -914,11 +918,18 @@ final class LibraryModel: ObservableObject {
     func setIncludeProtected(group groupID: ReviewGroup.ID, value: Bool) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
         groups[i].includeProtected = value
-        if !value {
+        let protectedIDs = Set(groups[i].photos.filter(\.isProtected).map(\.uuid))
+        if value {
+            // The opt-in must actually mark the frames: rejectAll/toggle paths
+            // always exclude protected frames, so without this insertion the
+            // amber "Including protected (N)" state was a lie — deletionIDs
+            // stayed unchanged and the N frames were silently kept.
+            groups[i].rejected.formUnion(protectedIDs.subtracting([groups[i].keeperID]))
+        } else {
             // Removing override: un-reject all protected frames.
-            let protectedIDs = Set(groups[i].photos.filter(\.isProtected).map(\.uuid))
             groups[i].rejected.subtract(protectedIDs)
         }
+        groups[i].autoSeeded.subtract(protectedIDs)   // these are user decisions
         scheduleSnapshotSave()
     }
 
@@ -963,6 +974,12 @@ final class LibraryModel: ObservableObject {
         groups = groups.map { g in
             var ng = g
             ng.keeperID = (g.photos.max { faceRankKey($0) < faceRankKey($1) } ?? g.photos[0]).uuid
+            // Same invariant as promote(): the keeper must never stay in the
+            // rejection set. Without this, a face-refine after marks are seeded
+            // can crown a rejected frame and the group's own keeper gets
+            // deleted on commit (while the group vanishes from the sheet).
+            ng.rejected.remove(ng.keeperID)
+            ng.autoSeeded.remove(ng.keeperID)
             return ng
         }
         facesApplied = true
@@ -1152,6 +1169,10 @@ final class LibraryModel: ObservableObject {
         snapshotSaveTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled else { return }
+            // Re-check at fire time: if a scan started inside the debounce
+            // window, `groups` is already wiped — persisting now would destroy
+            // the previous snapshot.
+            guard self?.isScanning == false else { return }
             self?.saveSnapshotNow()
         }
     }
@@ -1178,20 +1199,48 @@ final class LibraryModel: ObservableObject {
         map.reserveCapacity(fetched.count)
         fetched.enumerateObjects { a, _, _ in map[a.localIdentifier] = a }
 
+        // A stale change token means the library was mutated after the scan —
+        // scan-time verdicts (byte-verified exact, protection flags) can no
+        // longer be trusted for DELETION. The user's own marks are theirs to
+        // keep, but every APP-seeded suggestion is dropped and the exact
+        // badges are cleared; a rescan re-proves them. Doctrine: pre-marks may
+        // only exist while their byte-verified verdict is known-current.
+        let tokenCurrent = ScanSnapshotStore.changeTokenIsCurrent(snap.changeToken)
+
         var restoredGroups: [ReviewGroup] = []
         var exactIDs: Set<ReviewGroup.ID> = []
         for gs in snap.groups {
-            let photos = gs.photos.filter { map[$0.uuid] != nil }
+            // Refresh the cheap live flags from the re-fetched assets: a photo
+            // favorited since the scan must be protected NOW, not as of the
+            // snapshot (favorite is the only protection flag PhotoKit hands us
+            // for free; edited/document re-evaluation needs a rescan).
+            let photos: [Photo] = gs.photos.compactMap { p in
+                guard let asset = map[p.uuid] else { return nil }
+                guard asset.isFavorite != p.favorite else { return p }
+                return Photo(uuid: p.uuid, filename: p.filename, takenAt: p.takenAt,
+                             width: p.width, height: p.height, size: p.size, uti: p.uti,
+                             kind: p.kind, favorite: asset.isFavorite, quality: p.quality,
+                             edited: p.edited, isDocument: p.isDocument,
+                             sharpness: p.sharpness, originalCamera: p.originalCamera,
+                             documentEvalDegraded: p.documentEvalDegraded)
+            }
             guard photos.count >= 2 else { continue }
             let keeperID = photos.contains { $0.uuid == gs.keeperID }
                 ? gs.keeperID : keeper(photos).uuid
             var g = ReviewGroup(photos: photos, keeperID: keeperID)
             let alive = Set(photos.map(\.uuid))
-            g.rejected = Set(gs.rejected).intersection(alive).subtracting([keeperID])
+            let protected = Set(photos.filter(\.isProtected).map(\.uuid))
+            g.rejected = Set(gs.rejected).intersection(alive)
+                .subtracting([keeperID])
+                .subtracting(protected)   // protection re-applies on restore
             g.autoSeeded = Set(gs.autoSeeded).intersection(g.rejected)
+            if !tokenCurrent {
+                g.rejected.subtract(g.autoSeeded)   // stale app suggestions die
+                g.autoSeeded = []
+            }
             g.confidentDupe = gs.confidentDupe
             // includeProtected deliberately not restored (informed-consent flag).
-            if gs.exact { exactIDs.insert(g.id) }
+            if gs.exact && tokenCurrent { exactIDs.insert(g.id) }
             restoredGroups.append(g)
         }
         let restoredCats = snap.categories.compactMap { cs -> CategoryBucket? in
@@ -1289,10 +1338,14 @@ final class LibraryModel: ObservableObject {
         }
 
         // Build audit records BEFORE the delete (photos still exist in model).
+        // Only for IDs that actually RESOLVED: stale IDs never reach
+        // PHAssetChangeRequest, and the accountability log must never book a
+        // deletion snapsift didn't perform.
+        let resolvable = Set(assets.map(\.localIdentifier))
         let timestamp = DeletionAuditLog.nowTimestamp()
         var auditRecords: [DeletionRecord] = []
         for g in groups {
-            let deletionIDs = g.deletionIDs
+            let deletionIDs = g.deletionIDs.filter { resolvable.contains($0) }
             guard !deletionIDs.isEmpty else { continue }
             let keeperPhoto = g.photos.first { $0.uuid == g.keeperID }
             let keeperID = g.keeperID
@@ -1331,6 +1384,7 @@ final class LibraryModel: ObservableObject {
         // keep that state. Rebuilding with defaults silently re-marks protected
         // photos for deletion on the next pass — an accuracy/trust red line.
         let removed = Set(ids)
+        var survivingExactIDs: Set<ReviewGroup.ID> = []
         groups = groups.compactMap { g -> ReviewGroup? in
             guard let r = regroupAfterDeletion(photos: g.photos,
                                                keeperID: g.keeperID,
@@ -1344,8 +1398,13 @@ final class LibraryModel: ObservableObject {
             // pass the protected frames that were opted-in are already gone, and the
             // remaining group should start fresh (default = protected, as always).
             ng.includeProtected = false
+            // Rebuilt groups mint fresh UUIDs — remap the exact-duplicate
+            // verdicts or every surviving byte-verified group silently loses
+            // its badge, album routing, and persisted exact flag.
+            if exactDupeGroupIDs.contains(g.id) { survivingExactIDs.insert(ng.id) }
             return ng
         }
+        exactDupeGroupIDs = survivingExactIDs
 
         // FIX #5 — refresh assetsByID after a successful delete.
         //

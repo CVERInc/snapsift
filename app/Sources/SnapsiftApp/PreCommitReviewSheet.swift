@@ -8,7 +8,10 @@ import Signet
 /// Snapshot of one group's pending deletion, computed before the sheet is shown.
 struct PreCommitGroup: Identifiable {
     let id: ReviewGroup.ID
-    let keeper: Photo
+    /// nil = NO SURVIVOR: every frame of this group is being removed. The
+    /// sheet must render these groups too — a commit may never delete photos
+    /// the confirmation surface didn't show.
+    let keeper: Photo?
     let keeperReason: KeeperReason
     let toRemove: [Photo]
     let includeProtected: Bool
@@ -100,8 +103,11 @@ struct PreCommitReviewSheet: View {
             }
 
             // MARK: Scrollable group list
+            // LazyVStack, deliberately: at dogfood scale (thousands of marked
+            // groups) an eager VStack builds every row and fires every
+            // thumbnail request before the sheet can even appear.
             ScrollView {
-                VStack(spacing: 12) {
+                LazyVStack(spacing: 12) {
                     ForEach(groups) { g in
                         GroupPreCommitRow(group: g, model: model, t: t)
                     }
@@ -150,39 +156,50 @@ private struct GroupPreCommitRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // Keeper row
-            HStack(spacing: 10) {
-                // Keeper thumbnail (not dimmed)
-                AssetThumbnail(asset: model.asset(for: group.keeper.uuid),
-                               manager: model.imageManager,
-                               box: CGSize(width: 64, height: 64),
-                               quarterTurns: model.rotation(for: group.keeper.uuid),
-                               fill: true)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(Color.reefGreen, lineWidth: 2)
-                    )
+            // Keeper row — or the loud no-survivor banner when there is none.
+            if let keeper = group.keeper {
+                HStack(spacing: 10) {
+                    // Keeper thumbnail (not dimmed)
+                    AssetThumbnail(asset: model.asset(for: keeper.uuid),
+                                   manager: model.imageManager,
+                                   box: CGSize(width: 64, height: 64),
+                                   quarterTurns: model.rotation(for: keeper.uuid),
+                                   fill: true)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(Color.reefGreen, lineWidth: 2)
+                        )
 
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Text(t.preCommitKept())
-                            .font(.caption.bold())
-                            .foregroundStyle(Color.reefGreen)
-                        Text(group.keeper.filename.isEmpty
-                             ? String(group.keeper.uuid.prefix(8))
-                             : group.keeper.filename)
-                            .font(.caption)
-                            .foregroundStyle(Color.reefText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 4) {
+                            Text(t.preCommitKept())
+                                .font(.caption.bold())
+                                .foregroundStyle(Color.reefGreen)
+                            Text(keeper.filename.isEmpty
+                                 ? String(keeper.uuid.prefix(8))
+                                 : keeper.filename)
+                                .font(.caption)
+                                .foregroundStyle(Color.reefText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Text(keeperWhyLabel(group.keeperReason))
+                            .font(.caption2)
+                            .foregroundStyle(Color.reefTextDim)
                     }
-                    Text(keeperWhyLabel(group.keeperReason))
-                        .font(.caption2)
-                        .foregroundStyle(Color.reefTextDim)
-                }
 
-                Spacer()
+                    Spacer()
+                }
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color.reefAmber)
+                    Text(t.preCommitNoSurvivorRow())
+                        .font(.caption.bold())
+                        .foregroundStyle(Color.reefAmber)
+                    Spacer()
+                }
             }
 
             // Removing thumbnails (dimmed)
