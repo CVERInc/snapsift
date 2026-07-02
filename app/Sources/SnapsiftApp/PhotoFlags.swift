@@ -97,19 +97,61 @@ enum PhotoFlags {
     ///                    ambiguous result / insufficient text → `(false, false)`.
     static func isDocumentResult(_ asset: PHAsset,
                                  manager: PHCachingImageManager) async -> (isDocument: Bool, degraded: Bool) {
-        guard let cg = await cgImage(asset, manager) else {
-            // Image not on-device / timed out → we genuinely do not know.
+        // TWO-TIER fetch. Document detection dies on tiny thumbnails (measured
+        // on a real handwritten-form scan: 256px → seg 0.46 and zero text —
+        // no threshold survives that; 512px → seg 0.90 + text). But fetching
+        // high-quality pixels for EVERY cluster member is a 20+ minute scan on
+        // an optimize-storage library (live-measured). So:
+        //   Tier 1: cheap opportunistic local thumbnail. If it's reasonably
+        //           sized AND segmentation is clearly below suspicion, this is
+        //           a confident NO at zero extra cost — the common case.
+        //   Tier 2: only for suspicious-or-too-small tier-1 results, refetch at
+        //           512px high quality (network allowed, timeout-guarded) and
+        //           run the full two-path predicate on trustworthy pixels.
+        guard let localCG = await cgImage(asset, manager) else {
+            // Not even a local thumbnail → we genuinely do not know.
             return (false, true)
         }
+        // Escalate on suspicion only. Even a tiny thumbnail of a real document
+        // keeps some geometric signal (the live form case read 0.46 at 256px),
+        // while ordinary photos sit well below the floor — gating escalation on
+        // thumbnail SIZE instead re-fetched nearly the whole optimize-storage
+        // library and blew the scan out to 15+ minutes (live-measured twice).
+        let localSeg = await segConfidence(localCG)
+        if localSeg < DocumentThresholds.suspicionFloor {
+            // Confidently not a document at browse-time. KNOWN LIMIT: a real
+            // document whose only local representation is a ~48px micro-thumb
+            // can read seg=0.0 here and miss the badge (measured on a
+            // handwritten-form scan). The deletion-suggestion path compensates
+            // with `isDocumentHiQ` on trustworthy pixels before any pre-mark.
+            return (false, false)
+        }
+        // 30s timeout: escalation usually means downloading the original from
+        // iCloud (several MB) — the default 10s bound produced false "degraded"
+        // results on real suspicious frames. Few frames reach this tier, so the
+        // longer bound doesn't threaten overall scan time.
+        guard let cg = await VisionGuards.cgImage(asset, manager,
+                                                  target: CGSize(width: 512, height: 512),
+                                                  mode: .aspectFit, resize: .fast,
+                                                  timeoutNs: 30_000_000_000) else {
+            // Escalation needed but image unavailable / timed out → unknown.
+            return (false, true)
+        }
+        return (await documentVerdict(cg), false)
+    }
 
-        // Minimum number of distinct word-level text observations required.
-        // A receipt / scan / ID card comfortably exceeds 5; a photo of a person
-        // in front of a building sign does not.
-        let minTextObservations = 5
-        // Per-observation recognition confidence floor.
-        let minTextConfidence: Float = 0.5
-
-        let docResult: Bool = await withCheckedContinuation { cont in
+    /// The full two-path document predicate over trustworthy pixels.
+    ///
+    /// Two corroboration paths (protective direction — a false positive only
+    /// over-protects):
+    ///  A. Moderate geometry + LOTS of text → printed receipt/scan/ID.
+    ///  B. Strong geometry + ANY recognised text → handwritten forms, whose
+    ///     words fast OCR mostly can't read (live-verified miss: a
+    ///     handwritten-form scan pair got zero protection under the old
+    ///     "0.9 AND ≥5 words" single path). A painting/landscape may clear
+    ///     the geometry bar but has no text at all.
+    private static func documentVerdict(_ cg: CGImage) async -> Bool {
+        await withCheckedContinuation { cont in
             visionQueue.async {
                 let handler = VNImageRequestHandler(cgImage: cg, options: [:])
 
@@ -120,14 +162,12 @@ enum PhotoFlags {
                 } catch {
                     cont.resume(returning: false); return
                 }
-                guard (docRequest.results?.first?.confidence ?? 0) >= 0.9 else {
+                let seg = docRequest.results?.first?.confidence ?? 0
+                guard seg >= DocumentThresholds.segFloor else {
                     cont.resume(returning: false); return
                 }
 
-                // Pass 2: text recognition on the same cached CGImage.
-                // Only run this (cheaper but still non-trivial) pass when the
-                // document rectangle already passed — avoids running OCR on every
-                // cluster member.
+                // Pass 2: text recognition, only when geometry already passed.
                 let textRequest = VNRecognizeTextRequest()
                 textRequest.recognitionLevel = .fast   // fast: lower latency, still good for counting
                 textRequest.usesLanguageCorrection = false   // no hallucinated words
@@ -136,14 +176,69 @@ enum PhotoFlags {
                 } catch {
                     cont.resume(returning: false); return
                 }
-                let observations = textRequest.results ?? []
-                let highConfidenceWords = observations.filter { $0.confidence >= minTextConfidence }
-                // Require at least `minTextObservations` confident text regions.
-                // A photo of a person / scene may have 0–2; a scan has many more.
-                cont.resume(returning: highConfidenceWords.count >= minTextObservations)
+                let words = (textRequest.results ?? [])
+                    .filter { $0.confidence >= DocumentThresholds.minTextConfidence }
+                    .count
+
+                cont.resume(returning:
+                    (seg >= DocumentThresholds.segWithText
+                        && words >= DocumentThresholds.minTextObservations)
+                    || (seg >= DocumentThresholds.segStrong
+                        && words >= DocumentThresholds.minTextObservationsStrong))
             }
         }
-        return (docResult, false)
+    }
+
+    /// Document-detection thresholds, extracted so tuning is one edit (and the
+    /// two corroboration paths are legible). Direction of safety: raising any
+    /// bar risks missing a real document (protection hole); lowering only
+    /// over-protects.
+    enum DocumentThresholds {
+        /// Tier-1 escalation bar: below this local-thumbnail segmentation the
+        /// frame is treated as not-a-document without a high-quality refetch.
+        /// Measured distribution (120K-library scan): 98% of cluster members
+        /// read 0.0 and only ~145 read ≥0.1, so escalation stays cheap. Note a
+        /// real document can still read 0.0 on a ~48px micro-thumb — that gap
+        /// is closed by `isDocumentHiQ` on the deletion-suggestion path.
+        static let suspicionFloor: Float = 0.1
+        /// Below this segmentation confidence we don't even run OCR.
+        static let segFloor: Float = 0.65
+        /// Path A: moderate geometry, corroborated by substantial text.
+        static let segWithText: Float = 0.65
+        static let minTextObservations = 5
+        /// Path B: strong geometry, corroborated by any confident text at all.
+        static let segStrong: Float = 0.85
+        static let minTextObservationsStrong = 1
+        /// Per-observation recognition confidence floor.
+        static let minTextConfidence: Float = 0.5
+    }
+
+    /// High-quality-only document check — skips the cheap tier entirely.
+    /// Used as the LAST gate before a frame is auto-suggested for deletion:
+    /// a 48px cached thumbnail carries zero signal for some real documents
+    /// (measured seg=0.0 on a handwritten-form scan), so the suggestion path
+    /// must judge on trustworthy pixels no matter what the browse-time badge
+    /// said. Runs on a handful of frames (exact groups only) — cost is noise.
+    static func isDocumentHiQ(_ asset: PHAsset, manager: PHCachingImageManager) async -> Bool? {
+        guard let cg = await VisionGuards.cgImage(asset, manager,
+                                                  target: CGSize(width: 512, height: 512),
+                                                  mode: .aspectFit, resize: .fast,
+                                                  timeoutNs: 30_000_000_000) else {
+            return nil   // couldn't verify — caller must stay protective
+        }
+        return await documentVerdict(cg)
+    }
+
+    /// Segmentation confidence alone (tier-1 cheap screen), off the cooperative pool.
+    private static func segConfidence(_ cg: CGImage) async -> Float {
+        await withCheckedContinuation { cont in
+            visionQueue.async {
+                let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+                let req = VNDetectDocumentSegmentationRequest()
+                do { try handler.perform([req]) } catch { cont.resume(returning: 0); return }
+                cont.resume(returning: req.results?.first?.confidence ?? 0)
+            }
+        }
     }
 
     /// Convenience bool-only wrapper (for callers that do not need the degraded flag).
@@ -206,6 +301,11 @@ enum PhotoFlags {
         }
     }
 
+    /// 512px, NOT smaller: document detection dies on tiny thumbnails.
+    /// Measured on a real handwritten-form scan — at 256px the segmentation
+    /// confidence collapses to 0.46 with ZERO recognisable text (no threshold
+    /// can save that); at 512px the same photo reads 0.90 + text. 512 is still
+    /// cheap because this only ever runs on cluster members.
     private static func cgImage(_ asset: PHAsset, _ manager: PHCachingImageManager) async -> CGImage? {
         let opts = PHImageRequestOptions()
         opts.isNetworkAccessAllowed = false          // on-device only — never pull from iCloud
@@ -214,7 +314,7 @@ enum PhotoFlags {
         let box = ImageBox()
         let img: NSImage? = await withCheckedContinuation { cont in
             box.set(cont)
-            manager.requestImage(for: asset, targetSize: CGSize(width: 256, height: 256),
+            manager.requestImage(for: asset, targetSize: CGSize(width: 512, height: 512),
                                  contentMode: .aspectFit, options: opts) { image, _ in
                 box.finish(image)
             }

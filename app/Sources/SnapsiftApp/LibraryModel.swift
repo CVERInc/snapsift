@@ -10,7 +10,7 @@ import SnapsiftCore
 /// button, which both funnel through `setIncludeProtected` + a confirm dialog.
 struct ReviewGroup: Identifiable {
     let id = UUID()
-    let photos: [Photo]
+    var photos: [Photo]
     var keeperID: String
     /// Per-frame reject set: asset uuids the user wants deleted.
     /// SEEDED at scan time ONLY for verified exact-duplicate groups (see
@@ -512,7 +512,7 @@ final class LibraryModel: ObservableObject {
 
         // Exact-duplicate pass: the ONLY source of pre-marked deletions.
         await detectExactDuplicates(t, fracBase: 0.9, fracSpan: 0.1)
-        seedExactRejections()
+        await seedExactRejections()
         if bailIfCancelled(t) { return }
 
         progressFraction = 1.0
@@ -692,7 +692,7 @@ final class LibraryModel: ObservableObject {
 
         // Exact-duplicate pass: the ONLY source of pre-marked deletions.
         await detectExactDuplicates(t, fracBase: 0.85, fracSpan: 0.15)
-        seedExactRejections()
+        await seedExactRejections()
         if bailIfCancelled(t) { return }
 
         progressFraction = 1.0
@@ -1068,18 +1068,48 @@ final class LibraryModel: ObservableObject {
     /// `autoSeeded` so the audit log can attribute them as `.exactDuplicate`.
     /// SLICE-1 INVARIANT: protected frames are NEVER auto-seeded. FIX #4:
     /// degraded-eval frames (iCloud-evicted / timeout) are NEVER auto-seeded.
-    private func seedExactRejections() {
+    ///
+    /// LAST GATE: before a candidate is seeded it gets a high-quality document
+    /// re-check (`PhotoFlags.isDocumentHiQ`). The browse-time badge runs on
+    /// cheap local thumbnails and provably misses documents whose only local
+    /// representation is a ~48px micro-thumb — the suggestion path must judge
+    /// on real pixels. A confirmed document flips the frame to protected; an
+    /// unverifiable one (nil) is simply not seeded. Exact groups are rare, so
+    /// the extra fetches cost nothing overall.
+    private func seedExactRejections() async {
         guard !exactDupeGroupIDs.isEmpty else { return }
-        groups = groups.map { g in
-            guard exactDupeGroupIDs.contains(g.id) else { return g }
-            var ng = g
-            let keeperID = g.keeperID
-            let seeds = Set(g.photos.compactMap { p in
-                (p.uuid != keeperID && !p.isProtected && !p.documentEvalDegraded) ? p.uuid : nil
-            })
-            ng.rejected.formUnion(seeds)
-            ng.autoSeeded = seeds
-            return ng
+        for i in groups.indices where exactDupeGroupIDs.contains(groups[i].id) {
+            let keeperID = groups[i].keeperID
+            var seeds: Set<String> = []
+            for (j, p) in groups[i].photos.enumerated() {
+                guard p.uuid != keeperID, !p.isProtected, !p.documentEvalDegraded else { continue }
+                if let asset = assetsByID[p.uuid] {
+                    switch await PhotoFlags.isDocumentHiQ(asset, manager: imageManager) {
+                    case .some(true):
+                        // Real document — upgrade the frame's flag so the UI
+                        // badge and every downstream guard agree.
+                        var upgraded = groups[i].photos[j]
+                        upgraded = Photo(uuid: upgraded.uuid, filename: upgraded.filename,
+                                         takenAt: upgraded.takenAt, width: upgraded.width,
+                                         height: upgraded.height, size: upgraded.size,
+                                         uti: upgraded.uti, kind: upgraded.kind,
+                                         favorite: upgraded.favorite, quality: upgraded.quality,
+                                         edited: upgraded.edited, isDocument: true,
+                                         sharpness: upgraded.sharpness,
+                                         originalCamera: upgraded.originalCamera,
+                                         documentEvalDegraded: false)
+                        groups[i].photos[j] = upgraded
+                        continue
+                    case .none:
+                        continue   // couldn't verify — stay protective, don't seed
+                    case .some(false):
+                        break      // verified not a document — safe to seed
+                    }
+                }
+                seeds.insert(p.uuid)
+            }
+            groups[i].rejected.formUnion(seeds)
+            groups[i].autoSeeded = seeds
         }
     }
 
