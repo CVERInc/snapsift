@@ -22,6 +22,9 @@ struct ContentView: View {
     @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
     // FIX 2: persistent delete-failure alert
     @State private var deleteErrorAlert = false
+    // Album-write failure: persistent alert (same stance as delete failure —
+    // a mutation of the user's library must never fail as a vanishing banner).
+    @State private var albumErrorMessage: String?
     // Pass 2b: save-rotation state
     @State private var saveRotationErrorAlert = false
     // Feature 1: pre-commit review sheet
@@ -35,6 +38,8 @@ struct ContentView: View {
     // Continuation used to return the user's choice from the stale-asset alert
     // back to the async performDelete() that's waiting on it.
     @State private var staleAlertContinuation: CheckedContinuation<Bool, Never>?
+    // Dead-focus rescue (see installFocusRescue): local keyDown monitor token.
+    @State private var keyMonitor: Any?
 
     private var language: Language { Language(rawValue: langRaw) ?? .en }
     private var t: L10n { L10n(language) }
@@ -145,6 +150,12 @@ struct ContentView: View {
         NSWorkspace.shared.open(url)
     }
 
+    /// Deep-link to the Full Disk Access pane (size/quality sidecar needs it).
+    private func openFullDiskAccessSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     /// gate() variant that also accepts an action closure for the button.
     private func gate(message: String, button: String?, action: @escaping () -> Void) -> some View {
         VStack(spacing: 18) {
@@ -198,7 +209,30 @@ struct ContentView: View {
         .safeAreaInset(edge: .bottom) { statusBar }
         .overlay(alignment: .top) { bannerView }
         .overlay { if previewID != nil { previewOverlay } }
-        .onAppear { model.loadAlbums() }
+        // While the delete (and its system confirmation) is in flight, the
+        // window must be inert: a stray keypress reaching the grid can promote
+        // or un-reject frames mid-delete (verified live — a blind Return
+        // cleared the pending mark). The overlay blocks the mouse; the key
+        // handlers guard on `deleting` for the keyboard.
+        .overlay { if deleting { deletingLock } }
+        .onAppear { model.loadAlbums(); installFocusRescue() }
+        // Scan-completion feedback: every scan ends with an explicit banner
+        // ("found N" / "nothing found" / "album gone") so finishing is never
+        // silent and an empty result is distinguishable from not having run.
+        .onChange(of: model.scanNotice) { _, notice in
+            if let notice {
+                showBanner(notice)
+                model.scanNotice = nil
+            }
+        }
+        // Keep the grid focus in sync when the selection changes by mouse —
+        // otherwise focusedFrame keeps pointing into the previously selected
+        // group and arrow keys / ⇧⌘R act on a stale frame.
+        .onChange(of: selection) { _, id in
+            if let g = model.groups.first(where: { $0.id == id }) {
+                focusedFrame = g.keeperID
+            }
+        }
         // Feature 1: pre-commit review sheet
         .sheet(isPresented: $showPreCommitSheet) {
             PreCommitReviewSheet(
@@ -231,6 +265,15 @@ struct ContentView: View {
             Button(t.deleteErrorDismiss(), role: .cancel) {}
         } message: {
             Text(t.deleteErrorBody())
+        }
+        // Album-write failure — persistent, same trust bar as delete failure.
+        .alert(t.albumsWriteFailedTitle(), isPresented: Binding(
+            get: { albumErrorMessage != nil },
+            set: { if !$0 { albumErrorMessage = nil } }
+        )) {
+            Button(t.deleteErrorDismiss(), role: .cancel) { albumErrorMessage = nil }
+        } message: {
+            if let msg = albumErrorMessage { Text(msg) }
         }
         // ⇧X force-reject confirmation: same dialog path as mouse "include protected".
         .alert(t.deleteProtectedAlertTitle(), isPresented: $showForceRejectAlert) {
@@ -293,6 +336,21 @@ struct ContentView: View {
         }
     }
 
+    /// Input lock shown while a delete is committing (see the .overlay note).
+    private var deletingLock: some View {
+        ZStack {
+            Color.black.opacity(0.35)
+            VStack(spacing: 12) {
+                ProgressView().tint(.reefMint)
+                Text(t.deletingOverlay())
+                    .font(.callout).foregroundStyle(Color.reefText)
+            }
+            .padding(24)
+            .background(Color.reefDeep, in: RoundedRectangle(cornerRadius: 12))
+        }
+        .contentShape(Rectangle())   // swallow all mouse input underneath
+    }
+
     private func toggleHelp() {
         withAnimation(.easeOut(duration: 0.18)) { showHelp.toggle() }
     }
@@ -327,6 +385,26 @@ struct ContentView: View {
         }
         .frame(maxHeight: .infinity)
         .background(Color.reefDeep)
+    }
+
+    /// Dead-focus rescue. SwiftUI's focus can end up nowhere (first responder
+    /// = the NSWindow itself) after launch-path differences, TCC dialogs, or
+    /// app switching — and once it does, no `.onKeyPress` handler in the
+    /// window fires again and there is no mouse path that restores it
+    /// (verified live: rows select but j/k/x/? are all dead). This local
+    /// monitor never swallows events; it only detects the dead state and
+    /// re-arms the sidebar focus, so the very next keystroke lands normally.
+    private func installFocusRescue() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let fr = NSApp.keyWindow?.firstResponder
+            if fr == nil || fr is NSWindow {
+                if !model.groups.isEmpty || !model.categories.isEmpty {
+                    sidebarFocused = true
+                }
+            }
+            return event
+        }
     }
 
     private var sidebar: some View {
@@ -379,6 +457,7 @@ struct ContentView: View {
     // MARK: keyboard — list zone
 
     private func handleListKey(_ kp: KeyPress, _ proxy: ScrollViewProxy) -> KeyPress.Result {
+        guard !deleting else { return .handled }   // input locked mid-delete
         if kp.characters == "?" { toggleHelp(); return .handled }
         switch kp.key {
         case .upArrow:    moveSelection(-1, proxy); return .handled
@@ -414,6 +493,7 @@ struct ContentView: View {
     // MARK: keyboard — grid zone
 
     private func handleGridKey(_ kp: KeyPress) -> KeyPress.Result {
+        guard !deleting else { return .handled }   // input locked mid-delete
         if kp.characters == "?" { toggleHelp(); return .handled }
         guard let g = selectedGroup else { return .ignored }
 
@@ -576,7 +656,7 @@ struct ContentView: View {
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .onTapGesture { categorySelection = c.id }
+        .onTapGesture { categorySelection = c.id; sidebarFocused = true }
         .listRowBackground(
             RoundedRectangle(cornerRadius: 6)
                 .fill(sel ? Color.reefTeal : Color.clear)
@@ -607,7 +687,10 @@ struct ContentView: View {
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .onTapGesture { selection = g.id }
+        // Clicking a row must also reclaim keyboard focus: once first-responder
+        // is lost (relaunch, app switching), no scan-end onChange will re-arm
+        // it, and without this the whole keyboard flow silently dies.
+        .onTapGesture { selection = g.id; sidebarFocused = true }
         .listRowBackground(
             RoundedRectangle(cornerRadius: 6)
                 .fill(sel ? Color.reefTeal : Color.clear)
@@ -623,9 +706,9 @@ struct ContentView: View {
                 Text(model.progress).font(.caption).foregroundStyle(Color.reefTextDim)
                     .multilineTextAlignment(.center).padding(.horizontal)
             } else {
-                Image(systemName: "rectangle.stack.badge.minus")
+                Image(systemName: model.hasScanned ? "checkmark.circle" : "rectangle.stack.badge.minus")
                     .font(.system(size: 34)).foregroundStyle(Color.reefBorder)
-                Text(t.scanHint())
+                Text(model.hasScanned ? t.scannedEmptyHint() : t.scanHint())
                     .font(.caption).foregroundStyle(Color.reefTextDim)
                     .multilineTextAlignment(.center)
             }
@@ -857,6 +940,16 @@ struct ContentView: View {
             if model.qualityAvailable {
                 Label(t.appleRanked(), systemImage: "wand.and.stars")
                     .foregroundStyle(Color.reefMint)
+            } else if model.hasScanned {
+                // The missing "X MB freed" estimate must be explained, not
+                // silently absent: without Full Disk Access the sidecar (quality
+                // scores + real file sizes) can't be read.
+                Button { openFullDiskAccessSettings() } label: {
+                    Label(t.fdaHint(), systemImage: "internaldrive.badge.questionmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.reefTextDim)
+                .help(t.fdaHintHelp())
             }
             Text("snapsift v\(appVersion)")
                 .foregroundStyle(Color.reefTextDim.opacity(0.55))
@@ -972,7 +1065,7 @@ struct ContentView: View {
             let msg = try await model.writeAlbums(t)
             showBanner(msg)
         } catch {
-            showBanner(error.localizedDescription)
+            albumErrorMessage = error.localizedDescription
         }
     }
 
@@ -1015,6 +1108,10 @@ struct ContentView: View {
             // (mirrors the pre-commit sheet language — same promise, same place).
             if n > 0 { showBanner(t.deletedBanner(n)) }
         } catch {
+            // Cancelling macOS's own delete-confirmation sheet is a normal user
+            // decision, not a failure — it must never trigger the scary
+            // "delete failed, open Settings" alert.
+            if let ph = error as? PHPhotosError, ph.code == .userCancelled { return }
             // FIX 2: failed delete must be LOUD and actionable, not a silent 3s banner.
             // A destructive action that fails invisibly breaks trust completely.
             // Show a persistent, dismissible alert with a direct fix path.
@@ -1523,13 +1620,13 @@ struct LoupeOverlay: View {
         } ?? "?"
         var parts: [String] = []
         if let p = currentPhoto {
-            if p.uuid == group.keeperID && !group.rejected.contains(p.uuid) { parts.append("★ keeper") }
-            else if group.isDelete(p) { parts.append("✕ reject") }
-            if p.favorite   { parts.append("★ fav") }
-            if p.edited     { parts.append("✎ edited") }
-            if p.isDocument { parts.append("doc") }
+            if p.uuid == group.keeperID && !group.rejected.contains(p.uuid) { parts.append(t.loupeKeeper()) }
+            else if group.isDelete(p) { parts.append(t.loupeReject()) }
+            if p.favorite   { parts.append(t.loupeFav()) }
+            if p.edited     { parts.append(t.loupeEdited()) }
+            if p.isDocument { parts.append(t.loupeDoc()) }
         }
-        let status = parts.isEmpty ? "no decision" : parts.joined(separator: " · ")
+        let status = parts.isEmpty ? t.loupeNoDecision() : parts.joined(separator: " · ")
         return "\(i) / \(n)  ·  \(fname)  ·  \(status)"
     }
 }

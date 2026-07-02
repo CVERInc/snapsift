@@ -16,6 +16,27 @@ import SnapsiftCore
 /// expensive neural step runs on a small fraction of the library.
 enum LookAlikeScanner {
 
+    // MARK: - per-scan compute cache
+
+    /// dHashes and feature prints survive across the passes of ONE scan
+    /// (burst/look-alike scan → confident gate → exact-duplicate pass), so the
+    /// same asset is never hashed or feature-printed twice in a pipeline.
+    /// Cleared at the start of every new scan — pixels can change between scans
+    /// (edits, rotation saves), so verdicts must never outlive the session.
+    private actor Cache {
+        private var hashes: [String: UInt64] = [:]
+        private var prints: [String: VNFeaturePrintObservation] = [:]
+        func hash(_ id: String) -> UInt64? { hashes[id] }
+        func setHash(_ h: UInt64, for id: String) { hashes[id] = h }
+        func featurePrint(_ id: String) -> VNFeaturePrintObservation? { prints[id] }
+        func setFeaturePrint(_ p: VNFeaturePrintObservation, for id: String) { prints[id] = p }
+        func clear() { hashes = [:]; prints = [:] }
+    }
+    private static let cache = Cache()
+
+    /// Must be called when a new scan begins (LibraryModel does this).
+    static func clearCache() async { await cache.clear() }
+
     static func scan(assets: [PHAsset],
                      manager: PHCachingImageManager,
                      t: L10n,
@@ -86,13 +107,18 @@ enum LookAlikeScanner {
                                 asset: @escaping (String) -> PHAsset?,
                                 manager: PHCachingImageManager,
                                 progress: @escaping (Int, Int) -> Void) async -> [String: UInt64] {
+        // Serve cache hits first; only compute what this scan hasn't seen yet.
         var out: [String: UInt64] = [:]
-        var done = 0
+        var missing: [String] = []
+        for id in ids {
+            if let h = await cache.hash(id) { out[id] = h } else { missing.append(id) }
+        }
+        var done = out.count
         await withTaskGroup(of: (String, UInt64?).self) { group in
             var next = 0
             func add() {
-                while next < ids.count {
-                    let id = ids[next]; next += 1
+                while next < missing.count {
+                    let id = missing[next]; next += 1
                     guard let a = asset(id) else { continue }
                     group.addTask {
                         if let px = await grayPixels9x8(a, manager) { return (id, dHash(grayRowMajor: px)) }
@@ -103,7 +129,10 @@ enum LookAlikeScanner {
             }
             for _ in 0..<featureConcurrency { add() }
             for await (id, h) in group {
-                if let h { out[id] = h }
+                if let h {
+                    out[id] = h
+                    await cache.setHash(h, for: id)
+                }
                 done += 1
                 if done % 500 == 0 { progress(done, ids.count) }
                 add()
@@ -123,13 +152,18 @@ enum LookAlikeScanner {
                                       manager: PHCachingImageManager,
                                       progress: @escaping (Int, Int) -> Void)
         async -> [String: VNFeaturePrintObservation] {
+        // Serve cache hits first; only compute what this scan hasn't seen yet.
         var out: [String: VNFeaturePrintObservation] = [:]
-        var done = 0, loaded = 0
+        var missing: [String] = []
+        for id in ids {
+            if let fp = await cache.featurePrint(id) { out[id] = fp } else { missing.append(id) }
+        }
+        var done = out.count, loaded = out.count
         await withTaskGroup(of: (String, VNFeaturePrintObservation?).self) { group in
             var next = 0
             func add() {
-                while next < ids.count {
-                    let id = ids[next]; next += 1
+                while next < missing.count {
+                    let id = missing[next]; next += 1
                     guard let a = byID[id] else { continue }   // unknown id — skip
                     group.addTask { (id, await featurePrint(a, manager)) }
                     return
@@ -137,7 +171,10 @@ enum LookAlikeScanner {
             }
             for _ in 0..<featureConcurrency { add() }
             for await (id, fp) in group {
-                if let fp { out[id] = fp; loaded += 1 }
+                if let fp {
+                    out[id] = fp; loaded += 1
+                    await cache.setFeaturePrint(fp, for: id)
+                }
                 done += 1
                 if done % 100 == 0 { progress(done, loaded) }
                 add()

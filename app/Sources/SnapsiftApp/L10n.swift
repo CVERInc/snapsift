@@ -158,6 +158,7 @@ struct L10n: Sendable {
             ("Space / Esc",    "Close loupe"),
             // Global
             ("⌘⌫",             "Commit — delete all rejected"),
+            ("⌘⏎",             "Review sheet: confirm delete"),
             ("?",              "This cheat sheet"),
         ]
         case .ja: return [
@@ -176,6 +177,7 @@ struct L10n: Sendable {
             ("R / ⇧R",         "ルーペ：回転・表示のみ"),
             ("スペース / Esc", "ルーペを閉じる"),
             ("⌘⌫",             "削除を実行"),
+            ("⌘⏎",             "確認シート：削除を確定"),
             ("?",              "このキー一覧"),
         ]
         case .zhTW: return [
@@ -194,6 +196,7 @@ struct L10n: Sendable {
             ("R / ⇧R",         "放大鏡：旋轉・僅顯示用"),
             ("空白 / Esc",     "關閉放大鏡"),
             ("⌘⌫",             "執行刪除所有標刪"),
+            ("⌘⏎",             "審核視窗：確認刪除"),
             ("?",              "這張快捷小抄"),
         ]
         }
@@ -540,9 +543,9 @@ struct L10n: Sendable {
     }
     func tipFaces() -> String {
         switch language {
-        case .en: return "Re-picks the keeper to the frame where faces look best — eyes open"
-        case .ja: return "顔がいちばん良く写った1枚（目が開いている）を残すよう選び直す"
-        case .zhTW: return "改挑大家臉拍得最好、眼睛有張開的那張當保留"
+        case .en: return "Re-picks the keeper to the frame where faces look best — eyes open. Only re-orders; never changes what can be deleted."
+        case .ja: return "顔がいちばん良く写った1枚（目が開いている）を残すよう選び直す。並べ替えだけで、削除対象は変わりません。"
+        case .zhTW: return "改挑大家臉拍得最好、眼睛有張開的那張當保留。只重新排序，永遠不會改變哪些照片可被刪。"
         }
     }
     func tipAppleRanked() -> String {
@@ -936,13 +939,15 @@ struct L10n: Sendable {
 
     /// Sheet subtitle — "≈X MB freed · recoverable for 30 days"
     func preCommitSubtitle(bytes: Int) -> String {
+        // The "freed" wording must be per-language — "213 KB freed · 30 天內可復原"
+        // is exactly the mixed-language seam this exhaustive switch exists to prevent.
         let size = bytes > 0
-            ? ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) + " freed · "
+            ? ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
             : ""
         switch language {
-        case .en:   return "\(size)recoverable for 30 days"
-        case .ja:   return "\(size)30日間は復元可能"
-        case .zhTW: return "\(size)30 天內可復原"
+        case .en:   return size.isEmpty ? "recoverable for 30 days" : "\(size) freed · recoverable for 30 days"
+        case .ja:   return size.isEmpty ? "30日間は復元可能" : "\(size) 解放 · 30日間は復元可能"
+        case .zhTW: return size.isEmpty ? "30 天內可復原" : "可釋放 \(size) · 30 天內可復原"
         }
     }
 
@@ -1220,6 +1225,144 @@ struct L10n: Sendable {
         case .en:   return "Save this display rotation permanently to Photos (⇧⌘R) · reversible via Revert to Original"
         case .ja:   return "この表示回転を写真に永久保存（⇧⌘R）· オリジナルに戻すことで取り消せます"
         case .zhTW: return "將此顯示旋轉永久儲存至「照片」（⇧⌘R）· 可透過「回復到原始項目」復原"
+        }
+    }
+
+    // MARK: scan-completion feedback
+
+    /// Banner after a scan that found something. `n` = review sets found.
+    func scanDoneBanner(_ n: Int) -> String {
+        switch language {
+        case .en: return "Scan complete — \(n) sets to review"
+        case .ja: return "スキャン完了 — 確認する組は \(n) 件"
+        case .zhTW: return "掃描完成：找到 \(n) 組可檢視"
+        }
+    }
+    /// Banner after a scan that found nothing.
+    func scanDoneNothing() -> String {
+        switch language {
+        case .en: return "Scan complete — nothing found. Your library looks clean."
+        case .ja: return "スキャン完了 — 見つかりませんでした。ライブラリはきれいです。"
+        case .zhTW: return "掃描完成：沒有找到，你的圖庫很乾淨。"
+        }
+    }
+    /// Empty-state hint AFTER a scan ran and found nothing (distinct from the
+    /// pre-scan "pick what to look for" hint — the user must be able to tell
+    /// "haven't scanned" from "scanned, nothing found").
+    func scannedEmptyHint() -> String {
+        switch language {
+        case .en: return "The last scan found nothing here.\nTry another scan type or source."
+        case .ja: return "直前のスキャンでは何も見つかりませんでした。\n別のスキャン種類やソースを試してください。"
+        case .zhTW: return "上次掃描沒有找到任何結果。\n可以換一種掃描或換個來源試試。"
+        }
+    }
+
+    // MARK: album-write failure (persistent, like delete failure)
+
+    func albumsWriteFailedTitle() -> String {
+        switch language {
+        case .en: return "Couldn't sort into albums"
+        case .ja: return "アルバムへの整理に失敗しました"
+        case .zhTW: return "無法整理進相簿"
+        }
+    }
+
+    // MARK: Full Disk Access visibility
+
+    /// Shown in the status bar when the quality/size sidecar wasn't readable, so
+    /// the missing "X MB freed" estimate is explained instead of silently absent.
+    func fdaHint() -> String {
+        switch language {
+        case .en: return "Size estimates off — grant Full Disk Access"
+        case .ja: return "容量の見積もりは無効 — フルディスクアクセスを許可してください"
+        case .zhTW: return "沒有容量估算：請開啟「完整磁碟取用權限」"
+        }
+    }
+    func fdaHintHelp() -> String {
+        switch language {
+        case .en: return "snapsift reads your library's own quality scores and file sizes from Photos.sqlite (read-only). Without Full Disk Access those are unavailable, so scans still work but no reclaimable-space estimate is shown. Click to open System Settings."
+        case .ja: return "snapsift は Photos.sqlite（読み取り専用）からライブラリ自身の品質スコアとファイルサイズを読み取ります。フルディスクアクセスがないと利用できず、スキャンは動作しますが解放できる容量は表示されません。クリックでシステム設定を開きます。"
+        case .zhTW: return "snapsift 會從 Photos.sqlite（唯讀）讀取圖庫自己的品質分數與檔案大小。沒有完整磁碟取用權限時掃描仍可用，但不會顯示可釋放的空間。點一下開啟「系統設定」。"
+        }
+    }
+
+    // MARK: loupe HUD status words
+
+    func loupeKeeper() -> String {
+        switch language {
+        case .en: return "★ keeper"
+        case .ja: return "★ 残す"
+        case .zhTW: return "★ 保留"
+        }
+    }
+    func loupeReject() -> String {
+        switch language {
+        case .en: return "✕ reject"
+        case .ja: return "✕ 削除予定"
+        case .zhTW: return "✕ 待刪"
+        }
+    }
+    func loupeFav() -> String {
+        switch language {
+        case .en: return "★ fav"
+        case .ja: return "★ お気に入り"
+        case .zhTW: return "★ 最愛"
+        }
+    }
+    func loupeEdited() -> String {
+        switch language {
+        case .en: return "✎ edited"
+        case .ja: return "✎ 編集済み"
+        case .zhTW: return "✎ 已編輯"
+        }
+    }
+    func loupeDoc() -> String {
+        switch language {
+        case .en: return "doc"
+        case .ja: return "書類"
+        case .zhTW: return "文件"
+        }
+    }
+    func loupeNoDecision() -> String {
+        switch language {
+        case .en: return "no decision"
+        case .ja: return "未判定"
+        case .zhTW: return "尚未決定"
+        }
+    }
+
+    // MARK: history sheet
+
+    /// "… and N more" truncation line in the deletion-history sheet.
+    func historyMore(_ n: Int) -> String {
+        switch language {
+        case .en: return "… and \(n) more (export to see all)"
+        case .ja: return "… ほか \(n) 件（すべて見るには書き出し）"
+        case .zhTW: return "…還有 \(n) 筆（匯出可看全部）"
+        }
+    }
+
+    // MARK: deleting lock
+
+    /// Full-window overlay while the PhotoKit delete (and its system
+    /// confirmation) is in flight — input is locked so a stray keypress can't
+    /// mutate the review state mid-delete.
+    func deletingOverlay() -> String {
+        switch language {
+        case .en: return "Deleting… confirm in the system dialog if asked"
+        case .ja: return "削除中… システムの確認が出たら応答してください"
+        case .zhTW: return "刪除中…如出現系統確認框請回應"
+        }
+    }
+
+    // MARK: similar-set naming
+
+    /// Fallback name when no Vision tag resolves for a similar-set bucket.
+    func setFallbackName() -> String {
+        switch language {
+        case .en: return "Set"
+        case .ja: return "セット"
+        case .zhTW: return "組合"
         }
     }
 }

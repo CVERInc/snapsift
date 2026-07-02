@@ -120,12 +120,17 @@ struct PreCommitReviewSheet: View {
 
                 Spacer()
 
+                // ⌘⏎, not .defaultAction: a destructive button must not sit on
+                // bare Return (HIG), and .defaultAction silently stops firing
+                // when the sheet's List holds focus — the "keyboard flow dies
+                // at the red button" bug. ⌘⏎ is the deliberate commit idiom
+                // and fires regardless of focus; the label advertises it.
                 Button(role: .destructive) { onConfirm() }
-                    label: { Text(t.preCommitConfirm()) }
+                    label: { Text("\(t.preCommitConfirm()) · ⌘⏎") }
                     .buttonStyle(.borderedProminent)
                     .tint(.reefRed)
                     .disabled(!confirmEnabled)
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(.return, modifiers: .command)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)

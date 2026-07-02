@@ -131,7 +131,7 @@ struct DeletionHistoryView: View {
                     }
                 }
                 if session.records.count > 6 {
-                    Text("… and \(session.records.count - 6) more (export to see all)")
+                    Text(t.historyMore(session.records.count - 6))
                         .font(.caption2)
                         .foregroundStyle(Color.reefTextDim)
                         .padding(.top, 2)

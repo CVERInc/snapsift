@@ -24,10 +24,14 @@ enum CategoryScanner {
     /// Up to `limit` reliable, specific content labels for an asset (most
     /// specific first; over-generic ancestors dropped). Used to name a set.
     static func labels(for asset: PHAsset, manager: PHCachingImageManager, limit: Int = 3) async -> [String] {
-        guard let cg = await cgImage(for: asset, manager: manager) else { return [] }
+        // Timeout-guarded + off-pool Vision via VisionGuards — one stuck
+        // iCloud asset can't stall the similar-sets naming pass.
+        guard let cg = await VisionGuards.cgImage(asset, manager,
+                                                  target: CGSize(width: 256, height: 256),
+                                                  mode: .aspectFit, resize: .fast)
+        else { return [] }
         let request = VNClassifyImageRequest()
-        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
-        do { try handler.perform([request]) } catch { return [] }
+        guard await VisionGuards.perform([request], on: cg) else { return [] }
         let reliable = (request.results ?? [])
             .filter { $0.hasMinimumPrecision(0.3, forRecall: 0) && !generic.contains($0.identifier) }
         return Array(reliable.prefix(limit).map(\.identifier))
@@ -38,19 +42,4 @@ enum CategoryScanner {
         identifier.replacingOccurrences(of: "_", with: " ").capitalized
     }
 
-    private static func cgImage(for asset: PHAsset, manager: PHCachingImageManager) async -> CGImage? {
-        let opts = PHImageRequestOptions()
-        opts.isNetworkAccessAllowed = true
-        opts.deliveryMode = .highQualityFormat
-        opts.resizeMode = .fast
-        let nsImage: NSImage? = await withCheckedContinuation { cont in
-            manager.requestImage(for: asset, targetSize: CGSize(width: 256, height: 256),
-                                 contentMode: .aspectFit, options: opts) { img, _ in
-                cont.resume(returning: img)
-            }
-        }
-        guard let nsImage else { return nil }
-        var rect = CGRect(origin: .zero, size: nsImage.size)
-        return nsImage.cgImage(forProposedRect: &rect, context: nil, hints: nil)
-    }
 }

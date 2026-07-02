@@ -11,10 +11,14 @@ enum FaceScorer {
 
     /// Higher = a better "everyone looking good" frame. 0 when no faces / no image.
     static func score(asset: PHAsset, manager: PHCachingImageManager) async -> Double {
-        guard let cg = await cgImage(for: asset, manager: manager) else { return 0 }
+        // 512px: enough to find small faces. Timeout-guarded + off-pool Vision
+        // via VisionGuards, so one stuck iCloud asset can't stall the pass.
+        guard let cg = await VisionGuards.cgImage(asset, manager,
+                                                  target: CGSize(width: 512, height: 512),
+                                                  mode: .aspectFit, resize: .exact)
+        else { return 0 }
         let request = VNDetectFaceLandmarksRequest()
-        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
-        do { try handler.perform([request]) } catch { return 0 }
+        guard await VisionGuards.perform([request], on: cg) else { return 0 }
         guard let faces = request.results, !faces.isEmpty else { return 0 }
 
         var total = 0.0
@@ -45,20 +49,4 @@ enum FaceScorer {
         return sum / Double(eyes.count)
     }
 
-    private static func cgImage(for asset: PHAsset, manager: PHCachingImageManager) async -> CGImage? {
-        let opts = PHImageRequestOptions()
-        opts.isNetworkAccessAllowed = true
-        opts.deliveryMode = .highQualityFormat
-        opts.resizeMode = .exact
-        let target = CGSize(width: 512, height: 512)   // enough to find small faces
-        let nsImage: NSImage? = await withCheckedContinuation { cont in
-            manager.requestImage(for: asset, targetSize: target,
-                                 contentMode: .aspectFit, options: opts) { img, _ in
-                cont.resume(returning: img)
-            }
-        }
-        guard let nsImage else { return nil }
-        var rect = CGRect(origin: .zero, size: nsImage.size)
-        return nsImage.cgImage(forProposedRect: &rect, context: nil, hints: nil)
-    }
 }
