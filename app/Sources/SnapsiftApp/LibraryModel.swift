@@ -1,6 +1,5 @@
 import Foundation
 import Photos
-import AppKit
 import SnapsiftCore
 
 /// One reviewable near-duplicate cluster: the Core photos plus the currently
@@ -1169,7 +1168,12 @@ final class LibraryModel: ObservableObject {
             + snap.categories.flatMap { $0.photos.map(\.uuid) })
         guard !allIDs.isEmpty else { return false }
 
-        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(allIDs), options: nil)
+        // Must match the scan fetch: without includeAllBurstAssets the burst
+        // sub-frames don't resolve and their groups silently dissolve on
+        // restore (live-observed: 2755 → 2632 groups).
+        let fetchOpts = PHFetchOptions()
+        fetchOpts.includeAllBurstAssets = true
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(allIDs), options: fetchOpts)
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(fetched.count)
         fetched.enumerateObjects { a, _, _ in map[a.localIdentifier] = a }

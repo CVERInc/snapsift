@@ -1,7 +1,6 @@
 import Foundation
 import Photos
 import Vision
-import AppKit
 
 /// Scores a frame by its faces using Vision, on-device. Within a burst the best
 /// keeper is usually the frame where the most people are present with their eyes

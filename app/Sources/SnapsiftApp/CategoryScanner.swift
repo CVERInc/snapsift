@@ -1,7 +1,6 @@
 import Foundation
 import Photos
 import Vision
-import AppKit
 
 /// On-device semantic classification (Vision's VNClassifyImageRequest) used by
 /// the "Similar sets" pass to bucket the whole library by what's in each photo —

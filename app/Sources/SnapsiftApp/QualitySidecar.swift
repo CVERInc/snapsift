@@ -21,9 +21,16 @@ enum QualitySidecar {
         return id
     }
 
+    #if os(macOS)
     static let defaultLibraryPath =
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Pictures/Photos Library.photoslibrary").path
+    #else
+    // The Photos.sqlite sidecar is a macOS-only capability (Full Disk Access
+    // into the user's library bundle). The iOS sandbox can never read it —
+    // the app runs on the existing `qualityAvailable = false` degradation.
+    static let defaultLibraryPath = ""
+    #endif
 
     /// Load the enrichment map. Heavy (one row per asset) — call off the main
     /// actor. `shouldAbort` is polled periodically so a cancelled scan can bail
@@ -31,6 +38,7 @@ enum QualitySidecar {
     /// scan task's cancellation).
     static func load(libraryPath: String = defaultLibraryPath,
                      shouldAbort: @Sendable () -> Bool = { false }) -> [String: Enrichment] {
+        guard !libraryPath.isEmpty else { return [:] }
         let dbPath = "\(libraryPath)/database/Photos.sqlite"
         guard FileManager.default.fileExists(atPath: dbPath) else { return [:] }
 

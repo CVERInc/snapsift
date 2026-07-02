@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import Signet
 
@@ -98,3 +99,5 @@ let master = CVERAppIcon.compose(foreground: foreground, sheen: true)
 try CVERAppIcon.writePNG(master, to: assets.appendingPathComponent("AppIcon-1024.png"))
 try CVERAppIcon.writeICNS(master: master, to: assets.appendingPathComponent("AppIcon.icns"))
 print("wrote \(assets.path)/AppIcon-1024.png + AppIcon.icns")
+
+#endif   // os(macOS) — icon generation is a desktop build step

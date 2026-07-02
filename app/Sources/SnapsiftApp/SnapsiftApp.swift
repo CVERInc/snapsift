@@ -10,10 +10,17 @@ import Signet
 @main
 struct SnapsiftApp: App {
     var body: some Scene {
+        #if os(macOS)
         WindowGroup("snapsift") {
             ContentView()
                 .cverTheme(ReefTheme())
         }
-        .windowResizability(.contentSize)
+        .windowResizability(.contentSize)   // macOS-only modifier
+        #else
+        WindowGroup("snapsift") {
+            ContentView()
+                .cverTheme(ReefTheme())
+        }
+        #endif
     }
 }

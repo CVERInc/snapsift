@@ -1,7 +1,8 @@
 import Foundation
 import Photos
-import AppKit
 import CoreImage
+import ImageIO
+import UniformTypeIdentifiers
 import SnapsiftCore
 
 // MARK: - Pass 2b — Save rotation to Photos (reversible)
@@ -152,15 +153,21 @@ func saveRotation(asset: PHAsset, quarterTurns: Int) async throws {
         throw RotationSaveError.renderFailed
     }
 
-    // Step 5: Encode rotated CGImage to JPEG at 0.95 quality.
-    // HEIC output is not available in PHContentEditingOutput without additional
-    // AVFoundation setup. JPEG at 0.95 gives visually lossless results.
-    // The original HEIC/RAW is always preserved by Photos regardless.
-    let bitmapRep = NSBitmapImageRep(cgImage: rotatedCG)
-    guard let jpegData = bitmapRep.representation(using: .jpeg,
-                                                   properties: [.compressionFactor: 0.95]) else {
+    // Step 5: Encode rotated CGImage to JPEG at 0.95 quality via ImageIO —
+    // platform-neutral (no AppKit/UIKit). HEIC output is not available in
+    // PHContentEditingOutput without additional AVFoundation setup; JPEG at
+    // 0.95 gives visually lossless results and the original HEIC/RAW is
+    // always preserved by Photos regardless.
+    let jpegBuffer = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(jpegBuffer, UTType.jpeg.identifier as CFString, 1, nil) else {
         throw RotationSaveError.renderFailed
     }
+    CGImageDestinationAddImage(dest, rotatedCG,
+                               [kCGImageDestinationLossyCompressionQuality: 0.95] as CFDictionary)
+    guard CGImageDestinationFinalize(dest) else {
+        throw RotationSaveError.renderFailed
+    }
+    let jpegData = jpegBuffer as Data
 
     // Step 6: Build PHContentEditingOutput.
     let output = PHContentEditingOutput(contentEditingInput: editingInput)

@@ -7,14 +7,18 @@ import Foundation
 /// just substrings. If apfel is missing or Apple Intelligence is off, every
 /// caller falls back to plain substring matching; nothing breaks.
 enum Apfel {
-    /// Located apfel binary, if any.
+    /// Located apfel binary, if any. Subprocesses don't exist on iOS —
+    /// `url == nil` there routes every caller onto the substring fallback,
+    /// exactly like a Mac without apfel installed.
     static let url: URL? = {
+        #if os(macOS)
         let fm = FileManager.default
         for path in ["/opt/homebrew/bin/apfel", "/usr/local/bin/apfel",
                      (fm.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/apfel")).path]
         where fm.isExecutableFile(atPath: path) {
             return URL(fileURLWithPath: path)
         }
+        #endif
         return nil
     }()
 
@@ -60,6 +64,9 @@ enum Apfel {
     }
 
     private static func run(_ args: [String]) async -> String? {
+        #if !os(macOS)
+        return nil   // Process is unavailable on iOS; callers fall back
+        #else
         guard let url else { return nil }
         return await withCheckedContinuation { cont in
             let process = Process()
@@ -78,5 +85,6 @@ enum Apfel {
                 cont.resume(returning: String(data: data, encoding: .utf8))
             }
         }
+        #endif
     }
 }

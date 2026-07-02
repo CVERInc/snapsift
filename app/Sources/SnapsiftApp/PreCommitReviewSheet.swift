@@ -135,7 +135,7 @@ struct PreCommitReviewSheet: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
         }
-        .frame(minWidth: 560, maxWidth: 700)
+        .desktopSheetFrame(minWidth: 560, maxWidth: 700)
         .background(Color.reefGround)
         .preferredColorScheme(.dark)
     }

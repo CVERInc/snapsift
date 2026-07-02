@@ -1,7 +1,6 @@
 import Foundation
 import Photos
 import Vision
-import AppKit
 import SnapsiftCore
 
 /// On-device detection of the slice-1 protection / ranking flags for a Photo.
@@ -293,9 +292,9 @@ enum PhotoFlags {
     /// treated as unreadable.
     private final class ImageBox: @unchecked Sendable {
         private let lock = NSLock()
-        private var cont: CheckedContinuation<NSImage?, Never>?
-        func set(_ c: CheckedContinuation<NSImage?, Never>) { lock.lock(); cont = c; lock.unlock() }
-        func finish(_ img: NSImage?) {
+        private var cont: CheckedContinuation<PlatformImage?, Never>?
+        func set(_ c: CheckedContinuation<PlatformImage?, Never>) { lock.lock(); cont = c; lock.unlock() }
+        func finish(_ img: PlatformImage?) {
             lock.lock(); let c = cont; cont = nil; lock.unlock()
             c?.resume(returning: img)
         }
@@ -312,7 +311,7 @@ enum PhotoFlags {
         opts.deliveryMode = .opportunistic           // whatever is cached locally now
         opts.resizeMode = .fast
         let box = ImageBox()
-        let img: NSImage? = await withCheckedContinuation { cont in
+        let img: PlatformImage? = await withCheckedContinuation { cont in
             box.set(cont)
             manager.requestImage(for: asset, targetSize: CGSize(width: 512, height: 512),
                                  contentMode: .aspectFit, options: opts) { image, _ in
@@ -321,8 +320,7 @@ enum PhotoFlags {
             Task { try? await Task.sleep(nanoseconds: imageTimeoutNs); box.finish(nil) }
         }
         guard let img else { return nil }
-        var rect = CGRect(origin: .zero, size: img.size)
-        return img.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+        return img.cgImageForProcessing
     }
 
     private static func grayBuffer(_ asset: PHAsset, _ manager: PHCachingImageManager,

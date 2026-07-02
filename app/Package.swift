@@ -9,7 +9,9 @@ import PackageDescription
 // PhotoKit / Vision on top of Core in later phases.
 let package = Package(
     name: "snapsift",
-    platforms: [.macOS(.v14)],
+    // iOS declared for the future iPhone target (thin Xcode project consuming
+    // these same targets); SnapsiftIcon's body is macOS-fenced accordingly.
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "SnapsiftCore", targets: ["SnapsiftCore"]),
         .executable(name: "SnapsiftApp", targets: ["SnapsiftApp"]),

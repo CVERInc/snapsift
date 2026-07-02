@@ -7,7 +7,7 @@ import Signet
 /// demand). High-quality delivery means the continuation resumes exactly once.
 ///
 /// Pass 2a (FIX 1 — orientation): PHImageManager bakes the asset's EXIF
-/// orientation into the returned NSImage, so the bitmap is already UPRIGHT. The
+/// orientation into the returned PlatformImage, so the bitmap is already UPRIGHT. The
 /// old square-crop card (`.aspectFill` + `scaledToFill` + a square frame) hid the
 /// true shape and could make a portrait look mis-cropped; we now render TRUE
 /// aspect (`.fit`) inside the caller-sized frame and never crop. The `aspectFit`
@@ -32,7 +32,7 @@ struct AssetThumbnail: View {
     /// box is exactly covered with no letterbox.
     var fill: Bool = false
 
-    @State private var image: NSImage?
+    @State private var image: PlatformImage?
 
     /// Normalised quarter-turns 0…3.
     private var turns: Int { ((quarterTurns % 4) + 4) % 4 }
@@ -49,7 +49,7 @@ struct AssetThumbnail: View {
     var body: some View {
         ZStack {
             if let image {
-                Image(nsImage: image)
+                Image(platform: image)
                     .resizable()
                     .aspectRatio(contentMode: fill ? .fill : .fit)
                     // Lay the upright bitmap into the PRE-rotation (swapped) box…
@@ -78,7 +78,7 @@ struct AssetThumbnail: View {
         // orientation looks soft; aspectFit keeps the WHOLE upright frame.
         let edge = max(box.width, box.height) * 2
         let target = CGSize(width: edge, height: edge)
-        let result: NSImage? = await withCheckedContinuation { cont in
+        let result: PlatformImage? = await withCheckedContinuation { cont in
             manager.requestImage(for: asset, targetSize: target,
                                  contentMode: .aspectFit, options: opts) { img, _ in
                 cont.resume(returning: img)
@@ -104,7 +104,7 @@ struct BigPreview: View {
     var quarterTurns: Int = 0
     let onClose: () -> Void
 
-    @State private var image: NSImage?
+    @State private var image: PlatformImage?
     @State private var pct: Double = 0
     @State private var zoom: CGFloat = 1
     @State private var lastZoom: CGFloat = 1
@@ -133,7 +133,7 @@ struct BigPreview: View {
                     let avail = CGSize(width: max(1, geo.size.width - 48),
                                        height: max(1, geo.size.height - 48))
                     let fitBox = odd ? CGSize(width: avail.height, height: avail.width) : avail
-                    Image(nsImage: image)
+                    Image(platform: image)
                         .resizable()
                         .scaledToFit()
                         .frame(width: fitBox.width, height: fitBox.height)
@@ -189,7 +189,7 @@ struct BigPreview: View {
         opts.deliveryMode = .highQualityFormat         // single callback
         opts.resizeMode = .none
         opts.progressHandler = { p, _, _, _ in Task { @MainActor in self.pct = p } }
-        let result: NSImage? = await withCheckedContinuation { cont in
+        let result: PlatformImage? = await withCheckedContinuation { cont in
             manager.requestImage(for: asset, targetSize: PHImageManagerMaximumSize,
                                  contentMode: .aspectFit, options: opts) { img, _ in
                 cont.resume(returning: img)

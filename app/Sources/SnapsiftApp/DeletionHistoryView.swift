@@ -1,5 +1,5 @@
 import SwiftUI
-import AppKit
+import UniformTypeIdentifiers
 import SnapsiftCore
 
 // MARK: - History view
@@ -80,10 +80,14 @@ struct DeletionHistoryView: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
         }
-        .frame(minWidth: 520, minHeight: 360, maxHeight: 600)
+        .desktopSheetFrame(minWidth: 520, minHeight: 360, maxHeight: 600)
         .background(Color.reefGround)
         .preferredColorScheme(.dark)
         .onAppear { sessions = DeletionAuditLog.loadSessions() }
+        .fileExporter(isPresented: $exporting,
+                      document: PlainTextDocument(text: DeletionAuditLog.exportText(sessions: sessions)),
+                      contentType: .plainText,
+                      defaultFilename: t.historyExportFilename()) { _ in }
     }
 
     // MARK: - Session row
@@ -150,21 +154,27 @@ struct DeletionHistoryView: View {
 
     // MARK: - Export
 
+    /// Platform-neutral export: SwiftUI's fileExporter replaces NSSavePanel
+    /// (identical UX on macOS, and it just works on iOS).
     private func exportLog() {
         exporting = true
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(t.historyExportFilename()).txt"
-        panel.allowedContentTypes = [.plainText]
-        panel.message = t.historyTitle()
-        panel.beginSheetModal(for: NSApp.keyWindow ?? NSWindow()) { response in
-            defer { exporting = false }
-            guard response == .OK, let url = panel.url else { return }
-            let text = DeletionAuditLog.exportText(sessions: sessions)
-            try? text.write(to: url, atomically: true, encoding: .utf8)
-        }
     }
 
     // MARK: - Helpers
+
+    /// Minimal FileDocument wrapper so the audit log exports through SwiftUI's
+    /// platform-neutral fileExporter.
+    struct PlainTextDocument: FileDocument {
+        static var readableContentTypes: [UTType] { [.plainText] }
+        var text: String
+        init(text: String) { self.text = text }
+        init(configuration: ReadConfiguration) throws {
+            text = String(data: configuration.file.regularFileContents ?? Data(), encoding: .utf8) ?? ""
+        }
+        func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+            FileWrapper(regularFileWithContents: Data(text.utf8))
+        }
+    }
 
     private let isoFmt = ISO8601DateFormatter()
     private func isoDate(_ ts: String) -> String {

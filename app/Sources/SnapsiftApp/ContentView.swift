@@ -64,7 +64,7 @@ struct ContentView: View {
                 gate(message: t.privacyPitch(), button: t.gateRequestButton())
             }
         }
-        .frame(minWidth: 820, minHeight: 560)
+        .desktopMinimumFrame()   // macOS-only 820×560 floor; iPhone sizes itself
         .background(Color.reefGround)
         .preferredColorScheme(.dark)
         .tint(.reefTeal)
@@ -146,14 +146,21 @@ struct ContentView: View {
     /// URL scheme is the documented macOS deep-link; NSWorkspace is the correct
     /// macOS-native API (no UIKit / no iOS-only PHPhotoLibrary picker).
     private func openPhotosPrivacySettings() {
+        #if os(macOS)
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Photos") else { return }
         NSWorkspace.shared.open(url)
+        #else
+        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+        #endif
     }
 
     /// Deep-link to the Full Disk Access pane (size/quality sidecar needs it).
+    /// macOS-only concept — the sidecar itself doesn't exist on iOS.
     private func openFullDiskAccessSettings() {
+        #if os(macOS)
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
         NSWorkspace.shared.open(url)
+        #endif
     }
 
     /// gate() variant that also accepts an action closure for the button.
@@ -357,6 +364,20 @@ struct ContentView: View {
         .contentShape(Rectangle())   // swallow all mouse input underneath
     }
 
+    /// Touch platforms open the loupe from a thumbnail tap; on the desktop this
+    /// is nil so clicks keep their promote semantics.
+    private var touchOpenLoupe: ((String) -> Void)? {
+        #if os(iOS)
+        { uuid in
+            focusedFrame = uuid
+            previewID = uuid
+            loupeOpen = true
+        }
+        #else
+        nil
+        #endif
+    }
+
     private func toggleHelp() {
         withAnimation(.easeOut(duration: 0.18)) { showHelp.toggle() }
     }
@@ -401,6 +422,7 @@ struct ContentView: View {
     /// monitor never swallows events; it only detects the dead state and
     /// re-arms the sidebar focus, so the very next keystroke lands normally.
     private func installFocusRescue() {
+        #if os(macOS)
         guard keyMonitor == nil else { return }
         // Also watch mouse-downs so a row click re-arms focus by itself and
         // the first keystroke after it is not sacrificed to the rescue.
@@ -411,12 +433,11 @@ struct ContentView: View {
                     sidebarFocused = true
                 }
             }
-            // Esc never reaches .onKeyPress, and .onExitCommand doesn't fire
-            // on the focusable grid either (both verified live) — macOS eats
-            // it as cancelOperation before SwiftUI's key path. Handle it here,
-            // but never while a sheet or alert owns the key window.
             return event
         }
+        #endif
+        // iOS: no NSEvent, and the touch/hardware-keyboard focus model doesn't
+        // exhibit the dead-window-first-responder failure this rescues.
     }
 
     private var sidebar: some View {
@@ -749,7 +770,8 @@ struct ContentView: View {
             GroupReview(group: g, model: model, t: t,
                         focusedFrame: gridFocused ? focusedFrame : nil,
                         isExactDupeGroup: model.exactDupeGroupIDs.contains(g.id),
-                        protectedHintFrame: protectedHintFrame)
+                        protectedHintFrame: protectedHintFrame,
+                        onOpenLoupe: touchOpenLoupe)
                 .focusable()
                 .focused($gridFocused)
                 .onKeyPress { handleGridKey($0) }
@@ -1020,6 +1042,38 @@ struct ContentView: View {
     // MARK: toolbar
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        #if os(iOS)
+        // iPhone nav bars fit ~3 items — the six desktop actions collapse into
+        // one menu. Every action stays reachable; hardware keyboards still get
+        // the ⌘-shortcuts via the shared handlers.
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Button { model.startScan(.burst, t) } label: {
+                    Label(t.scan(), systemImage: "sparkle.magnifyingglass")
+                }.disabled(model.isScanning)
+                Button { model.startScan(.lookAlikes, t) } label: {
+                    Label(t.lookAlikes(), systemImage: "rectangle.on.rectangle")
+                }.disabled(model.isScanning)
+                Button { model.startScan(.similarSets, t) } label: {
+                    Label(t.similarSets(), systemImage: "square.grid.3x3.topleft.filled")
+                }.disabled(model.isScanning)
+                Divider()
+                Button { Task { await model.refineWithFaces(t) } } label: {
+                    Label(t.faces(model.facesApplied), systemImage: "face.smiling")
+                }.disabled(model.groups.isEmpty || model.refiningFaces || model.isScanning)
+                Button { Task { await runWriteAlbums() } } label: {
+                    Label(t.sortIntoAlbums(), systemImage: "rectangle.stack.badge.plus")
+                }.disabled(model.groups.isEmpty || model.isWritingAlbums || writingAlbums || model.isScanning)
+                Divider()
+                Button { showHistorySheet = true } label: {
+                    Label(t.historyTitle(), systemImage: "clock.arrow.circlepath")
+                }
+            } label: {
+                Image(systemName: "sparkle.magnifyingglass")
+            }
+        }
+        ToolbarItem { languageMenu }
+        #else
         ToolbarItem(placement: .primaryAction) {
             Button { model.startScan(.burst, t) } label: {
                 Label(t.scan(), systemImage: "sparkle.magnifyingglass")
@@ -1085,6 +1139,7 @@ struct ContentView: View {
             .keyboardShortcut("?", modifiers: .command)
         }
         ToolbarItem { languageMenu }
+        #endif
     }
 
     private func runWriteAlbums() async {
@@ -1175,6 +1230,9 @@ struct GroupReview: View {
     var isExactDupeGroup: Bool = false
     /// Frame currently showing the "protected — ⇧X to force" hint (from keyboard handler).
     var protectedHintFrame: String? = nil
+    /// Touch platforms: tapping a thumbnail opens the loupe here instead of
+    /// promoting (the desktop click behaviour) — set by ContentView on iOS.
+    var onOpenLoupe: ((String) -> Void)? = nil
 
     // FIX C: confirmation alert state for including protected frames in deletion.
     @State private var showDeleteProtectedAlert = false
@@ -1431,7 +1489,13 @@ struct GroupReview: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture { model.promote(group: group.id, to: p.uuid) }
+        .onTapGesture {
+            // Desktop click = promote (mouse users have hover context and the
+            // keeper-why tooltip). Touch tap = open the loupe — inspect first,
+            // decide with swipes there; promotion happens inside the loupe.
+            if let onOpenLoupe { onOpenLoupe(p.uuid) }
+            else { model.promote(group: group.id, to: p.uuid) }
+        }
         .help(
             p.isProtected && isExactDupeGroup ? t.tipExactDupeProtected()
             : p.isProtected ? t.tipProtectedFrame()
@@ -1638,6 +1702,23 @@ struct LoupeOverlay: View {
                 Spacer()
             }
         }
+        #if os(iOS)
+        // Touch gestures mirror the keyboard verbs: swipe left/right = ←/→
+        // (prev/next), swipe up = X (toggle reject), swipe down = ⏎ (keep +
+        // set keeper). Protected frames stay blocked exactly like plain X.
+        .highPriorityGesture(
+            DragGesture(minimumDistance: 40).onEnded { value in
+                let dx = value.translation.width, dy = value.translation.height
+                if abs(dx) > abs(dy) {
+                    dx > 0 ? onPrev() : onNext()
+                } else if dy < 0 {
+                    model.toggleReject(group: group.id, frameID: currentID)
+                } else {
+                    model.promote(group: group.id, to: currentID)
+                }
+            }
+        )
+        #endif
     }
 
     /// "<i> / <n> · <filename> · <status>" — always legible.

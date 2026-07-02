@@ -1,7 +1,6 @@
 import Foundation
 import Photos
 @preconcurrency import Vision
-import AppKit
 
 /// Shared guards for the auxiliary Vision passes (FaceScorer, CategoryScanner),
 /// mirroring the two hard-won safety rules already encoded in LookAlikeScanner:
@@ -17,9 +16,9 @@ enum VisionGuards {
     /// One-shot continuation box: image callback or timeout, first wins.
     private final class ImageBox: @unchecked Sendable {
         private let lock = NSLock()
-        private var cont: CheckedContinuation<NSImage?, Never>?
-        func set(_ c: CheckedContinuation<NSImage?, Never>) { lock.lock(); cont = c; lock.unlock() }
-        func finish(_ img: NSImage?) {
+        private var cont: CheckedContinuation<PlatformImage?, Never>?
+        func set(_ c: CheckedContinuation<PlatformImage?, Never>) { lock.lock(); cont = c; lock.unlock() }
+        func finish(_ img: PlatformImage?) {
             lock.lock(); let c = cont; cont = nil; lock.unlock()
             c?.resume(returning: img)
         }
@@ -41,7 +40,7 @@ enum VisionGuards {
         opts.deliveryMode = .highQualityFormat
         opts.resizeMode = resize
         let box = ImageBox()
-        let img: NSImage? = await withCheckedContinuation { cont in
+        let img: PlatformImage? = await withCheckedContinuation { cont in
             box.set(cont)
             manager.requestImage(for: asset, targetSize: target,
                                  contentMode: mode, options: opts) { image, _ in
@@ -50,8 +49,7 @@ enum VisionGuards {
             Task { try? await Task.sleep(nanoseconds: timeoutNs); box.finish(nil) }
         }
         guard let img else { return nil }
-        var rect = CGRect(origin: .zero, size: img.size)
-        return img.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+        return img.cgImageForProcessing
     }
 
     /// Run Vision requests off the cooperative pool. Returns false on error.

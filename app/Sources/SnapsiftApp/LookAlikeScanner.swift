@@ -1,7 +1,6 @@
 import Foundation
 import Photos
 import Vision
-import AppKit
 import SnapsiftCore
 
 /// L3 cross-time pass: find the same photo saved on different days (re-downloaded,
@@ -302,9 +301,9 @@ enum LookAlikeScanner {
     /// move on. Leak-free — the continuation always resumes via the timer.
     private final class ImageBox: @unchecked Sendable {
         private let lock = NSLock()
-        private var cont: CheckedContinuation<NSImage?, Never>?
-        func set(_ c: CheckedContinuation<NSImage?, Never>) { lock.lock(); cont = c; lock.unlock() }
-        func finish(_ img: NSImage?) {
+        private var cont: CheckedContinuation<PlatformImage?, Never>?
+        func set(_ c: CheckedContinuation<PlatformImage?, Never>) { lock.lock(); cont = c; lock.unlock() }
+        func finish(_ img: PlatformImage?) {
             lock.lock(); let c = cont; cont = nil; lock.unlock()
             c?.resume(returning: img)
         }
@@ -330,7 +329,7 @@ enum LookAlikeScanner {
         opts.resizeMode = .fast
 
         let box = ImageBox()
-        let img: NSImage? = await withCheckedContinuation { cont in
+        let img: PlatformImage? = await withCheckedContinuation { cont in
             box.set(cont)
             manager.requestImage(for: asset, targetSize: target,
                                  contentMode: mode, options: opts) { image, _ in
@@ -339,8 +338,7 @@ enum LookAlikeScanner {
             Task { try? await Task.sleep(nanoseconds: imageTimeoutNs); box.finish(nil) }
         }
         guard let img else { return nil }
-        var rect = CGRect(origin: .zero, size: img.size)
-        return img.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+        return img.cgImageForProcessing
     }
 
     /// Flat 9×8 grayscale buffer for Core's dHash.
