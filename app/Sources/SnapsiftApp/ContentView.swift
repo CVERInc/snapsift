@@ -396,13 +396,19 @@ struct ContentView: View {
     /// re-arms the sidebar focus, so the very next keystroke lands normally.
     private func installFocusRescue() {
         guard keyMonitor == nil else { return }
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        // Also watch mouse-downs so a row click re-arms focus by itself and
+        // the first keystroke after it is not sacrificed to the rescue.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown]) { event in
             let fr = NSApp.keyWindow?.firstResponder
             if fr == nil || fr is NSWindow {
                 if !model.groups.isEmpty || !model.categories.isEmpty {
                     sidebarFocused = true
                 }
             }
+            // Esc never reaches .onKeyPress, and .onExitCommand doesn't fire
+            // on the focusable grid either (both verified live) — macOS eats
+            // it as cancelOperation before SwiftUI's key path. Handle it here,
+            // but never while a sheet or alert owns the key window.
             return event
         }
     }
@@ -731,6 +737,13 @@ struct ContentView: View {
                 .focusable()
                 .focused($gridFocused)
                 .onKeyPress { handleGridKey($0) }
+                // Belt-and-braces Esc: macOS may deliver Esc as the cancel
+                // COMMAND rather than a key press depending on input source,
+                // so route the exit command explicitly alongside onKeyPress.
+                .onExitCommand {
+                    if loupeOpen { loupeOpen = false; previewID = nil }
+                    else { sidebarFocused = true }
+                }
         } else if model.groups.isEmpty {
             // Focusable so the bare "?" cheat-sheet key works on the first-run
             // screen too (the sidebar isn't focusable until groups exist). The
