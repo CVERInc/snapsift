@@ -51,6 +51,10 @@ struct ContentView: View {
     @State private var staleAlertContinuation: CheckedContinuation<Bool, Never>?
     // Dead-focus rescue (see installFocusRescue): local keyDown monitor token.
     @State private var keyMonitor: Any?
+    // Rescan guard: a new scan discards every pending mark, so when the user
+    // has un-committed decisions the requested kind parks here while a
+    // confirmation dialog asks first.
+    @State private var confirmScanKind: LibraryModel.ScanKind?
 
     private var language: Language { Language(rawValue: langRaw) ?? .en }
     private var t: L10n { L10n(language) }
@@ -337,6 +341,32 @@ struct ContentView: View {
             if let data = staleAlertData {
                 Text(t.staleAssetAlertBody(stale: data.staleCount, found: data.foundCount))
             }
+        }
+        // Rescan confirmation: a scan wipes every pending mark and its
+        // completion overwrites the single-slot snapshot — with un-committed
+        // decisions on screen that is a destructive action and gets the same
+        // ask-first treatment as the delete path.
+        .confirmationDialog(t.rescanDiscardTitle(), isPresented: Binding(
+            get: { confirmScanKind != nil },
+            set: { if !$0 { confirmScanKind = nil } }
+        ), titleVisibility: .visible) {
+            Button(t.rescanDiscardConfirm(), role: .destructive) {
+                if let kind = confirmScanKind { model.startScan(kind, t) }
+                confirmScanKind = nil
+            }
+            Button(t.rescanDiscardCancel(), role: .cancel) { confirmScanKind = nil }
+        } message: {
+            Text(t.rescanDiscardBody(model.userMarkCount))
+        }
+    }
+
+    /// Every scan trigger routes through here: with pending user marks the
+    /// scan waits behind a confirmation, otherwise it starts immediately.
+    private func requestScan(_ kind: LibraryModel.ScanKind) {
+        if model.userMarkCount > 0 {
+            confirmScanKind = kind
+        } else {
+            model.startScan(kind, t)
         }
     }
 
@@ -637,6 +667,13 @@ struct ContentView: View {
         if isShift {
             // ⇧X path: force-reject (may target a protected frame).
             if let p = g.photos.first(where: { $0.uuid == f }), p.isProtected {
+                // Already force-rejected → ⇧X toggles it back out. Un-marking
+                // is the safe direction, so no confirmation (the destructive
+                // dialog re-confirming a mark it's about to keep was a dead end).
+                if g.rejected.contains(f) {
+                    model.toggleReject(group: g.id, frameID: f)
+                    return
+                }
                 forceRejectTarget = (groupID: g.id, frameID: f)
                 showForceRejectAlert = true
             } else {
@@ -747,19 +784,9 @@ struct ContentView: View {
     private var emptyState: some View {
         VStack(spacing: 10) {
             if model.isScanning || model.refiningFaces {
-                if let frac = model.progressFraction {
-                    ProgressView(value: frac).tint(.reefMint).frame(maxWidth: 180)
-                } else {
-                    ProgressView().tint(.reefMint)
-                }
-                Text(model.progress).font(.caption).foregroundStyle(Color.reefTextDim)
-                    .multilineTextAlignment(.center).padding(.horizontal)
-                if model.isScanning {
-                    Button(t.cancelScanButton()) { model.cancelScan() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .padding(.top, 4)
-                }
+                // Stay quiet: the detail pane's scanHero is the single source
+                // of scan progress. Two simultaneous spinners read as noise.
+                EmptyView()
             } else {
                 Image(systemName: model.hasScanned ? "checkmark.circle" : "rectangle.stack.badge.minus")
                     .font(.system(size: 34)).foregroundStyle(Color.reefBorder)
@@ -819,14 +846,52 @@ struct ContentView: View {
         .background(Color.reefGround)
     }
 
+    /// The single, authoritative scan-progress display. Lives in the detail
+    /// pane; every other surface (sidebar empty state, status bar) stays quiet
+    /// while scanning so the user never sees two competing spinners.
+    private var scanHero: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "sparkle.magnifyingglass")
+                .font(.system(size: 40))
+                .foregroundStyle(Color.reefMint)
+                .symbolEffect(.pulse, options: .repeating)
+            if let frac = model.progressFraction {
+                ProgressView(value: frac)
+                    .tint(.reefMint)
+                    .frame(maxWidth: 320)
+                Text("\(Int((frac * 100).rounded()))%")
+                    .font(.title3.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.white)
+                    .contentTransition(.numericText())
+                    .animation(.default, value: Int((frac * 100).rounded()))
+            } else {
+                ProgressView()
+                    .tint(.reefMint)
+            }
+            Text(model.progress)
+                .font(.callout)
+                .foregroundStyle(Color.reefTextDim)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+            if model.isScanning {
+                Button(t.cancelScanButton()) { model.cancelScan() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .keyboardShortcut(".", modifiers: .command)
+                    .padding(.top, 6)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
+    }
+
     /// First-run call to action in the big detail pane — gives a brand-new user
     /// an obvious place to start instead of hunting for a toolbar icon.
     private var onboarding: some View {
       ScrollView {
         VStack(spacing: 16) {
             if model.isScanning || model.refiningFaces {
-                ProgressView().controlSize(.large).tint(.reefMint)
-                Text(model.progress).foregroundStyle(Color.reefTextDim)
+                scanHero
             } else {
                 Image(systemName: "rectangle.stack.badge.minus")
                     .font(.system(size: 52)).foregroundStyle(Color.reefMint)
@@ -845,15 +910,15 @@ struct ContentView: View {
                 LazyVGrid(columns: onboardColumns, spacing: 14) {
                     onboardCard(title: t.scan(), icon: "sparkle.magnifyingglass",
                                 caption: t.tipScan(), prominent: true) {
-                        model.startScan(.burst, t)
+                        requestScan(.burst)
                     }
                     onboardCard(title: t.lookAlikes(), icon: "rectangle.on.rectangle",
                                 caption: t.tipLookAlikes(), prominent: false) {
-                        model.startScan(.lookAlikes, t)
+                        requestScan(.lookAlikes)
                     }
                     onboardCard(title: t.similarSets(), icon: "square.grid.3x3.topleft.filled",
                                 caption: t.tipSimilarSets(), prominent: false) {
-                        model.startScan(.similarSets, t)
+                        requestScan(.similarSets)
                     }
                 }
                 .frame(maxWidth: 720)
@@ -1030,7 +1095,9 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.reefRed)
-                .disabled(deleting)
+                // A commit must never race a pipeline that is rebuilding
+                // `groups` — same gate as every other toolbar action.
+                .disabled(deleting || model.isScanning || model.refiningFaces)
                 .keyboardShortcut(.delete, modifiers: .command)
             }
         }
@@ -1060,15 +1127,15 @@ struct ContentView: View {
         // the ⌘-shortcuts via the shared handlers.
         ToolbarItem(placement: .primaryAction) {
             Menu {
-                Button { model.startScan(.burst, t) } label: {
+                Button { requestScan(.burst) } label: {
                     Label(t.scan(), systemImage: "sparkle.magnifyingglass")
-                }.disabled(model.isScanning)
-                Button { model.startScan(.lookAlikes, t) } label: {
+                }.disabled(model.isScanning || model.refiningFaces)
+                Button { requestScan(.lookAlikes) } label: {
                     Label(t.lookAlikes(), systemImage: "rectangle.on.rectangle")
-                }.disabled(model.isScanning)
-                Button { model.startScan(.similarSets, t) } label: {
+                }.disabled(model.isScanning || model.refiningFaces)
+                Button { requestScan(.similarSets) } label: {
                     Label(t.similarSets(), systemImage: "square.grid.3x3.topleft.filled")
-                }.disabled(model.isScanning)
+                }.disabled(model.isScanning || model.refiningFaces)
                 Divider()
                 Button { Task { await model.refineWithFaces(t) } } label: {
                     Label(t.faces(model.facesApplied), systemImage: "face.smiling")
@@ -1087,27 +1154,27 @@ struct ContentView: View {
         ToolbarItem { languageMenu }
         #else
         ToolbarItem(placement: .primaryAction) {
-            Button { model.startScan(.burst, t) } label: {
+            Button { requestScan(.burst) } label: {
                 Label(t.scan(), systemImage: "sparkle.magnifyingglass")
             }
             .help(t.tipScan())
-            .disabled(model.isScanning)
+            .disabled(model.isScanning || model.refiningFaces)
             .keyboardShortcut("1", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
-            Button { model.startScan(.lookAlikes, t) } label: {
+            Button { requestScan(.lookAlikes) } label: {
                 Label(t.lookAlikes(), systemImage: "rectangle.on.rectangle")
             }
             .help(t.tipLookAlikes())
-            .disabled(model.isScanning)
+            .disabled(model.isScanning || model.refiningFaces)
             .keyboardShortcut("2", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
-            Button { model.startScan(.similarSets, t) } label: {
+            Button { requestScan(.similarSets) } label: {
                 Label(t.similarSets(), systemImage: "square.grid.3x3.topleft.filled")
             }
             .help(t.tipSimilarSets())
-            .disabled(model.isScanning)
+            .disabled(model.isScanning || model.refiningFaces)
             .keyboardShortcut("3", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
@@ -1134,7 +1201,7 @@ struct ContentView: View {
                 Label(t.deleteN(model.totalDeletions), systemImage: "trash")
             }
             .tint(.reefRed)
-            .disabled(model.totalDeletions == 0 || deleting)
+            .disabled(model.totalDeletions == 0 || deleting || model.isScanning || model.refiningFaces)
         }
         // Feature 4: history toolbar button
         ToolbarItem {
@@ -1168,7 +1235,10 @@ struct ContentView: View {
     /// Step 1: build the pre-commit data and show the review sheet.
     /// The actual PHPhotoLibrary delete only happens after the user confirms.
     private func runDelete() async {
-        guard model.totalDeletions > 0 else { return }
+        // The .disabled gates above cover the buttons; this covers the ⌘⌫
+        // shortcut and any future caller.
+        guard model.totalDeletions > 0, !deleting,
+              !model.isScanning, !model.refiningFaces else { return }
         // Build PreCommitGroup snapshots from current group state.
         let pendingGroups = model.groups.compactMap { g -> PreCommitGroup? in
             let toRemove = g.photos.filter { g.isDelete($0) }
@@ -1197,6 +1267,11 @@ struct ContentView: View {
 
     /// Step 2: the actual delete — called only after the user confirmed the sheet.
     private func performDelete() async {
+        // Re-entry guard: the sheet's ⌘⏎ can be delivered twice before its
+        // teardown lands, and a doubled commit would book every deletion twice
+        // in the audit log. Main-actor tasks run FIFO, so the first task's
+        // `deleting = true` always precedes the second task's check.
+        guard !deleting else { return }
         deleting = true
         defer { deleting = false }
         do {
@@ -1277,10 +1352,13 @@ struct GroupReview: View {
                             .help(t.tipAppleRanked())
                     }
                     Spacer()
-                    // FIX C: "Include protected" toggle — only shown when the group
-                    // has protected frames AND is armed (deleteAll). Hidden otherwise
-                    // so it doesn't clutter groups that have no protected content.
-                    if group.deleteAll && group.protectedCount > 0 {
+                    // FIX C: "Include protected" toggle — shown when the group has
+                    // protected frames AND is armed (deleteAll), and ALWAYS while
+                    // the override is actually in effect: un-rejecting one ordinary
+                    // frame drops deleteAll, and the escape hatch must not vanish
+                    // while protected frames are still marked for deletion.
+                    if (group.deleteAll && group.protectedCount > 0)
+                        || (group.includeProtected && group.protectedDeletionCount > 0) {
                         if group.includeProtected {
                             // Toggling OFF clears the override immediately — no confirm needed.
                             Button {

@@ -170,8 +170,15 @@ final class LibraryModel: ObservableObject {
     private var snapshotSaveTask: Task<Void, Never>?
 
     /// Launch a scan as a cancellable task. UI entry point for all three kinds.
+    /// A running face-refine mutates keepers concurrently, so the two pipelines
+    /// are mutually exclusive here (and again in `refineWithFaces`).
     func startScan(_ kind: ScanKind, _ t: L10n) {
-        guard !isScanning else { return }
+        guard !isScanning, !refiningFaces else { return }
+        // Set synchronously — the scan method body runs in a separately-enqueued
+        // task, and a guard that only trips once the body executes lets a second
+        // startScan in the same runloop turn clobber scanTask/abortFlag (Cancel
+        // would then cancel the wrong task).
+        isScanning = true
         // A debounced decision-save must never fire after the scan wipes
         // `groups` — it would atomically replace the snapshot (thousands of
         // review decisions) with an empty one.
@@ -336,6 +343,13 @@ final class LibraryModel: ObservableObject {
 
     var totalDeletions: Int { groups.reduce(0) { $0 + $1.deletionIDs.count } }
 
+    /// Marks the USER made (rejections minus app-seeded ones). A rescan
+    /// re-derives auto-seeds but can never reconstruct these — so this is the
+    /// count the rescan confirmation warns about.
+    var userMarkCount: Int {
+        groups.reduce(0) { $0 + $1.rejected.subtracting($1.autoSeeded).count }
+    }
+
     /// Confident, near-identical bursts (pre-marked) vs groups whose frames vary
     /// enough that the user should decide (nothing pre-marked).
     var confidentGroups: [ReviewGroup] { groups.filter(\.confidentDupe) }
@@ -363,16 +377,7 @@ final class LibraryModel: ObservableObject {
     }
 
     func scan(_ t: L10n) async {
-        guard !isScanning else { return }
-        isScanning = true
         progress = t.progFetching()
-        await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
-        groups = []
-        categories = []
-        assetsByID = [:]
-        facesApplied = false
-        displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
-        exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
         defer { isScanning = false; progress = ""; progressFraction = nil }
 
         let opts = PHFetchOptions()
@@ -383,13 +388,23 @@ final class LibraryModel: ObservableObject {
         }
         // Scope to the chosen source (whole library or a single album). If the
         // album can no longer be resolved (deleted since the picker showed it),
-        // bail early rather than silently falling back to the whole library.
+        // bail early rather than silently falling back to the whole library —
+        // and BEFORE the state wipe below, so a scan that never ran leaves the
+        // previous session's review state untouched (same stance as cancel).
         guard let result = fetchAssets(source: scanSource, options: opts) else {
             // The defer wipes `progress` on return, so the album-gone message must
             // travel via the one-shot notice or the user never sees why nothing ran.
             scanNotice = t.progAlbumGone()
             return
         }
+
+        await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
+        groups = []
+        categories = []
+        assetsByID = [:]
+        facesApplied = false
+        displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
+        exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
 
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)
@@ -511,12 +526,17 @@ final class LibraryModel: ObservableObject {
             // duplicate pass below (perceptual bar + byte verification) may seed.
             built.append(g)
         }
-        groups = built
 
-        // Exact-duplicate pass: the ONLY source of pre-marked deletions.
-        await detectExactDuplicates(t, fracBase: 0.9, fracSpan: 0.1)
-        await seedExactRejections()
+        // Exact-duplicate pass: the ONLY source of pre-marked deletions. Runs
+        // on the local array — `groups` is published exactly once, fully
+        // seeded, so the review UI can never interleave with the seeder (a
+        // mid-seed user decision being overridden, or a mid-seed delete
+        // shifting indices under the loop).
+        let exact = await detectExactDuplicates(in: built, t, fracBase: 0.9, fracSpan: 0.1)
+        built = await seedExactRejections(in: built, exact: exact)
         if bailIfCancelled(t) { return }
+        groups = built
+        exactDupeGroupIDs = exact
 
         progressFraction = 1.0
         hasScanned = true
@@ -618,15 +638,7 @@ final class LibraryModel: ObservableObject {
     /// L3 cross-time pass: dHash-candidate + neural feature-print confirmation
     /// over the chosen source. Heavier than the burst scan — shows progress.
     func scanLookAlikes(_ t: L10n) async {
-        guard !isScanning else { return }
-        isScanning = true
         progress = t.progFetching()
-        await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
-        groups = []
-        categories = []
-        facesApplied = false
-        displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
-        exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
         defer { isScanning = false; progress = ""; progressFraction = nil }
 
         let opts = PHFetchOptions()
@@ -634,12 +646,22 @@ final class LibraryModel: ObservableObject {
         if !includeVideo {
             opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         }
+        // Bail BEFORE the state wipe (see scan()) — a scan that never ran must
+        // leave the previous session's review state untouched.
         guard let result = fetchAssets(source: scanSource, options: opts) else {
             // The defer wipes `progress` on return, so the album-gone message must
             // travel via the one-shot notice or the user never sees why nothing ran.
             scanNotice = t.progAlbumGone()
             return
         }
+
+        await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
+        groups = []
+        categories = []
+        facesApplied = false
+        displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
+        exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
+
         var assets: [PHAsset] = []
         var map: [String: PHAsset] = [:]
         assets.reserveCapacity(result.count)
@@ -688,15 +710,18 @@ final class LibraryModel: ObservableObject {
             if total > 0 { self.progressFraction = 0.7 + 0.15 * Double(done) / Double(total) }
         }
         if bailIfCancelled(t) { return }
-        groups = enriched.map { photos in
+        var built = enriched.map { photos in
             // Look-alike groups are not auto-pre-marked (user decides).
             ReviewGroup(photos: photos, keeperID: keeper(photos).uuid)
         }
 
         // Exact-duplicate pass: the ONLY source of pre-marked deletions.
-        await detectExactDuplicates(t, fracBase: 0.85, fracSpan: 0.15)
-        await seedExactRejections()
+        // Local array, single publish — same reasoning as scan().
+        let exact = await detectExactDuplicates(in: built, t, fracBase: 0.85, fracSpan: 0.15)
+        built = await seedExactRejections(in: built, exact: exact)
         if bailIfCancelled(t) { return }
+        groups = built
+        exactDupeGroupIDs = exact
 
         progressFraction = 1.0
         hasScanned = true
@@ -710,16 +735,7 @@ final class LibraryModel: ObservableObject {
     /// each set from its Vision content tags (prettified by apfel if available).
     /// No deletion — this is for browsing/curation.
     func scanSimilarSets(_ t: L10n) async {
-        guard !isScanning else { return }
-        isScanning = true
         progress = t.progFetching()
-        await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
-        groups = []
-        categories = []
-        assetsByID = [:]
-        facesApplied = false
-        displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
-        exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
         defer { isScanning = false; progress = ""; progressFraction = nil }
 
         let opts = PHFetchOptions()
@@ -727,12 +743,23 @@ final class LibraryModel: ObservableObject {
         if !includeVideo {
             opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         }
+        // Bail BEFORE the state wipe (see scan()) — a scan that never ran must
+        // leave the previous session's review state untouched.
         guard let result = fetchAssets(source: scanSource, options: opts) else {
             // The defer wipes `progress` on return, so the album-gone message must
             // travel via the one-shot notice or the user never sees why nothing ran.
             scanNotice = t.progAlbumGone()
             return
         }
+
+        await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
+        groups = []
+        categories = []
+        assetsByID = [:]
+        facesApplied = false
+        displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
+        exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
+
         var assets: [PHAsset] = []
         var map: [String: PHAsset] = [:]
         assets.reserveCapacity(result.count)
@@ -872,17 +899,25 @@ final class LibraryModel: ObservableObject {
     }
 
     /// Toggle reject on a single frame. `X` / `⌫` key.
-    /// Protected frames: plain toggle is a NO-OP (returns false, caller shows hint).
+    /// Protected frames: MARKING is a NO-OP (returns false, caller shows hint) —
+    /// only the ⇧X/`forceReject` informed-consent path may mark them. UN-marking
+    /// is the safe direction and is always allowed, protected or not; a
+    /// force-included frame must never be trapped in the delete bucket.
     /// Returns true if the toggle happened, false if blocked (protected frame).
     @discardableResult
     func toggleReject(group groupID: ReviewGroup.ID, frameID: String) -> Bool {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return false }
         guard let p = groups[i].photos.first(where: { $0.uuid == frameID }) else { return false }
-        if p.isProtected { return false }   // blocked — caller shows hint
         if groups[i].rejected.contains(frameID) {
             groups[i].rejected.remove(frameID)
             groups[i].autoSeeded.remove(frameID)   // a later re-reject is the user's call
+            // The group-level override must not outlive its last protected
+            // rejection — a lingering flag would silently re-arm the next ⇧X.
+            if p.isProtected && groups[i].protectedDeletionCount == 0 {
+                groups[i].includeProtected = false
+            }
         } else {
+            if p.isProtected { return false }   // blocked — caller shows hint
             groups[i].rejected.insert(frameID)
             // If rejecting the current keeper, promote to next best.
             if frameID == groups[i].keeperID {
@@ -957,7 +992,10 @@ final class LibraryModel: ObservableObject {
     /// re-pick each keeper to favour the frame where people look their best.
     /// Bounded to cluster members; favorites stay protected.
     func refineWithFaces(_ t: L10n) async {
-        guard !refiningFaces else { return }
+        // Mutually exclusive with scans: a refine that completes over a newer
+        // scan's groups would re-pick keepers from stale face scores and stomp
+        // the scan's progress text.
+        guard !refiningFaces, !isScanning else { return }
         refiningFaces = true
         defer { refiningFaces = false }
 
@@ -989,9 +1027,10 @@ final class LibraryModel: ObservableObject {
 
     // MARK: - Exact-duplicate detection (Part B)
 
-    /// Run the exact-duplicate predicate over the current groups to identify
+    /// Run the exact-duplicate predicate over the just-built groups to identify
     /// which ones are genuine identical copies (not just bursts). Runs
-    /// automatically at the end of `scan()` and `scanLookAlikes()`.
+    /// automatically at the end of `scan()` and `scanLookAlikes()`, on the
+    /// local pipeline array — before anything is published to the UI.
     ///
     /// A group qualifies as exact-duplicate when:
     ///   - No member is a video (a single poster frame is not an identity test), AND
@@ -1007,22 +1046,24 @@ final class LibraryModel: ObservableObject {
     ///     that aren't local (iCloud-evicted) are never downloaded for this —
     ///     unverifiable means NOT exact.
     ///
-    /// The result is stored in `exactDupeGroupIDs` for the UI and AlbumWriter.
-    func detectExactDuplicates(_ t: L10n, fracBase: Double = 0.9, fracSpan: Double = 0.1) async {
-        guard !groups.isEmpty else { exactDupeGroupIDs = []; return }
-        progress = t.progVerifying(0, groups.count)
+    /// The caller stores the result in `exactDupeGroupIDs` for the UI and
+    /// AlbumWriter (a cancelled pass returns the partial set; the caller bails
+    /// without publishing).
+    func detectExactDuplicates(in snapshot: [ReviewGroup], _ t: L10n,
+                               fracBase: Double = 0.9, fracSpan: Double = 0.1) async -> Set<ReviewGroup.ID> {
+        guard !snapshot.isEmpty else { return [] }
+        progress = t.progVerifying(0, snapshot.count)
 
         // We need feature prints for the dimension+dHash-consistent groups.
         // Re-use the existing photo hashes via a lightweight second pass.
         // All hashing and print computation runs off the main actor.
-        let snapshot = groups
         let lookup = assetsByID
         let mgr = imageManager
 
         var exact: Set<ReviewGroup.ID> = []
         var done = 0
         for g in snapshot {
-            if Task.isCancelled || abortFlag.isSet { return }   // caller bails + cleans up
+            if Task.isCancelled || abortFlag.isSet { return exact }   // caller bails + cleans up
             defer {
                 done += 1
                 if done % 10 == 0 {
@@ -1074,8 +1115,8 @@ final class LibraryModel: ObservableObject {
             exact.insert(g.id)
         }
 
-        exactDupeGroupIDs = exact
         progress = ""
+        return exact
     }
 
     /// Seed deletion suggestions from the exact-duplicate verdicts — the ONLY
@@ -1092,19 +1133,27 @@ final class LibraryModel: ObservableObject {
     /// on real pixels. A confirmed document flips the frame to protected; an
     /// unverifiable one (nil) is simply not seeded. Exact groups are rare, so
     /// the extra fetches cost nothing overall.
-    private func seedExactRejections() async {
-        guard !exactDupeGroupIDs.isEmpty else { return }
-        for i in groups.indices where exactDupeGroupIDs.contains(groups[i].id) {
-            let keeperID = groups[i].keeperID
+    /// Seeds into the LOCAL pipeline array, never the published `groups`: the
+    /// hi-q document re-checks suspend for up to 30 s each, and a seeder that
+    /// wrote through published state across those awaits could override user
+    /// decisions made in the meantime (or trap on indices a mid-scan delete
+    /// shifted). The caller publishes the returned array exactly once.
+    private func seedExactRejections(in built: [ReviewGroup],
+                                     exact: Set<ReviewGroup.ID>) async -> [ReviewGroup] {
+        guard !exact.isEmpty else { return built }
+        var built = built
+        for i in built.indices where exact.contains(built[i].id) {
+            if Task.isCancelled || abortFlag.isSet { return built }   // caller bails + cleans up
+            let keeperID = built[i].keeperID
             var seeds: Set<String> = []
-            for (j, p) in groups[i].photos.enumerated() {
+            for (j, p) in built[i].photos.enumerated() {
                 guard p.uuid != keeperID, !p.isProtected, !p.documentEvalDegraded else { continue }
                 if let asset = assetsByID[p.uuid] {
                     switch await PhotoFlags.isDocumentHiQ(asset, manager: imageManager) {
                     case .some(true):
                         // Real document — upgrade the frame's flag so the UI
                         // badge and every downstream guard agree.
-                        var upgraded = groups[i].photos[j]
+                        var upgraded = built[i].photos[j]
                         upgraded = Photo(uuid: upgraded.uuid, filename: upgraded.filename,
                                          takenAt: upgraded.takenAt, width: upgraded.width,
                                          height: upgraded.height, size: upgraded.size,
@@ -1114,7 +1163,7 @@ final class LibraryModel: ObservableObject {
                                          sharpness: upgraded.sharpness,
                                          originalCamera: upgraded.originalCamera,
                                          documentEvalDegraded: false)
-                        groups[i].photos[j] = upgraded
+                        built[i].photos[j] = upgraded
                         continue
                     case .none:
                         continue   // couldn't verify — stay protective, don't seed
@@ -1124,9 +1173,10 @@ final class LibraryModel: ObservableObject {
                 }
                 seeds.insert(p.uuid)
             }
-            groups[i].rejected.formUnion(seeds)
-            groups[i].autoSeeded = seeds
+            built[i].rejected.formUnion(seeds)
+            built[i].autoSeeded = seeds
         }
+        return built
     }
 
     // MARK: - Scan snapshot (cross-launch persistence)
@@ -1322,6 +1372,10 @@ final class LibraryModel: ObservableObject {
     func deleteReviewed(
         staleWarning: ((Int, Int) async -> Bool)? = nil
     ) async throws -> Int {
+        // Never commit while a scan or face-refine is rebuilding group state:
+        // a delete would race the pipeline over `groups` and persist a
+        // half-built snapshot over the previous complete one.
+        guard !isScanning, !refiningFaces else { return 0 }
         let ids = groups.flatMap(\.deletionIDs)
         let assets = ids.compactMap { assetsByID[$0] }
         guard !assets.isEmpty else { return 0 }

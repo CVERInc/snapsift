@@ -1274,6 +1274,39 @@ struct L10n: Sendable {
         }
     }
 
+    /// Title of the confirmation shown when a scan would discard pending marks.
+    func rescanDiscardTitle() -> String {
+        switch language {
+        case .en: return "Discard pending marks?"
+        case .ja: return "未確定のマークを破棄しますか？"
+        case .zhTW: return "要捨棄還沒執行的標記嗎？"
+        }
+    }
+    /// Body — n = user-made marks (app-seeded suggestions are re-derived by the rescan).
+    func rescanDiscardBody(_ n: Int) -> String {
+        switch language {
+        case .en: return "A new scan discards the \(n) mark\(n == 1 ? "" : "s") you haven't committed yet. This can't be undone."
+        case .ja: return "新しいスキャンを開始すると、まだ確定していない \(n) 件のマークが破棄されます。元に戻せません。"
+        case .zhTW: return "重新掃描會捨棄你還沒執行刪除的 \(n) 個標記，捨棄後無法復原。"
+        }
+    }
+    /// Destructive confirm button of the rescan dialog.
+    func rescanDiscardConfirm() -> String {
+        switch language {
+        case .en: return "Discard and Scan"
+        case .ja: return "破棄してスキャン"
+        case .zhTW: return "捨棄並掃描"
+        }
+    }
+    /// Cancel button of the rescan dialog.
+    func rescanDiscardCancel() -> String {
+        switch language {
+        case .en: return "Cancel"
+        case .ja: return "キャンセル"
+        case .zhTW: return "取消"
+        }
+    }
+
     // MARK: snapshot restore
 
     /// Banner when the last scan was restored from disk on launch.
