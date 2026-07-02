@@ -50,16 +50,18 @@ enum LookAlikeScanner {
                                                       // all colliding). Confirming
                                                       // it means thousands of neural
                                                       // prints + O(n²) — the freeze.
-                     progress: @escaping (String) -> Void) async -> [[String]] {
+                     progress: @escaping (String, Double?) -> Void) async -> [[String]] {
 
         var byID: [String: PHAsset] = [:]
         for a in assets { byID[a.localIdentifier] = a }
 
         // Stage 1 — dHash all thumbnails, 8-wide (timeout-guarded). Serial reads
         // over a six-figure library were a bottleneck of their own.
+        // The fraction is scan-internal 0…1: hashing 0…0.6, confirming 0.6…1.
         let hashes = await dHashes(assets.map(\.localIdentifier), asset: { byID[$0] },
                                    manager: manager) { done, total in
-            progress(t.progHashing(done, total))
+            progress(t.progHashing(done, total),
+                     total > 0 ? 0.6 * Double(done) / Double(total) : nil)
         }
         let candidates = groupByHash(hashes.map { ($0.value, $0.key) }, maxDistance: dHashDistance)
 
@@ -77,7 +79,8 @@ enum LookAlikeScanner {
         // cgImage means a stuck thumbnail can never stall the batch.
         let ids = Array(Set(surviving.flatMap { $0 }))
         let prints = await featurePrints(ids, byID: byID, manager: manager) { done, loaded in
-            progress(t.progConfirming(done, ids.count, loaded: loaded))
+            progress(t.progConfirming(done, ids.count, loaded: loaded),
+                     ids.isEmpty ? 1 : 0.6 + 0.4 * Double(done) / Double(ids.count))
         }
 
         var confirmed: [[String]] = []
@@ -87,7 +90,7 @@ enum LookAlikeScanner {
                 confirmed.append(group)
             }
         }
-        if skipped > 0 { progress(t.progSkippedClusters(skipped)) }
+        if skipped > 0 { progress(t.progSkippedClusters(skipped), nil) }
         return confirmed
     }
 
@@ -117,7 +120,10 @@ enum LookAlikeScanner {
         await withTaskGroup(of: (String, UInt64?).self) { group in
             var next = 0
             func add() {
-                while next < missing.count {
+                // Cooperative cancellation: stop feeding new work; in-flight
+                // requests drain naturally and the partial result is discarded
+                // by the caller.
+                while !Task.isCancelled, next < missing.count {
                     let id = missing[next]; next += 1
                     guard let a = asset(id) else { continue }
                     group.addTask {
@@ -162,7 +168,7 @@ enum LookAlikeScanner {
         await withTaskGroup(of: (String, VNFeaturePrintObservation?).self) { group in
             var next = 0
             func add() {
-                while next < missing.count {
+                while !Task.isCancelled, next < missing.count {   // cooperative cancel
                     let id = missing[next]; next += 1
                     guard let a = byID[id] else { continue }   // unknown id — skip
                     group.addTask { (id, await featurePrint(a, manager)) }
@@ -232,13 +238,14 @@ enum LookAlikeScanner {
                                 manager: PHCachingImageManager,
                                 maxDistance: Int,
                                 t: L10n,
-                                progress: @escaping (String) -> Void) async -> [VerifiedCluster] {
+                                progress: @escaping (String, Double?) -> Void) async -> [VerifiedCluster] {
         // dHash every clustered frame up front, 8-wide — the only I/O here. The
         // re-split below is then pure in-memory work. (Was a serial per-frame loop
         // that stalled 2s on each thumbnail Photos couldn't serve locally.)
         let ids = Array(Set(clusters.flatMap { $0.map(\.uuid) }))
         let hashes = await dHashes(ids, asset: asset, manager: manager) { done, total in
-            progress(t.progVerifying(done, total))
+            progress(t.progVerifying(done, total),
+                     total > 0 ? Double(done) / Double(total) : nil)
         }
 
         var out: [VerifiedCluster] = []

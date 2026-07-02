@@ -2,7 +2,7 @@ import Foundation
 
 /// One asset in a candidate near-duplicate group. Mirrors the Python `Photo`
 /// dataclass field-for-field so the two implementations stay interchangeable.
-public struct Photo: Sendable, Equatable, Identifiable {
+public struct Photo: Sendable, Equatable, Identifiable, Codable {
     public var id: String { uuid }
 
     public let uuid: String

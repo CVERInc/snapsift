@@ -25,8 +25,12 @@ enum QualitySidecar {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Pictures/Photos Library.photoslibrary").path
 
-    /// Load the enrichment map. Heavy (one row per asset) — call off the main actor.
-    static func load(libraryPath: String = defaultLibraryPath) -> [String: Enrichment] {
+    /// Load the enrichment map. Heavy (one row per asset) — call off the main
+    /// actor. `shouldAbort` is polled periodically so a cancelled scan can bail
+    /// out of the row loop (the detached task this runs in does not inherit the
+    /// scan task's cancellation).
+    static func load(libraryPath: String = defaultLibraryPath,
+                     shouldAbort: @Sendable () -> Bool = { false }) -> [String: Enrichment] {
         let dbPath = "\(libraryPath)/database/Photos.sqlite"
         guard FileManager.default.fileExists(atPath: dbPath) else { return [:] }
 
@@ -65,7 +69,10 @@ enum QualitySidecar {
         }
 
         var out: [String: Enrichment] = [:]
+        var rows = 0
         while sqlite3_step(stmt) == SQLITE_ROW {
+            rows += 1
+            if rows % 5000 == 0, shouldAbort() { return [:] }
             guard let cstr = sqlite3_column_text(stmt, 0) else { continue }
             let uuid = String(cString: cstr)
             let size = Int(sqlite3_column_int64(stmt, 1))

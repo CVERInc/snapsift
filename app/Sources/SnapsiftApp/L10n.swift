@@ -1257,6 +1257,42 @@ struct L10n: Sendable {
         }
     }
 
+    /// Banner after the user cancels an in-flight scan.
+    func scanCancelled() -> String {
+        switch language {
+        case .en: return "Scan cancelled"
+        case .ja: return "スキャンをキャンセルしました"
+        case .zhTW: return "已取消掃描"
+        }
+    }
+    /// The cancel button shown while a scan is running.
+    func cancelScanButton() -> String {
+        switch language {
+        case .en: return "Cancel"
+        case .ja: return "キャンセル"
+        case .zhTW: return "取消"
+        }
+    }
+
+    // MARK: snapshot restore
+
+    /// Banner when the last scan was restored from disk on launch.
+    func snapshotRestored(_ n: Int) -> String {
+        switch language {
+        case .en: return "Restored your last scan — \(n) sets, decisions included"
+        case .ja: return "前回のスキャンを復元しました — \(n) 組（判定も含む）"
+        case .zhTW: return "已還原上次掃描：\(n) 組（含你的標記）"
+        }
+    }
+    /// Same, but the library changed since the snapshot was taken.
+    func snapshotRestoredStale() -> String {
+        switch language {
+        case .en: return "Restored your last scan — the library has changed since; consider rescanning"
+        case .ja: return "前回のスキャンを復元しました — その後ライブラリが変わっています。再スキャンをおすすめします"
+        case .zhTW: return "已還原上次掃描：圖庫在那之後有變動，建議重新掃描"
+        }
+    }
+
     // MARK: album-write failure (persistent, like delete failure)
 
     func albumsWriteFailedTitle() -> String {

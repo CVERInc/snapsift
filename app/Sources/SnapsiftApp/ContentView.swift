@@ -215,7 +215,13 @@ struct ContentView: View {
         // cleared the pending mark). The overlay blocks the mouse; the key
         // handlers guard on `deleting` for the keyboard.
         .overlay { if deleting { deletingLock } }
-        .onAppear { model.loadAlbums(); installFocusRescue() }
+        .onAppear {
+            model.loadAlbums()
+            installFocusRescue()
+            // Reopen onto the last working state (groups + decisions) instead
+            // of an empty window that demands a multi-minute rescan.
+            model.restoreSnapshot(t)
+        }
         // Scan-completion feedback: every scan ends with an explicit banner
         // ("found N" / "nothing found" / "album gone") so finishing is never
         // silent and an empty result is distinguishable from not having run.
@@ -708,9 +714,19 @@ struct ContentView: View {
     private var emptyState: some View {
         VStack(spacing: 10) {
             if model.isScanning || model.refiningFaces {
-                ProgressView().tint(.reefMint)
+                if let frac = model.progressFraction {
+                    ProgressView(value: frac).tint(.reefMint).frame(maxWidth: 180)
+                } else {
+                    ProgressView().tint(.reefMint)
+                }
                 Text(model.progress).font(.caption).foregroundStyle(Color.reefTextDim)
                     .multilineTextAlignment(.center).padding(.horizontal)
+                if model.isScanning {
+                    Button(t.cancelScanButton()) { model.cancelScan() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .padding(.top, 4)
+                }
             } else {
                 Image(systemName: model.hasScanned ? "checkmark.circle" : "rectangle.stack.badge.minus")
                     .font(.system(size: 34)).foregroundStyle(Color.reefBorder)
@@ -795,15 +811,15 @@ struct ContentView: View {
                 LazyVGrid(columns: onboardColumns, spacing: 14) {
                     onboardCard(title: t.scan(), icon: "sparkle.magnifyingglass",
                                 caption: t.tipScan(), prominent: true) {
-                        Task { await model.scan(t) }
+                        model.startScan(.burst, t)
                     }
                     onboardCard(title: t.lookAlikes(), icon: "rectangle.on.rectangle",
                                 caption: t.tipLookAlikes(), prominent: false) {
-                        Task { await model.scanLookAlikes(t) }
+                        model.startScan(.lookAlikes, t)
                     }
                     onboardCard(title: t.similarSets(), icon: "square.grid.3x3.topleft.filled",
                                 caption: t.tipSimilarSets(), prominent: false) {
-                        Task { await model.scanSimilarSets(t) }
+                        model.startScan(.similarSets, t)
                     }
                 }
                 .frame(maxWidth: 720)
@@ -1005,7 +1021,7 @@ struct ContentView: View {
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
-            Button { Task { await model.scan(t) } } label: {
+            Button { model.startScan(.burst, t) } label: {
                 Label(t.scan(), systemImage: "sparkle.magnifyingglass")
             }
             .help(t.tipScan())
@@ -1013,7 +1029,7 @@ struct ContentView: View {
             .keyboardShortcut("1", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
-            Button { Task { await model.scanLookAlikes(t) } } label: {
+            Button { model.startScan(.lookAlikes, t) } label: {
                 Label(t.lookAlikes(), systemImage: "rectangle.on.rectangle")
             }
             .help(t.tipLookAlikes())
@@ -1021,7 +1037,7 @@ struct ContentView: View {
             .keyboardShortcut("2", modifiers: .command)
         }
         ToolbarItem(placement: .primaryAction) {
-            Button { Task { await model.scanSimilarSets(t) } } label: {
+            Button { model.startScan(.similarSets, t) } label: {
                 Label(t.similarSets(), systemImage: "square.grid.3x3.topleft.filled")
             }
             .help(t.tipSimilarSets())

@@ -1316,5 +1316,24 @@ do {
           "keeperReason: favorite-vs-plain still reports .favorite")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Photo Codable round-trip (scan-snapshot persistence)
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Photo Codable round-trip")
+
+do {
+    let original = Photo(uuid: "U1/L0/001", filename: "IMG_1.heic", takenAt: 1234.5,
+                         width: 4032, height: 3024, size: 2_000_000,
+                         uti: "public.heic", kind: 0, favorite: true, quality: 0.73,
+                         edited: true, isDocument: false, sharpness: 0.4,
+                         originalCamera: true, documentEvalDegraded: true)
+    let data = try JSONEncoder().encode(original)
+    let decoded = try JSONDecoder().decode(Photo.self, from: data)
+    check(decoded == original, "photo: encode→decode is identity (every field survives)")
+} catch {
+    check(false, "photo: Codable round-trip threw \(error)")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

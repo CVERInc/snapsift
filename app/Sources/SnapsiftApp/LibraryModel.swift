@@ -147,6 +147,76 @@ final class LibraryModel: ObservableObject {
     /// One-shot completion notice for the UI banner ("found N sets" / "nothing
     /// found" / "album gone"). The view shows it and sets it back to nil.
     @Published var scanNotice: String?
+    /// Overall scan completion 0…1 for the determinate progress bar; nil while
+    /// in a phase whose length is unknown (fetch, quality sidecar).
+    @Published var progressFraction: Double?
+
+    // MARK: - Scan lifecycle (cancel + restore)
+
+    enum ScanKind: String { case burst, lookAlikes, similarSets }
+
+    /// The driving task of the in-flight scan; cancelling it threads
+    /// Task.isCancelled through every structured loop in the pipeline.
+    private var scanTask: Task<Void, Never>?
+    /// Detached work (the quality-sidecar read) does not inherit the scan
+    /// task's cancellation — it polls this flag instead.
+    private final class AbortFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set() { lock.lock(); value = true; lock.unlock() }
+    }
+    private var abortFlag = AbortFlag()
+    private var lastScanKind: ScanKind = .burst
+    private var snapshotSaveTask: Task<Void, Never>?
+
+    /// Launch a scan as a cancellable task. UI entry point for all three kinds.
+    func startScan(_ kind: ScanKind, _ t: L10n) {
+        guard !isScanning else { return }
+        lastScanKind = kind
+        abortFlag = AbortFlag()
+        scanTask = Task { [weak self] in
+            guard let self else { return }
+            switch kind {
+            case .burst:       await self.scan(t)
+            case .lookAlikes:  await self.scanLookAlikes(t)
+            case .similarSets: await self.scanSimilarSets(t)
+            }
+        }
+    }
+
+    /// Cancel the in-flight scan. The pipeline drains cooperatively; the scan
+    /// method notices the cancellation and calls `finishCancelledScan`.
+    func cancelScan() {
+        guard isScanning else { return }
+        abortFlag.set()
+        scanTask?.cancel()
+    }
+
+    /// Discard the half-built state of a cancelled scan and quietly restore the
+    /// previous snapshot (if any) so cancelling never destroys prior work.
+    private func finishCancelledScan(_ t: L10n) {
+        // The scan method's defer hasn't run yet — clear the flag here so the
+        // snapshot restore below isn't blocked by its own !isScanning guard.
+        isScanning = false
+        groups = []
+        categories = []
+        exactDupeGroupIDs = []
+        progressFraction = nil
+        // An aborted sidecar read returns an EMPTY map — caching that would
+        // permanently disable quality ranking for the session. Forget it so
+        // the next scan reads it properly.
+        if enrichment?.isEmpty ?? false { enrichment = nil }
+        restoreSnapshot(t, quiet: true)
+        scanNotice = t.scanCancelled()
+    }
+
+    /// True (and cleans up) when the scan task was cancelled mid-pipeline.
+    private func bailIfCancelled(_ t: L10n) -> Bool {
+        guard Task.isCancelled || abortFlag.isSet else { return false }
+        finishCancelledScan(t)
+        return true
+    }
 
     /// Categories after the search filter: apfel's semantic match if it ran,
     /// otherwise a plain substring match — and everything when the query is empty.
@@ -300,7 +370,7 @@ final class LibraryModel: ObservableObject {
         facesApplied = false
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
-        defer { isScanning = false; progress = "" }
+        defer { isScanning = false; progress = ""; progressFraction = nil }
 
         let opts = PHFetchOptions()
         opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
@@ -354,15 +424,29 @@ final class LibraryModel: ObservableObject {
         // the database isn't readable (no Full Disk Access / non-standard path).
         if enrichment == nil {
             progress = t.progReadingQuality()
+            progressFraction = nil   // length unknown — indeterminate
+            let flag = abortFlag
             enrichment = await Task.detached(priority: .userInitiated) {
-                QualitySidecar.load()
+                QualitySidecar.load(shouldAbort: { flag.isSet })
             }.value
             qualityAvailable = !(enrichment?.isEmpty ?? true)
         }
+        if bailIfCancelled(t) { return }
         let enr = enrichment ?? [:]
-        let enriched = assets.map { makePhoto(from: $0, enr: enr) }
+        // Chunked with yields: a 120K-asset map monopolises the main actor for
+        // long enough that even the Cancel click can't be processed.
+        var enriched: [Photo] = []
+        enriched.reserveCapacity(assets.count)
+        for chunk in stride(from: 0, to: assets.count, by: 2000) {
+            if bailIfCancelled(t) { return }
+            for a in assets[chunk..<min(chunk + 2000, assets.count)] {
+                enriched.append(makePhoto(from: a, enr: enr))
+            }
+            await Task.yield()
+        }
 
         progress = t.progClustering(enriched.count)
+        progressFraction = 0.15
         let clustered = cluster(enriched, gapSec: gapSec, sizeTol: sizeTol, maxSpan: maxSpan)
 
         // Always content-verify (no opt-out): a time-burst is only real if the
@@ -375,7 +459,13 @@ final class LibraryModel: ObservableObject {
         let verified = await LookAlikeScanner.verifyByContent(
             clustered, asset: { lookup[$0] }, manager: imageManager,
             maxDistance: contentMaxDistance, t: t
-        ) { [weak self] msg in Task { @MainActor in self?.progress = msg } }
+        ) { [weak self] msg, frac in
+            Task { @MainActor in
+                self?.progress = msg
+                if let frac { self?.progressFraction = 0.15 + 0.45 * frac }
+            }
+        }
+        if bailIfCancelled(t) { return }
         // Neural gate: a cluster only stays "confident" (→ pre-marks a deletion)
         // if Apple's feature print agrees it's near-identical. dHash is cheap
         // recall; this is the precise arbiter that keeps the scan from ever
@@ -388,8 +478,12 @@ final class LibraryModel: ObservableObject {
         let spreads = await LookAlikeScanner.featureSpreads(
             toCheck, byID: assetsByID, manager: imageManager
         ) { [weak self] done, total, loaded in
-            Task { @MainActor in self?.progress = t.progConfirming(done, total, loaded: loaded) }
+            Task { @MainActor in
+                self?.progress = t.progConfirming(done, total, loaded: loaded)
+                if total > 0 { self?.progressFraction = 0.6 + 0.2 * Double(done) / Double(total) }
+            }
         }
+        if bailIfCancelled(t) { return }
         var neuralConfident = Set<Int>()
         for (k, idx) in confidentIdx.enumerated() {
             if let fs = spreads[k], fs <= contentConfidentFeature { neuralConfident.insert(idx) }
@@ -400,7 +494,9 @@ final class LibraryModel: ObservableObject {
         // protected. Index-aligned with `verified` so the confident flags line up.
         let flagged = await enrichFlags(verified.map(\.photos)) { done, total in
             self.progress = t.progVerifying(done, total)
+            if total > 0 { self.progressFraction = 0.8 + 0.1 * Double(done) / Double(total) }
         }
+        if bailIfCancelled(t) { return }
         var built: [ReviewGroup] = []
         for (idx, photos) in flagged.enumerated() {
             let confident = neuralConfident.contains(idx)
@@ -415,37 +511,46 @@ final class LibraryModel: ObservableObject {
         groups = built
 
         // Exact-duplicate pass: the ONLY source of pre-marked deletions.
-        await detectExactDuplicates(t)
+        await detectExactDuplicates(t, fracBase: 0.9, fracSpan: 0.1)
         seedExactRejections()
+        if bailIfCancelled(t) { return }
 
+        progressFraction = 1.0
         hasScanned = true
         scanNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
+        saveSnapshotNow()
     }
 
     /// Build a Core Photo from a PHAsset, enriched with Apple quality + size.
+    ///
+    /// STRICTLY cheap metadata only. `edited` is NOT computed here: its
+    /// `PHAssetResource.assetResources` lookup costs an XPC round-trip per
+    /// asset, and mapping the whole library through it was the real "reading
+    /// quality scores" multi-minute stall (sampled live: ~80% of scan wall
+    /// time inside PhotoFlags.edited), during which the main thread was too
+    /// busy to even process the Cancel click. Like `isDocument`/`sharpness`,
+    /// `edited` only matters for frames that end up in a group — enrichFlags
+    /// fills it over cluster members only.
     private func makePhoto(from asset: PHAsset, enr: [String: QualitySidecar.Enrichment]) -> Photo {
         let id = asset.localIdentifier
         let e = enr[QualitySidecar.zuuid(fromLocalIdentifier: id)]
         let uti = (asset.value(forKey: "uniformTypeIdentifier") as? String) ?? ""
         let name = (asset.value(forKey: "filename") as? String) ?? ""
-        // Cheap metadata-only flags computed here; the pixel-based ones
-        // (isDocument, sharpness) are filled in by enrichFlags() over cluster
-        // members only, so Vision never runs on the whole library.
         return Photo(uuid: id, filename: name,
                      takenAt: asset.creationDate?.timeIntervalSince1970 ?? 0,
                      width: asset.pixelWidth, height: asset.pixelHeight,
                      size: e?.size ?? 0, uti: uti,
                      kind: asset.mediaType == .video ? 1 : 0,
                      favorite: asset.isFavorite, quality: e?.quality ?? 0,
-                     edited: PhotoFlags.edited(asset),
+                     edited: false,   // filled by enrichFlags (cluster members only)
                      originalCamera: PhotoFlags.originalCamera(asset))
     }
 
-    /// Fill the pixel-based flags (`isDocument`, `sharpness`, `documentEvalDegraded`)
-    /// for the photos that belong to clusters — Vision/Laplacian never run on the
-    /// whole library, only on frames that could actually be deleted or chosen as
-    /// keeper. Returns the clusters with those photos rebuilt; `edited`/
-    /// `originalCamera`/quality/size (already set in `makePhoto`) are preserved.
+    /// Fill the per-frame flags that are too expensive for the whole library —
+    /// `isDocument`/`sharpness` (Vision/pixels) and `edited` (a per-asset
+    /// PHAssetResource XPC round-trip) — over cluster members only. Returns the
+    /// clusters with those photos rebuilt; quality/size (from `makePhoto`) are
+    /// preserved.
     /// Bounded concurrency with a per-image timeout, like the scanners, so a stuck
     /// thumbnail can't stall it.
     ///
@@ -461,30 +566,33 @@ final class LibraryModel: ObservableObject {
         var docs: [String: Bool] = [:]
         var docsDegraded: [String: Bool] = [:]
         var sharps: [String: Double] = [:]
+        var edits: [String: Bool] = [:]
         var done = 0
         let lookup = assetsByID
-        await withTaskGroup(of: (String, Bool, Bool, Double).self) { group in
+        await withTaskGroup(of: (String, Bool, Bool, Double, Bool).self) { group in
             var next = 0
             let limit = 8
             func add() {
-                while next < uuids.count {
+                while !Task.isCancelled, next < uuids.count {   // cooperative cancel
                     let id = uuids[next]; next += 1
                     guard let a = lookup[id] else { continue }
                     let mgr = imageManager
                     group.addTask {
                         async let docResult = PhotoFlags.isDocumentResult(a, manager: mgr)
                         async let shp = PhotoFlags.sharpness(a, manager: mgr)
+                        let edited = PhotoFlags.edited(a)
                         let (isDoc, degraded) = await docResult
-                        return (id, isDoc, degraded, await shp)
+                        return (id, isDoc, degraded, await shp, edited)
                     }
                     return
                 }
             }
             for _ in 0..<limit { add() }
-            for await (id, doc, degraded, shp) in group {
+            for await (id, doc, degraded, shp, edited) in group {
                 docs[id] = doc
                 docsDegraded[id] = degraded
                 sharps[id] = shp
+                edits[id] = edited
                 done += 1
                 if done % 25 == 0 { progress(done, uuids.count) }
                 add()
@@ -495,7 +603,8 @@ final class LibraryModel: ObservableObject {
                 Photo(uuid: p.uuid, filename: p.filename, takenAt: p.takenAt,
                       width: p.width, height: p.height, size: p.size, uti: p.uti,
                       kind: p.kind, favorite: p.favorite, quality: p.quality,
-                      edited: p.edited, isDocument: docs[p.uuid] ?? p.isDocument,
+                      edited: edits[p.uuid] ?? p.edited,
+                      isDocument: docs[p.uuid] ?? p.isDocument,
                       sharpness: sharps[p.uuid] ?? p.sharpness,
                       originalCamera: p.originalCamera,
                       documentEvalDegraded: docsDegraded[p.uuid] ?? p.documentEvalDegraded)
@@ -515,7 +624,7 @@ final class LibraryModel: ObservableObject {
         facesApplied = false
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
-        defer { isScanning = false; progress = "" }
+        defer { isScanning = false; progress = ""; progressFraction = nil }
 
         let opts = PHFetchOptions()
         opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
@@ -547,14 +656,23 @@ final class LibraryModel: ObservableObject {
 
         if enrichment == nil {
             progress = t.progReadingQuality()
-            enrichment = await Task.detached(priority: .userInitiated) { QualitySidecar.load() }.value
+            progressFraction = nil
+            let flag = abortFlag
+            enrichment = await Task.detached(priority: .userInitiated) {
+                QualitySidecar.load(shouldAbort: { flag.isSet })
+            }.value
             qualityAvailable = !(enrichment?.isEmpty ?? true)
         }
+        if bailIfCancelled(t) { return }
         let enr = enrichment ?? [:]
 
-        let idGroups = await LookAlikeScanner.scan(assets: assets, manager: imageManager, t: t) { [weak self] msg in
-            Task { @MainActor in self?.progress = msg }
+        let idGroups = await LookAlikeScanner.scan(assets: assets, manager: imageManager, t: t) { [weak self] msg, frac in
+            Task { @MainActor in
+                self?.progress = msg
+                if let frac { self?.progressFraction = 0.05 + 0.65 * frac }
+            }
         }
+        if bailIfCancelled(t) { return }
 
         let raw = idGroups.compactMap { ids -> [Photo]? in
             let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0, enr: enr) }
@@ -564,18 +682,23 @@ final class LibraryModel: ObservableObject {
         // Document protection + sharpness ranking over the cluster members only.
         let enriched = await enrichFlags(raw) { done, total in
             self.progress = t.progVerifying(done, total)
+            if total > 0 { self.progressFraction = 0.7 + 0.15 * Double(done) / Double(total) }
         }
+        if bailIfCancelled(t) { return }
         groups = enriched.map { photos in
             // Look-alike groups are not auto-pre-marked (user decides).
             ReviewGroup(photos: photos, keeperID: keeper(photos).uuid)
         }
 
         // Exact-duplicate pass: the ONLY source of pre-marked deletions.
-        await detectExactDuplicates(t)
+        await detectExactDuplicates(t, fracBase: 0.85, fracSpan: 0.15)
         seedExactRejections()
+        if bailIfCancelled(t) { return }
 
+        progressFraction = 1.0
         hasScanned = true
         scanNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
+        saveSnapshotNow()
     }
 
     /// "Similar sets": find sets of photos you took of the same thing — several
@@ -594,7 +717,7 @@ final class LibraryModel: ObservableObject {
         facesApplied = false
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
-        defer { isScanning = false; progress = "" }
+        defer { isScanning = false; progress = ""; progressFraction = nil }
 
         let opts = PHFetchOptions()
         opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
@@ -625,9 +748,14 @@ final class LibraryModel: ObservableObject {
         assetsByID = map
 
         if enrichment == nil {
-            enrichment = await Task.detached(priority: .userInitiated) { QualitySidecar.load() }.value
+            progressFraction = nil
+            let flag = abortFlag
+            enrichment = await Task.detached(priority: .userInitiated) {
+                QualitySidecar.load(shouldAbort: { flag.isSet })
+            }.value
             qualityAvailable = !(enrichment?.isEmpty ?? true)
         }
+        if bailIfCancelled(t) { return }
         let enr = enrichment ?? [:]
 
         // Cluster the library at the "same scene, different moment" band — looser
@@ -636,13 +764,23 @@ final class LibraryModel: ObservableObject {
         let idGroups = await LookAlikeScanner.scan(
             assets: assets, manager: imageManager, t: t,
             dHashDistance: 14, featureDistance: 0.45
-        ) { [weak self] msg in Task { @MainActor in self?.progress = msg } }
+        ) { [weak self] msg, frac in
+            Task { @MainActor in
+                self?.progress = msg
+                if let frac { self?.progressFraction = 0.05 + 0.6 * frac }
+            }
+        }
+        if bailIfCancelled(t) { return }
 
         var albums: [CategoryBucket] = []
         var i = 0
         for ids in idGroups {
+            if bailIfCancelled(t) { return }
             i += 1
-            if i % 10 == 0 { progress = t.progNaming(i, idGroups.count) }
+            if i % 10 == 0 {
+                progress = t.progNaming(i, idGroups.count)
+                progressFraction = 0.65 + 0.35 * Double(i) / Double(max(idGroups.count, 1))
+            }
             let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0, enr: enr) }
                 .sorted { $0.takenAt < $1.takenAt }
             guard photos.count >= 2 else { continue }
@@ -651,8 +789,10 @@ final class LibraryModel: ObservableObject {
         }
         categories = albums.sorted { $0.count > $1.count }
 
+        progressFraction = 1.0
         hasScanned = true
         scanNotice = categories.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(categories.count)
+        saveSnapshotNow()
     }
 
     /// Name a set from the Vision tags of its representative frame, prettified by
@@ -672,6 +812,7 @@ final class LibraryModel: ObservableObject {
         groups[i].keeperID = photoID
         groups[i].rejected.remove(photoID)   // un-reject the new keeper
         groups[i].autoSeeded.remove(photoID)
+        scheduleSnapshotSave()
     }
 
     /// Keep the entire group — clear all rejections. `a` key.
@@ -680,6 +821,7 @@ final class LibraryModel: ObservableObject {
         groups[i].rejected = []
         groups[i].autoSeeded = []   // user overrode — rejections are theirs now
         groups[i].includeProtected = false
+        scheduleSnapshotSave()
     }
 
     /// Toggle keep-all: if there are rejections, clear them; if already clear, re-seed.
@@ -697,6 +839,7 @@ final class LibraryModel: ObservableObject {
             groups[i].includeProtected = false
         }
         groups[i].autoSeeded = []   // either way this was a user decision
+        scheduleSnapshotSave()
     }
 
     /// Reject whole group: seed rejected = all non-keeper non-protected frames. `d` key.
@@ -708,6 +851,7 @@ final class LibraryModel: ObservableObject {
             (p.uuid != keep.uuid && !p.isProtected) ? p.uuid : nil
         })
         groups[i].autoSeeded = []   // user overrode — rejections are theirs now
+        scheduleSnapshotSave()
     }
 
     /// Toggle reject-all: if not all non-protected are rejected, reject them;
@@ -721,6 +865,7 @@ final class LibraryModel: ObservableObject {
         } else {
             rejectAll(group: groupID)
         }
+        scheduleSnapshotSave()
     }
 
     /// Toggle reject on a single frame. `X` / `⌫` key.
@@ -744,6 +889,7 @@ final class LibraryModel: ObservableObject {
                 }
             }
         }
+        scheduleSnapshotSave()
         return true
     }
 
@@ -761,6 +907,7 @@ final class LibraryModel: ObservableObject {
                 groups[i].keeperID = next.uuid
             }
         }
+        scheduleSnapshotSave()
     }
 
     /// Explicit opt-in to include protected frames in the deletion set for this group.
@@ -773,6 +920,7 @@ final class LibraryModel: ObservableObject {
             let protectedIDs = Set(groups[i].photos.filter(\.isProtected).map(\.uuid))
             groups[i].rejected.subtract(protectedIDs)
         }
+        scheduleSnapshotSave()
     }
 
     /// Combined keeper key: an app-level extension of Core's `RankKey` that slots
@@ -820,6 +968,7 @@ final class LibraryModel: ObservableObject {
         }
         facesApplied = true
         progress = ""
+        scheduleSnapshotSave()
     }
 
     // MARK: - Exact-duplicate detection (Part B)
@@ -843,7 +992,7 @@ final class LibraryModel: ObservableObject {
     ///     unverifiable means NOT exact.
     ///
     /// The result is stored in `exactDupeGroupIDs` for the UI and AlbumWriter.
-    func detectExactDuplicates(_ t: L10n) async {
+    func detectExactDuplicates(_ t: L10n, fracBase: Double = 0.9, fracSpan: Double = 0.1) async {
         guard !groups.isEmpty else { exactDupeGroupIDs = []; return }
         progress = t.progVerifying(0, groups.count)
 
@@ -857,7 +1006,14 @@ final class LibraryModel: ObservableObject {
         var exact: Set<ReviewGroup.ID> = []
         var done = 0
         for g in snapshot {
-            defer { done += 1; if done % 10 == 0 { progress = t.progVerifying(done, snapshot.count) } }
+            if Task.isCancelled || abortFlag.isSet { return }   // caller bails + cleans up
+            defer {
+                done += 1
+                if done % 10 == 0 {
+                    progress = t.progVerifying(done, snapshot.count)
+                    progressFraction = fracBase + fracSpan * Double(done) / Double(snapshot.count)
+                }
+            }
 
             // 0+1. Pixel-free eligibility (member count, no videos, single UTI,
             // matching dimensions) — pure Core predicate, unit-tested.
@@ -925,6 +1081,117 @@ final class LibraryModel: ObservableObject {
             ng.autoSeeded = seeds
             return ng
         }
+    }
+
+    // MARK: - Scan snapshot (cross-launch persistence)
+
+    private func makeSnapshot() -> ScanSnapshot {
+        ScanSnapshot(
+            schema: ScanSnapshot.currentSchema,
+            kind: lastScanKind.rawValue,
+            sourceID: {
+                if case .album(let item) = scanSource { return item.id }
+                return nil
+            }(),
+            timestamp: Date(),
+            changeToken: ScanSnapshotStore.currentChangeTokenData(),
+            groups: groups.map { g in
+                ScanSnapshot.Group(photos: g.photos,
+                                   keeperID: g.keeperID,
+                                   rejected: Array(g.rejected),
+                                   autoSeeded: Array(g.autoSeeded),
+                                   confidentDupe: g.confidentDupe,
+                                   exact: exactDupeGroupIDs.contains(g.id))
+            },
+            categories: categories.map { ScanSnapshot.Category(label: $0.label, photos: $0.photos) }
+        )
+    }
+
+    /// Persist the current review state immediately (scan end, after deletes).
+    func saveSnapshotNow() {
+        guard hasScanned else { return }
+        snapshotSaveTask?.cancel()
+        let snap = makeSnapshot()
+        Task.detached(priority: .utility) { ScanSnapshotStore.save(snap) }
+    }
+
+    /// Persist after a decision change, debounced so a burst of keystrokes
+    /// (x x x j x…) writes once, not per key.
+    func scheduleSnapshotSave() {
+        guard hasScanned, !isScanning else { return }
+        snapshotSaveTask?.cancel()
+        snapshotSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.saveSnapshotNow()
+        }
+    }
+
+    /// Rehydrate the last scan (groups + categories + decisions) from disk.
+    /// Assets are re-fetched; anything unresolvable is dropped and a group that
+    /// falls under 2 frames dissolves. Returns true when something was restored.
+    @discardableResult
+    func restoreSnapshot(_ t: L10n, quiet: Bool = false) -> Bool {
+        guard !isScanning, groups.isEmpty, categories.isEmpty,
+              let snap = ScanSnapshotStore.load() else { return false }
+
+        let allIDs = Set(snap.groups.flatMap { $0.photos.map(\.uuid) }
+            + snap.categories.flatMap { $0.photos.map(\.uuid) })
+        guard !allIDs.isEmpty else { return false }
+
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(allIDs), options: nil)
+        var map: [String: PHAsset] = [:]
+        map.reserveCapacity(fetched.count)
+        fetched.enumerateObjects { a, _, _ in map[a.localIdentifier] = a }
+
+        var restoredGroups: [ReviewGroup] = []
+        var exactIDs: Set<ReviewGroup.ID> = []
+        for gs in snap.groups {
+            let photos = gs.photos.filter { map[$0.uuid] != nil }
+            guard photos.count >= 2 else { continue }
+            let keeperID = photos.contains { $0.uuid == gs.keeperID }
+                ? gs.keeperID : keeper(photos).uuid
+            var g = ReviewGroup(photos: photos, keeperID: keeperID)
+            let alive = Set(photos.map(\.uuid))
+            g.rejected = Set(gs.rejected).intersection(alive).subtracting([keeperID])
+            g.autoSeeded = Set(gs.autoSeeded).intersection(g.rejected)
+            g.confidentDupe = gs.confidentDupe
+            // includeProtected deliberately not restored (informed-consent flag).
+            if gs.exact { exactIDs.insert(g.id) }
+            restoredGroups.append(g)
+        }
+        let restoredCats = snap.categories.compactMap { cs -> CategoryBucket? in
+            let photos = cs.photos.filter { map[$0.uuid] != nil }
+            return photos.count >= 2 ? CategoryBucket(label: cs.label, photos: photos) : nil
+        }
+        guard !restoredGroups.isEmpty || !restoredCats.isEmpty else { return false }
+
+        assetsByID = map
+        groups = restoredGroups
+        exactDupeGroupIDs = exactIDs
+        categories = restoredCats
+        hasScanned = true
+        // The snapshot's photos carry the sidecar enrichment from scan time, so
+        // quality-based ranking (and the size estimate) is genuinely available —
+        // don't show the Full Disk Access hint for a restored session.
+        qualityAvailable = restoredGroups.contains { g in
+            g.photos.contains { $0.quality > 0 || $0.size > 0 }
+        }
+        // Point the source picker back at what this snapshot actually scanned
+        // (if that album still exists) so a rescan hits the same scope.
+        if let sourceID = snap.sourceID {
+            if let item = albums.first(where: { $0.id == sourceID }) {
+                scanSource = .album(item)
+            }
+        } else {
+            scanSource = .wholeLibrary
+        }
+        if !quiet {
+            scanNotice = ScanSnapshotStore.changeTokenIsCurrent(snap.changeToken)
+                ? t.snapshotRestored(restoredGroups.isEmpty ? restoredCats.count : restoredGroups.count)
+                : t.snapshotRestoredStale()
+        }
+        return true
     }
 
     // MARK: - Album write (Part A + Part B)
@@ -1071,6 +1338,10 @@ final class LibraryModel: ObservableObject {
         } else {
             assetsByID = [:]
         }
+
+        // Keep the cross-launch snapshot in lockstep — a relaunch must never
+        // resurrect frames that were just deleted.
+        saveSnapshotNow()
 
         return assets.count
     }
