@@ -31,5 +31,11 @@ let package = Package(
             .product(name: "Signet", package: "signet"),
         ]),
         .executableTarget(name: "SnapsiftTests", dependencies: ["SnapsiftCore"]),
+        // Icon generator: `swift run SnapsiftIcon` → Assets/AppIcon.icns (+1024 PNG)
+        // via Signet's shared CVERAppIcon pipeline. Run manually when the icon
+        // artwork changes; the .icns is committed and bundled by build-app.sh.
+        .executableTarget(name: "SnapsiftIcon", dependencies: [
+            .product(name: "Signet", package: "signet"),
+        ]),
     ]
 )

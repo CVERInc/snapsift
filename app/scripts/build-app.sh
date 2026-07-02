@@ -19,9 +19,11 @@ swift build -c "$CONFIG" --product SnapsiftApp
 BIN=".build/$CONFIG/SnapsiftApp"
 
 rm -rf "$DEST"
-mkdir -p "$DEST/Contents/MacOS"
+mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
 cp "$BIN" "$DEST/Contents/MacOS/SnapsiftApp"
 cp Info.plist "$DEST/Contents/Info.plist"
+# App icon (regenerate with `swift run SnapsiftIcon` when the artwork changes).
+cp Assets/AppIcon.icns "$DEST/Contents/Resources/AppIcon.icns"
 
 chmod +x "$DEST/Contents/MacOS/SnapsiftApp"
 xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true

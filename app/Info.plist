@@ -11,6 +11,7 @@
   <key>CFBundleVersion</key><string>9</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <!-- Required for PhotoKit. snapsift reads your library on-device and never
        sends anything anywhere; deletions go to Recently Deleted (recoverable). -->

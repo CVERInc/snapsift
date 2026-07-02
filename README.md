@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/Platform-macOS-black?logo=apple)](https://www.apple.com/macos/)
 
-🌐 [日本語](https://cver.net/ja-jp/oss/snapsift) · [한국어](https://cver.net/ko-kr/oss/snapsift) · [繁體中文](https://cver.net/zh-tw/oss/snapsift)
+🌐 [日本語](https://cver.net/ja-jp/oss/snapsift) · [繁體中文](https://cver.net/zh-tw/oss/snapsift)
 
 Built for a real Photos library of 120K+ photos where Apple's `Duplicates`
 album was already empty, yet thousands of sub-second-apart shots remained.
@@ -33,15 +33,32 @@ leaves your Mac.
   open and everyone's in shot.
 - **Cross-time look-alikes** (Vision feature prints) — finds the same photo
   saved on different days, not just time bursts.
+- **Surface, don't judge** — look-alike groups are sorted and presented; the
+  app only ever pre-marks a photo for deletion when it is a **byte-verified
+  exact duplicate** (identical original files). Everything else is yours to
+  decide, and the built-in deletion history records which was which.
 - **Favorites are never deleted; videos are off by default.**
 
 Build it (no Xcode needed):
 
 ```bash
 cd app
-./scripts/build-app.sh          # → ~/Desktop/snapsift.app, then double-click
+./scripts/build-app.sh          # → ~/Applications/snapsift.app, then double-click
 swift run SnapsiftTests         # run the Core test suite
 ```
+
+First-launch notes:
+
+- **Gatekeeper**: the app is unsigned (built from source on your machine, so
+  macOS usually launches it directly; a downloaded copy needs right-click →
+  Open the first time).
+- **Photos access**: on first scan, macOS asks for read/write access to your
+  Photos library — required to enumerate, sort into albums, and delete into
+  Recently Deleted.
+- **Full Disk Access** (optional): lets snapsift read Apple's own quality
+  scores and real file sizes from `Photos.sqlite` (read-only). Without it
+  everything still works, but keeper ranking loses the quality signal and no
+  reclaimable-space estimate is shown — the status bar will tell you.
 
 ## How it works (the engine)
 
