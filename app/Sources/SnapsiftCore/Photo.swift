@@ -96,6 +96,21 @@ public struct Photo: Sendable, Equatable, Identifiable, Codable {
     /// `deletions()`. This is the single protection predicate the whole app
     /// (Core + the SwiftUI `ReviewGroup`) routes through.
     public var isProtected: Bool { favorite || edited || isDocument }
+
+    /// A copy with one or more protection / eval flags overridden, every other
+    /// field preserved. Used when a flag is RE-EVALUATED after the scan: a
+    /// rotation save makes a frame `edited`, a live commit-time re-check upgrades
+    /// `favorite`/`edited`, an exact-pass hi-q pass confirms `isDocument`. Keeps
+    /// those in-place rebuilds honest and free of field-drift.
+    public func with(favorite: Bool? = nil, edited: Bool? = nil,
+                     isDocument: Bool? = nil, documentEvalDegraded: Bool? = nil) -> Photo {
+        Photo(uuid: uuid, filename: filename, takenAt: takenAt,
+              width: width, height: height, size: size, uti: uti, kind: kind,
+              favorite: favorite ?? self.favorite, quality: quality,
+              edited: edited ?? self.edited, isDocument: isDocument ?? self.isDocument,
+              sharpness: sharpness, originalCamera: originalCamera,
+              documentEvalDegraded: documentEvalDegraded ?? self.documentEvalDegraded)
+    }
 }
 
 /// Cocoa epoch → Unix epoch offset, in seconds.

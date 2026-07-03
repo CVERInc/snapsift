@@ -1335,5 +1335,55 @@ do {
     check(false, "photo: Codable round-trip threw \(error)")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Photo.with(...) flag override (post-scan re-evaluation: rotation → edited,
+// live commit re-check → favorite/edited, exact-pass hi-q → isDocument)
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Photo.with(...) flag override")
+do {
+    let base = Photo(uuid: "U1/L0/001", filename: "IMG_1.heic", takenAt: 1234.5,
+                     width: 4032, height: 3024, size: 2_000_000,
+                     uti: "public.heic", kind: 0, favorite: false, quality: 0.73,
+                     edited: false, isDocument: false, sharpness: 0.4,
+                     originalCamera: true, documentEvalDegraded: false)
+    let edited = base.with(edited: true)
+    check(edited.edited && !base.edited && edited.isProtected,
+          "with(edited:) flips only edited and makes the frame protected")
+    check(edited.uuid == base.uuid && edited.filename == base.filename
+            && edited.size == base.size && edited.quality == base.quality
+            && edited.sharpness == base.sharpness && edited.originalCamera == base.originalCamera,
+          "with(...) preserves every non-overridden field")
+    let doc = base.with(isDocument: true, documentEvalDegraded: false)
+    check(doc.isDocument && !doc.favorite && !doc.edited,
+          "with(isDocument:) flips only isDocument")
+    check(base.with() == base, "with() with no args is identity")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// No-survivor audit: an emptied group's keeper was itself deleted, so the log
+// must not name a phantom survivor (empty keeper fields → "(no survivor)").
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("No-survivor audit keeper rendering")
+do {
+    let survivor = DeletionRecord(timestamp: "2026-07-03T00:00:00Z",
+                                  assetIdentifier: "U2", filename: "IMG_2.heic",
+                                  sizeBytes: 2048, keeperIdentifier: "U1",
+                                  keeperFilename: "IMG_1.heic", reason: .userRejected)
+    let noSurvivor = DeletionRecord(timestamp: "2026-07-03T00:00:00Z",
+                                    assetIdentifier: "U3", filename: "IMG_3.heic",
+                                    sizeBytes: 2048, keeperIdentifier: "",
+                                    keeperFilename: "", reason: .userRejected)
+    let text = DeletionAuditLog.exportText(sessions: [
+        DeletionSession(timestamp: "2026-07-03T00:00:00Z", records: [survivor, noSurvivor])
+    ])
+    check(text.contains("keeper: IMG_1.heic"), "export names a real surviving keeper")
+    check(text.contains("keeper: (no survivor)"),
+          "export renders empty keeper fields as (no survivor), never blank")
+    check(!text.contains("keeper: \n") && !text.contains("keeper: \(noSurvivor.reason.rawValue)"),
+          "no-survivor keeper line is never left blank")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

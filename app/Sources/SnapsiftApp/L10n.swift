@@ -737,6 +737,24 @@ struct L10n: Sendable {
         case .zhTW: return "沒有標記要刪除的項目"
         }
     }
+    /// Shown after a commit when frames became protected (favorited/edited in
+    /// Photos) since the scan and were kept back out of the deletion.
+    func commitProtectedKept(_ n: Int) -> String {
+        switch language {
+        case .en: return "kept \(n) favorited or edited since the scan"
+        case .ja: return "スキャン後にお気に入り／編集された\(n)枚は残しました"
+        case .zhTW: return "掃描後被加入最愛或編輯的 \(n) 張已保留"
+        }
+    }
+    /// Shown after a commit when burst representatives were skipped to avoid
+    /// taking unreviewed stack siblings — the user should handle them in Photos.
+    func commitBurstSkipped(_ n: Int) -> String {
+        switch language {
+        case .en: return "skipped \(n) burst — delete those in Photos"
+        case .ja: return "バースト\(n)件はスキップ — 写真アプリで削除してください"
+        case .zhTW: return "跳過 \(n) 個連拍 — 請在「照片」中刪除"
+        }
+    }
 
     // MARK: FIX 3 — stale-asset warning alert
 
@@ -1138,6 +1156,15 @@ struct L10n: Sendable {
         case .en:   return "reason:"
         case .ja:   return "理由："
         case .zhTW: return "原因："
+        }
+    }
+    /// Keeper value for a no-survivor group — every frame (keeper included) was
+    /// force-rejected, so there is honestly no survivor to name.
+    func historyNoSurvivor() -> String {
+        switch language {
+        case .en:   return "(no survivor)"
+        case .ja:   return "（残りなし）"
+        case .zhTW: return "（無保留）"
         }
     }
 

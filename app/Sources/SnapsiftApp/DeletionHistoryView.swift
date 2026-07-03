@@ -124,7 +124,7 @@ struct DeletionHistoryView: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             HStack(spacing: 8) {
-                                Text("\(t.historyKeeperLabel()) \(r.keeperFilename.isEmpty ? r.keeperIdentifier : r.keeperFilename)")
+                                Text("\(t.historyKeeperLabel()) \(r.keeperFilename.isEmpty && r.keeperIdentifier.isEmpty ? t.historyNoSurvivor() : (r.keeperFilename.isEmpty ? r.keeperIdentifier : r.keeperFilename))")
                                     .font(.caption2)
                                     .foregroundStyle(Color.reefTextDim)
                                 Text("\(t.historyReasonLabel()) \(r.reason.rawValue)")

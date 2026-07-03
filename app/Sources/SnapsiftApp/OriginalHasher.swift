@@ -26,9 +26,21 @@ enum OriginalHasher {
     }
 
     /// Hex SHA-256 of the asset's primary original resource, or nil when the
-    /// original is unavailable locally or the read fails.
+    /// original is unavailable locally, the read fails, OR the asset carries
+    /// more than its primary still — in which case hashing that one resource
+    /// would falsely certify interchangeability the byte gate never proved.
     static func sha256(asset: PHAsset) async -> String? {
         let resources = PHAssetResource.assetResources(for: asset)
+        // A multi-resource asset is NEVER interchangeable with a single-resource
+        // still even when the primary photo bytes match — the very rationale
+        // `exactGroupPrecheck` states for RAW+JPEG. We hash only the primary
+        // resource, so a Live Photo (paired video), a RAW+JPEG (.alternatePhoto),
+        // or any companion-carrying asset would digest EQUAL to a motion/RAW-
+        // stripped copy and be pre-marked exact, silently discarding the extra
+        // half on delete. Return nil ("cannot verify" → NOT exact) so such assets
+        // still appear in ordinary review buckets but are never auto-seeded.
+        if asset.mediaSubtypes.contains(.photoLive) { return nil }
+        guard resources.filter({ $0.type != .adjustmentData }).count <= 1 else { return nil }
         // Prefer the true original still; fall back to the first resource so
         // re-imports whose only resource is e.g. .fullSizePhoto still hash.
         guard let res = resources.first(where: { $0.type == .photo })

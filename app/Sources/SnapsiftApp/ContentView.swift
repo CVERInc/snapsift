@@ -1275,18 +1275,31 @@ struct ContentView: View {
         deleting = true
         defer { deleting = false }
         do {
-            let n = try await model.deleteReviewed { [self] staleCount, foundCount in
-                // FIX 3: stale-asset warning — suspend until the user responds.
-                // We surface an alert, then resume via CheckedContinuation.
-                return await withCheckedContinuation { cont in
-                    staleAlertData = (staleCount: staleCount, foundCount: foundCount)
-                    staleAlertContinuation = cont
-                }
-            }
+            var protectedDropped = 0
+            var burstSkipped = 0
+            let n = try await model.deleteReviewed(
+                staleWarning: { [self] staleCount, foundCount in
+                    // FIX 3: stale-asset warning — suspend until the user responds.
+                    // We surface an alert, then resume via CheckedContinuation.
+                    return await withCheckedContinuation { cont in
+                        staleAlertData = (staleCount: staleCount, foundCount: foundCount)
+                        staleAlertContinuation = cont
+                    }
+                },
+                onProtectedDropped: { protectedDropped = $0 },
+                onBurstSkipped: { burstSkipped = $0 }
+            )
             if !model.groups.contains(where: { $0.id == selection }) { selection = nil }
             // FIX 5: success banner explicitly states the 30-day recovery window
             // (mirrors the pre-commit sheet language — same promise, same place).
-            if n > 0 { showBanner(t.deletedBanner(n)) }
+            // Also honestly report anything the commit HELD BACK: frames protected
+            // since the scan, and burst representatives skipped to spare unreviewed
+            // stack siblings — never let those vanish from the count silently.
+            var parts: [String] = []
+            if n > 0 { parts.append(t.deletedBanner(n)) }
+            if protectedDropped > 0 { parts.append(t.commitProtectedKept(protectedDropped)) }
+            if burstSkipped > 0 { parts.append(t.commitBurstSkipped(burstSkipped)) }
+            if !parts.isEmpty { showBanner(parts.joined(separator: "  ")) }
         } catch {
             // Cancelling macOS's own delete-confirmation sheet is a normal user
             // decision, not a failure — it must never trigger the scary

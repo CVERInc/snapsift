@@ -170,7 +170,11 @@ public struct DeletionAuditLog: Sendable {
             for r in session.records {
                 let name = r.filename.isEmpty ? r.assetIdentifier : r.filename
                 let kb = r.sizeBytes > 0 ? " [\(r.sizeBytes / 1024) KB]" : ""
-                lines.append("  - \(name)\(kb)  reason: \(r.reason.rawValue)  keeper: \(r.keeperFilename)")
+                // Empty keeper fields are the no-survivor sentinel (the group's
+                // keeper was itself force-rejected) — never print a blank keeper.
+                let keeper = (r.keeperFilename.isEmpty && r.keeperIdentifier.isEmpty)
+                    ? "(no survivor)" : r.keeperFilename
+                lines.append("  - \(name)\(kb)  reason: \(r.reason.rawValue)  keeper: \(keeper)")
             }
             lines.append("")
         }
