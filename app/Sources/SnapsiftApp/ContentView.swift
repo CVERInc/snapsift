@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var selection: ReviewGroup.ID?
     @State private var categorySelection: CategoryBucket.ID?
     @State private var deleting = false
+    @State private var deletingCount = 0          // photos in the in-flight commit (overlay copy)
     @State private var focusedFrame: String?     // uuid of the focused grid cell
     @State private var previewID: String?        // big-preview overlay (loupe)
     @State private var loupeOpen = false          // true when loupe is showing
@@ -22,6 +23,10 @@ struct ContentView: View {
     @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
     // FIX 2: persistent delete-failure alert
     @State private var deleteErrorAlert = false
+    // A permission failure (access downgraded to Selected Photos) needs the
+    // Settings path; any other failure (XPC/transaction) left nothing deleted and
+    // Settings is the wrong remedy — the alert branches on this.
+    @State private var deleteErrorIsPermission = false
     // Album-write failure: persistent alert (same stance as delete failure —
     // a mutation of the user's library must never fail as a vanishing banner).
     @State private var albumErrorMessage: String?
@@ -242,8 +247,10 @@ struct ContentView: View {
             model.loadAlbums()
             installFocusRescue()
             // Reopen onto the last working state (groups + decisions) instead
-            // of an empty window that demands a multi-minute rescan.
-            model.restoreSnapshot(t)
+            // of an empty window that demands a multi-minute rescan. Decode +
+            // asset resolution run off the main actor (see restoreSnapshot), so
+            // launch never beachballs on a whole-library snapshot.
+            Task { await model.restoreSnapshot(t) }
         }
         // Scan-completion feedback: every scan ends with an explicit banner
         // ("found N" / "nothing found" / "album gone") so finishing is never
@@ -307,11 +314,14 @@ struct ContentView: View {
         }
         // FIX 2: persistent alert when delete fails — never let a destructive
         // action fail silently. Gives the user a direct path to fix the permission.
-        .alert(t.deleteErrorTitle(), isPresented: $deleteErrorAlert) {
-            Button(t.deleteErrorOpenSettings()) { openPhotosPrivacySettings() }
+        .alert(deleteErrorIsPermission ? t.deleteErrorTitle() : t.deleteFailedTitle(),
+               isPresented: $deleteErrorAlert) {
+            if deleteErrorIsPermission {
+                Button(t.deleteErrorOpenSettings()) { openPhotosPrivacySettings() }
+            }
             Button(t.deleteErrorDismiss(), role: .cancel) {}
         } message: {
-            Text(t.deleteErrorBody())
+            Text(deleteErrorIsPermission ? t.deleteErrorBody() : t.deleteFailedBody())
         }
         // Album-write failure — persistent, same trust bar as delete failure.
         .alert(t.albumsWriteFailedTitle(), isPresented: Binding(
@@ -415,8 +425,9 @@ struct ContentView: View {
             Color.black.opacity(0.35)
             VStack(spacing: 12) {
                 ProgressView().tint(.reefMint)
-                Text(t.deletingOverlay())
+                Text(t.deletingOverlay(deletingCount))
                     .font(.callout).foregroundStyle(Color.reefText)
+                    .multilineTextAlignment(.center)
             }
             .padding(24)
             .background(Color.reefDeep, in: RoundedRectangle(cornerRadius: 12))
@@ -817,7 +828,14 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var detail: some View {
-        if model.browseMode {
+        if model.isScanning || model.refiningFaces {
+            // Single authoritative progress + Cancel surface for BOTH a scan and a
+            // face-refine, shown regardless of whether groups already exist. A
+            // refine runs OVER a full set of groups, so without this its progress
+            // and Cancel would be hidden behind GroupReview — the app would look
+            // finished-but-locked with no way to stop the pass.
+            scanHero
+        } else if model.browseMode {
             if let id = categorySelection, let c = model.categories.first(where: { $0.id == id }) {
                 CategoryBrowse(category: c, model: model, t: t)
             } else {
@@ -891,7 +909,7 @@ struct ContentView: View {
                 .foregroundStyle(Color.reefTextDim)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
-            if model.isScanning {
+            if model.isScanning || model.refiningFaces {
                 Button(t.cancelScanButton()) { model.cancelScan() }
                     .buttonStyle(.bordered)
                     .controlSize(.regular)
@@ -1322,6 +1340,10 @@ struct ContentView: View {
         // in the audit log. Main-actor tasks run FIFO, so the first task's
         // `deleting = true` always precedes the second task's check.
         guard !deleting else { return }
+        // Capture the marked count for the lock overlay BEFORE deleteReviewed
+        // mutates groups — a big commit can hold the window for minutes, so the
+        // copy names the number ("Deleting N photos…") instead of a bare spinner.
+        deletingCount = model.totalDeletions
         deleting = true
         defer { deleting = false }
         do {
@@ -1360,7 +1382,10 @@ struct ContentView: View {
             if let ph = error as? PHPhotosError, ph.code == .userCancelled { return }
             // FIX 2: failed delete must be LOUD and actionable, not a silent 3s banner.
             // A destructive action that fails invisibly breaks trust completely.
-            // Show a persistent, dismissible alert with a direct fix path.
+            // Only a permission problem (access downgraded to Selected Photos)
+            // warrants the Settings path; any other failure left nothing deleted,
+            // so the alert says so plainly and offers retry instead of Settings.
+            deleteErrorIsPermission = PHPhotoLibrary.authorizationStatus(for: .readWrite) != .authorized
             deleteErrorAlert = true
         }
     }

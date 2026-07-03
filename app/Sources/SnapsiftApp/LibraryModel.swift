@@ -220,10 +220,11 @@ final class LibraryModel: ObservableObject {
         }
     }
 
-    /// Cancel the in-flight scan. The pipeline drains cooperatively; the scan
-    /// method notices the cancellation and calls `finishCancelledScan`.
+    /// Cancel the in-flight scan OR face-refine. The pipeline drains
+    /// cooperatively; a scan notices the cancellation and calls
+    /// `finishCancelledScan`, a refine bails and keeps its partial face scores.
     func cancelScan() {
-        guard isScanning else { return }
+        guard isScanning || refiningFaces else { return }
         abortFlag.set()
         scanTask?.cancel()
     }
@@ -242,8 +243,11 @@ final class LibraryModel: ObservableObject {
         // permanently disable quality ranking for the session. Forget it so
         // the next scan reads it properly.
         if enrichment?.isEmpty ?? false { enrichment = nil }
-        restoreSnapshot(t, quiet: true)
+        // The quiet restore now decodes + re-fetches off the main actor (see
+        // restoreSnapshot) so pressing Cancel never trades one stall for another;
+        // surface the cancelled notice immediately and let the restore land after.
         scanNotice = t.scanCancelled()
+        Task { [weak self] in await self?.restoreSnapshot(t, quiet: true) }
     }
 
     /// True (and cleans up) when the scan task was cancelled mid-pipeline.
@@ -460,33 +464,13 @@ final class LibraryModel: ObservableObject {
 
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)
+        result.enumerateObjects { asset, _, _ in assets.append(asset) }
+        // FIX 1 — Live Photo paired-video guard (off the main actor; see
+        // excludeLivePhotoPairedVideos). Only relevant when videos are included.
+        if includeVideo { assets = await excludeLivePhotoPairedVideos(assets) }
         var map: [String: PHAsset] = [:]
-        map.reserveCapacity(result.count)
-        result.enumerateObjects { asset, _, _ in
-            // FIX 1 — Live Photo paired-video guard.
-            // When includeVideo is true, the .mov companion of a Live Photo appears
-            // as an independent video PHAsset. Deleting it orphans the Live Photo
-            // still (motion is permanently lost and the pair is NOT recoverable as
-            // a pair from Recently Deleted). We exclude it here.
-            //
-            // Detection: PHAssetResource.assetResources(for:) is synchronous and
-            // returns the resource descriptors for an asset without touching pixels.
-            // A Live Photo paired video has at least one resource with type
-            // .pairedVideo (9) or .fullSizePairedVideo (10). A regular video has
-            // neither. The Live Photo STILL (photo side) is NOT excluded — deleting
-            // a Live Photo still via PhotoKit correctly removes both halves
-            // atomically and is recoverable from Recently Deleted; only the orphaned
-            // video half is dangerous.
-            if asset.mediaType == .video {
-                let resources = PHAssetResource.assetResources(for: asset)
-                let isPairedVideo = resources.contains {
-                    $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
-                }
-                if isPairedVideo { return }   // skip — deleting it orphans the Live Photo
-            }
-            assets.append(asset)
-            map[asset.localIdentifier] = asset
-        }
+        map.reserveCapacity(assets.count)
+        for a in assets { map[a.localIdentifier] = a }
         assetsByID = map
 
         // Enrich with Apple's quality scores + real file size from the library's
@@ -584,8 +568,8 @@ final class LibraryModel: ObservableObject {
         // seeded, so the review UI can never interleave with the seeder (a
         // mid-seed user decision being overridden, or a mid-seed delete
         // shifting indices under the loop).
-        let exact = await detectExactDuplicates(in: built, t, fracBase: 0.9, fracSpan: 0.1)
-        built = await seedExactRejections(in: built, exact: exact)
+        let exact = await detectExactDuplicates(in: built, t, fracBase: 0.9, fracSpan: 0.06)
+        built = await seedExactRejections(in: built, exact: exact, t, fracBase: 0.96, fracSpan: 0.04)
         if bailIfCancelled(t) { return }
         groups = built
         exactDupeGroupIDs = exact
@@ -596,7 +580,55 @@ final class LibraryModel: ObservableObject {
         // staleness reference here (see `scanChangeToken`).
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
         scanNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
+        await releaseScanCaches()
         saveSnapshotNow()
+    }
+
+    /// Release scan-only working memory once verdicts are materialized into
+    /// `groups`/`categories`: the per-scan hash/feature-print cache exists only to
+    /// dedupe work WITHIN a scan (a rescan rebuilds it) and the full-library
+    /// `assetsByID` map retains a PHAsset per library asset even though every
+    /// post-scan consumer (thumbnails, face refine, album write, delete) only ever
+    /// looks up group/category members. Called at the very end of each scan so the
+    /// exact-duplicate pass (which deliberately reuses the cache) still gets its
+    /// hits, then hundreds of MB aren't held while the user merely browses results.
+    private func releaseScanCaches() async {
+        await LookAlikeScanner.clearCache()
+        let memberIDs = Set(groups.flatMap { $0.photos.map(\.uuid) }
+            + categories.flatMap { $0.photos.map(\.uuid) })
+        assetsByID = assetsByID.filter { memberIDs.contains($0.key) }
+    }
+
+    /// Drop Live Photo paired videos — the independent `.mov` companion that
+    /// appears as its own PHAsset only when videos are included. Deleting one
+    /// orphans the still (motion is permanently lost and the pair is NOT
+    /// recoverable together from Recently Deleted), so it must never enter a
+    /// deletable set. The still side is left in — deleting a Live Photo still
+    /// removes both halves atomically and recoverably; only the lone video is
+    /// dangerous.
+    ///
+    /// `PHAssetResource.assetResources(for:)` is a synchronous per-asset XPC
+    /// round-trip; running it inside the main-actor enumeration froze the UI for
+    /// minutes on a video-heavy library (the same stall makePhoto documents for
+    /// `edited`). Do it off the main actor instead, honouring the abort flag so
+    /// Cancel stays responsive.
+    private func excludeLivePhotoPairedVideos(_ assets: [PHAsset]) async -> [PHAsset] {
+        let videos = assets.filter { $0.mediaType == .video }
+        guard !videos.isEmpty else { return assets }
+        let flag = abortFlag
+        let pairedIDs: Set<String> = await Task.detached(priority: .userInitiated) {
+            var out: Set<String> = []
+            for v in videos {
+                if flag.isSet { break }
+                let resources = PHAssetResource.assetResources(for: v)
+                if resources.contains(where: {
+                    $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
+                }) { out.insert(v.localIdentifier) }
+            }
+            return out
+        }.value
+        guard !pairedIDs.isEmpty else { return assets }
+        return assets.filter { !pairedIDs.contains($0.localIdentifier) }
     }
 
     /// Build a Core Photo from a PHAsset, enriched with Apple quality + size.
@@ -656,11 +688,15 @@ final class LibraryModel: ObservableObject {
                     guard let a = lookup[id] else { continue }
                     let mgr = imageManager
                     group.addTask {
-                        async let docResult = PhotoFlags.isDocumentResult(a, manager: mgr)
-                        async let shp = PhotoFlags.sharpness(a, manager: mgr)
+                        // One thumbnail fetch, fed to BOTH the document check and
+                        // the sharpness estimate — they previously fetched the same
+                        // 512px thumbnail independently (double I/O per member).
+                        let localCG = await PhotoFlags.localThumb(a, mgr)
+                        async let docResult = PhotoFlags.isDocumentResult(a, manager: mgr, localCG: localCG)
                         let edited = PhotoFlags.edited(a)
+                        let shp = localCG.map(PhotoFlags.sharpness(from:)) ?? 0
                         let (isDoc, degraded) = await docResult
-                        return (id, isDoc, degraded, await shp, edited)
+                        return (id, isDoc, degraded, shp, edited)
                     }
                     return
                 }
@@ -718,20 +754,13 @@ final class LibraryModel: ObservableObject {
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
 
         var assets: [PHAsset] = []
-        var map: [String: PHAsset] = [:]
         assets.reserveCapacity(result.count)
-        result.enumerateObjects { a, _, _ in
-            // FIX 1 — Live Photo paired-video guard (same logic as scan()).
-            if a.mediaType == .video {
-                let resources = PHAssetResource.assetResources(for: a)
-                let isPairedVideo = resources.contains {
-                    $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
-                }
-                if isPairedVideo { return }
-            }
-            assets.append(a)
-            map[a.localIdentifier] = a
-        }
+        result.enumerateObjects { a, _, _ in assets.append(a) }
+        // FIX 1 — Live Photo paired-video guard (off the main actor; see scan()).
+        if includeVideo { assets = await excludeLivePhotoPairedVideos(assets) }
+        var map: [String: PHAsset] = [:]
+        map.reserveCapacity(assets.count)
+        for a in assets { map[a.localIdentifier] = a }
         assetsByID = map
 
         if enrichment == nil {
@@ -772,8 +801,8 @@ final class LibraryModel: ObservableObject {
 
         // Exact-duplicate pass: the ONLY source of pre-marked deletions.
         // Local array, single publish — same reasoning as scan().
-        let exact = await detectExactDuplicates(in: built, t, fracBase: 0.85, fracSpan: 0.15)
-        built = await seedExactRejections(in: built, exact: exact)
+        let exact = await detectExactDuplicates(in: built, t, fracBase: 0.85, fracSpan: 0.1)
+        built = await seedExactRejections(in: built, exact: exact, t, fracBase: 0.95, fracSpan: 0.05)
         if bailIfCancelled(t) { return }
         groups = built
         exactDupeGroupIDs = exact
@@ -782,6 +811,7 @@ final class LibraryModel: ObservableObject {
         hasScanned = true
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
         scanNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
+        await releaseScanCaches()
         saveSnapshotNow()
     }
 
@@ -817,20 +847,13 @@ final class LibraryModel: ObservableObject {
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
 
         var assets: [PHAsset] = []
-        var map: [String: PHAsset] = [:]
         assets.reserveCapacity(result.count)
-        result.enumerateObjects { a, _, _ in
-            // FIX 1 — Live Photo paired-video guard (same logic as scan()).
-            if a.mediaType == .video {
-                let resources = PHAssetResource.assetResources(for: a)
-                let isPairedVideo = resources.contains {
-                    $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
-                }
-                if isPairedVideo { return }
-            }
-            assets.append(a)
-            map[a.localIdentifier] = a
-        }
+        result.enumerateObjects { a, _, _ in assets.append(a) }
+        // FIX 1 — Live Photo paired-video guard (off the main actor; see scan()).
+        if includeVideo { assets = await excludeLivePhotoPairedVideos(assets) }
+        var map: [String: PHAsset] = [:]
+        map.reserveCapacity(assets.count)
+        for a in assets { map[a.localIdentifier] = a }
         assetsByID = map
 
         if enrichment == nil {
@@ -858,35 +881,67 @@ final class LibraryModel: ObservableObject {
         }
         if bailIfCancelled(t) { return }
 
-        var albums: [CategoryBucket] = []
-        var i = 0
+        // Build the qualifying buckets first (cheap, main-actor), THEN name them
+        // with bounded concurrency. Each name awaits a Vision classify plus a fresh
+        // apfel LLM subprocess (Apple Intelligence), so a serial loop over hundreds
+        // of buckets is a long dead tail after all pixel work is done. apfel
+        // processes overlap fine — run ~4 in flight while preserving display order.
+        struct PendingSet { let photos: [Photo]; let rep: PHAsset? }
+        var pending: [PendingSet] = []
         for ids in idGroups {
             if bailIfCancelled(t) { return }
-            i += 1
-            if i % 10 == 0 {
-                progress = t.progNaming(i, idGroups.count)
-                progressFraction = 0.65 + 0.35 * Double(i) / Double(max(idGroups.count, 1))
-            }
             let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0, enr: enr) }
                 .sorted { $0.takenAt < $1.takenAt }
             guard photos.count >= 2 else { continue }
-            let name = await albumName(for: photos, t: t)
-            albums.append(CategoryBucket(label: name, photos: photos))
+            pending.append(PendingSet(photos: photos, rep: photos.first.flatMap { map[$0.uuid] }))
         }
-        categories = albums.sorted { $0.count > $1.count }
+        var names = [String?](repeating: nil, count: pending.count)
+        let total = pending.count
+        let mgr = imageManager
+        var done = 0
+        await withTaskGroup(of: (Int, String).self) { group in
+            var next = 0
+            let limit = 4
+            let flag = abortFlag
+            func add() {
+                while !flag.isSet, !Task.isCancelled, next < pending.count {
+                    let idx = next; let rep = pending[next].rep; next += 1
+                    group.addTask { (idx, await LibraryModel.setName(repAsset: rep, manager: mgr, t: t)) }
+                    return
+                }
+            }
+            for _ in 0..<limit { add() }
+            for await (idx, name) in group {
+                names[idx] = name
+                done += 1
+                if done % 5 == 0 {
+                    progress = t.progNaming(done, total)
+                    progressFraction = 0.65 + 0.35 * Double(done) / Double(max(total, 1))
+                }
+                add()
+            }
+        }
+        if bailIfCancelled(t) { return }
+        categories = zip(pending, names)
+            .map { CategoryBucket(label: $0.1 ?? t.setFallbackName(), photos: $0.0.photos) }
+            .sorted { $0.count > $1.count }
 
         progressFraction = 1.0
         hasScanned = true
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
         scanNotice = categories.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(categories.count)
+        await releaseScanCaches()
         saveSnapshotNow()
     }
 
     /// Name a set from the Vision tags of its representative frame, prettified by
     /// apfel when available; otherwise the top tag (or a localized fallback).
-    private func albumName(for photos: [Photo], t: L10n) async -> String {
-        guard let rep = photos.first, let asset = assetsByID[rep.uuid] else { return t.setFallbackName() }
-        let tags = await CategoryScanner.labels(for: asset, manager: imageManager)
+    /// Nonisolated so the naming pass can run these concurrently off the main
+    /// actor — the representative asset is resolved by the caller.
+    private nonisolated static func setName(repAsset: PHAsset?,
+                                            manager: PHCachingImageManager, t: L10n) async -> String {
+        guard let repAsset else { return t.setFallbackName() }
+        let tags = await CategoryScanner.labels(for: repAsset, manager: manager)
         guard let top = tags.first else { return t.setFallbackName() }
         if let pretty = await Apfel.albumName(tags: tags) { return pretty }
         return CategoryScanner.displayName(top)
@@ -1054,17 +1109,57 @@ final class LibraryModel: ObservableObject {
         // the scan's progress text.
         guard !refiningFaces, !isScanning else { return }
         refiningFaces = true
+        // Fresh abort flag so a prior cancelled scan/refine can't abort this one;
+        // cancelScan() sets it and the loop below drains cooperatively.
+        abortFlag = AbortFlag()
         defer { refiningFaces = false }
 
         let members = Array(Set(groups.flatMap { $0.photos.map(\.uuid) })
             .subtracting(faceScores.keys))
+        let total = members.count
+        progress = t.progFaces(0, total)
+        progressFraction = total > 0 ? 0 : nil
+        let lookup = assetsByID
+        let mgr = imageManager
         var done = 0
-        for uuid in members {
-            if let asset = assetsByID[uuid] {
-                faceScores[uuid] = await FaceScorer.score(asset: asset, manager: imageManager)
+        // Bounded concurrency, matching enrichFlags: FaceScorer.score is a
+        // network-allowed per-asset fetch, so a serial loop over thousands of
+        // iCloud-evicted cluster members ran for hours. 6-wide overlaps the
+        // download/decode latency; a stuck asset can't stall the batch (timeout
+        // inside VisionGuards).
+        var scores: [String: Double] = [:]
+        await withTaskGroup(of: (String, Double).self) { group in
+            var next = 0
+            let limit = 6
+            let flag = abortFlag
+            func add() {
+                while !flag.isSet, !Task.isCancelled, next < members.count {
+                    let id = members[next]; next += 1
+                    guard let a = lookup[id] else { continue }
+                    group.addTask { (id, await FaceScorer.score(asset: a, manager: mgr)) }
+                    return
+                }
             }
-            done += 1
-            if done % 25 == 0 { progress = t.progFaces(done, members.count) }
+            for _ in 0..<limit { add() }
+            for await (id, score) in group {
+                scores[id] = score
+                done += 1
+                if done % 25 == 0 {
+                    progress = t.progFaces(done, total)
+                    if total > 0 { progressFraction = Double(done) / Double(total) }
+                }
+                add()
+            }
+        }
+        // Cache what we computed even on cancel — a re-run resumes on the
+        // remaining members (already-scored keys are subtracted at entry).
+        for (id, s) in scores { faceScores[id] = s }
+        if abortFlag.isSet || Task.isCancelled {
+            // Don't re-pick keepers from a partial pass — that would crown frames
+            // by incomplete face data. Leave the current keepers untouched.
+            progress = ""
+            progressFraction = nil
+            return
         }
         groups = groups.map { g in
             var ng = g
@@ -1079,6 +1174,7 @@ final class LibraryModel: ObservableObject {
         }
         facesApplied = true
         progress = ""
+        progressFraction = nil
         scheduleSnapshotSave()
     }
 
@@ -1196,11 +1292,24 @@ final class LibraryModel: ObservableObject {
     /// decisions made in the meantime (or trap on indices a mid-scan delete
     /// shifted). The caller publishes the returned array exactly once.
     private func seedExactRejections(in built: [ReviewGroup],
-                                     exact: Set<ReviewGroup.ID>) async -> [ReviewGroup] {
+                                     exact: Set<ReviewGroup.ID>, _ t: L10n,
+                                     fracBase: Double, fracSpan: Double) async -> [ReviewGroup] {
         guard !exact.isEmpty else { return built }
         var built = built
+        // Report progress: the hi-q document re-check below suspends up to 30 s
+        // per candidate, so on a big library this tail can run minutes — it must
+        // keep the scan's single progress surface alive, not blank out.
+        let total = exact.count
+        var done = 0
+        progress = t.progVerifying(0, total)
+        progressFraction = fracBase
         for i in built.indices where exact.contains(built[i].id) {
             if Task.isCancelled || abortFlag.isSet { return built }   // caller bails + cleans up
+            defer {
+                done += 1
+                progress = t.progVerifying(done, total)
+                progressFraction = fracBase + fracSpan * Double(done) / Double(total)
+            }
             let keeperID = built[i].keeperID
             var seeds: Set<String> = []
             for (j, p) in built[i].photos.enumerated() {
@@ -1328,23 +1437,34 @@ final class LibraryModel: ObservableObject {
     /// Assets are re-fetched; anything unresolvable is dropped and a group that
     /// falls under 2 frames dissolves. Returns true when something was restored.
     @discardableResult
-    func restoreSnapshot(_ t: L10n, quiet: Bool = false) -> Bool {
-        guard !isScanning, groups.isEmpty, categories.isEmpty,
-              let snap = ScanSnapshotStore.load() else { return false }
+    func restoreSnapshot(_ t: L10n, quiet: Bool = false) async -> Bool {
+        guard !isScanning, groups.isEmpty, categories.isEmpty else { return false }
 
-        let allIDs = Set(snap.groups.flatMap { $0.photos.map(\.uuid) }
-            + snap.categories.flatMap { $0.photos.map(\.uuid) })
-        guard !allIDs.isEmpty else { return false }
-
-        // Must match the scan fetch: without includeAllBurstAssets the burst
-        // sub-frames don't resolve and their groups silently dissolve on
-        // restore (live-observed: 2755 → 2632 groups).
-        let fetchOpts = PHFetchOptions()
-        fetchOpts.includeAllBurstAssets = true
-        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(allIDs), options: fetchOpts)
-        var map: [String: PHAsset] = [:]
-        map.reserveCapacity(fetched.count)
-        fetched.enumerateObjects { a, _, _ in map[a.localIdentifier] = a }
+        // Load + JSON-decode the snapshot and resolve every asset OFF the main
+        // actor: a whole-library snapshot is multi-MB JSON and
+        // fetchAssets(withLocalIdentifiers:) over tens of thousands of IDs blocks
+        // for seconds — on .onAppear that beachballed every launch.
+        let loaded: (ScanSnapshot, [String: PHAsset])? = await Task.detached(priority: .userInitiated) {
+            guard let snap = ScanSnapshotStore.load() else { return nil }
+            let allIDs = Set(snap.groups.flatMap { $0.photos.map(\.uuid) }
+                + snap.categories.flatMap { $0.photos.map(\.uuid) })
+            guard !allIDs.isEmpty else { return nil }
+            // Must match the scan fetch: without includeAllBurstAssets the burst
+            // sub-frames don't resolve and their groups silently dissolve on
+            // restore (live-observed: 2755 → 2632 groups).
+            let fetchOpts = PHFetchOptions()
+            fetchOpts.includeAllBurstAssets = true
+            let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(allIDs), options: fetchOpts)
+            var map: [String: PHAsset] = [:]
+            map.reserveCapacity(fetched.count)
+            fetched.enumerateObjects { a, _, _ in map[a.localIdentifier] = a }
+            return (snap, map)
+        }.value
+        guard let (snap, map) = loaded else { return false }
+        // RE-CHECK the entry guards after the await gap: a scan (or another
+        // restore) started meanwhile must win over this now-stale snapshot rather
+        // than be clobbered by it.
+        guard !isScanning, groups.isEmpty, categories.isEmpty else { return false }
 
         // A stale change token means the library was mutated after the scan —
         // scan-time verdicts (byte-verified exact, protection flags) can no

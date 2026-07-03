@@ -94,8 +94,12 @@ enum PhotoFlags {
     ///
     /// Failure direction: unreadable image → `(false, degraded: true)`.
     ///                    ambiguous result / insufficient text → `(false, false)`.
+    /// `localCG`: the 512px local thumbnail, if the caller already fetched it
+    /// (enrichFlags shares one fetch with the sharpness pass — see `localThumb`).
+    /// nil → fetch here, exactly as before.
     static func isDocumentResult(_ asset: PHAsset,
-                                 manager: PHCachingImageManager) async -> (isDocument: Bool, degraded: Bool) {
+                                 manager: PHCachingImageManager,
+                                 localCG: CGImage? = nil) async -> (isDocument: Bool, degraded: Bool) {
         // TWO-TIER fetch. Document detection dies on tiny thumbnails (measured
         // on a real handwritten-form scan: 256px → seg 0.46 and zero text —
         // no threshold survives that; 512px → seg 0.90 + text). But fetching
@@ -107,7 +111,9 @@ enum PhotoFlags {
         //   Tier 2: only for suspicious-or-too-small tier-1 results, refetch at
         //           512px high quality (network allowed, timeout-guarded) and
         //           run the full two-path predicate on trustworthy pixels.
-        guard let localCG = await cgImage(asset, manager) else {
+        let resolved: CGImage?
+        if let localCG { resolved = localCG } else { resolved = await cgImage(asset, manager) }
+        guard let localCG = resolved else {
             // Not even a local thumbnail → we genuinely do not know.
             return (false, true)
         }
@@ -257,6 +263,21 @@ enum PhotoFlags {
         return laplacianVariance(gray.pixels, width: gray.width, height: gray.height)
     }
 
+    /// Sharpness from an already-fetched thumbnail — lets a caller pay a single
+    /// thumbnail fetch and feed it to both the document check and this pass
+    /// (enrichFlags), instead of two identical 512px requests per member.
+    static func sharpness(from cg: CGImage) -> Double {
+        guard let gray = grayBuffer(from: cg, side: 64) else { return 0 }
+        return laplacianVariance(gray.pixels, width: gray.width, height: gray.height)
+    }
+
+    /// The 512px local-only thumbnail both `isDocumentResult`'s tier-1 screen and
+    /// `sharpness` consume. Exposed so a caller can fetch once and thread it into
+    /// both, halving thumbnail I/O per cluster member.
+    static func localThumb(_ asset: PHAsset, _ manager: PHCachingImageManager) async -> CGImage? {
+        await cgImage(asset, manager)
+    }
+
     /// Variance of the 4-neighbour Laplacian over a grayscale buffer. High in a
     /// crisp image (sharp edges → large second derivative), low in a blurry one.
     private static func laplacianVariance(_ px: [Double], width w: Int, height h: Int) -> Double {
@@ -326,6 +347,11 @@ enum PhotoFlags {
     private static func grayBuffer(_ asset: PHAsset, _ manager: PHCachingImageManager,
                                    side: Int) async -> (pixels: [Double], width: Int, height: Int)? {
         guard let cg = await cgImage(asset, manager) else { return nil }
+        return grayBuffer(from: cg, side: side)
+    }
+
+    private static func grayBuffer(from cg: CGImage,
+                                   side: Int) -> (pixels: [Double], width: Int, height: Int)? {
         let w = side, h = side
         var data = [UInt8](repeating: 0, count: w * h)
         let space = CGColorSpaceCreateDeviceGray()

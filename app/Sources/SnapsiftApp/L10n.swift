@@ -290,6 +290,25 @@ struct L10n: Sendable {
         }
     }
 
+    /// Title for a non-permission delete failure (nothing was deleted).
+    func deleteFailedTitle() -> String {
+        switch language {
+        case .en: return "Delete didn't complete"
+        case .ja: return "削除が完了しませんでした"
+        case .zhTW: return "刪除未完成"
+        }
+    }
+
+    /// Body for a non-permission delete failure — nothing changed, retry (and for
+    /// very large selections, in smaller batches). Settings is NOT the remedy here.
+    func deleteFailedBody() -> String {
+        switch language {
+        case .en: return "Something went wrong and no photos were deleted — nothing was changed. You can try again; for a very large selection, try deleting in smaller batches."
+        case .ja: return "問題が発生し、写真は削除されませんでした（変更はありません）。もう一度お試しください。選択枚数が非常に多い場合は、少しずつ削除してみてください。"
+        case .zhTW: return "發生問題，沒有刪除任何照片，狀態也沒有改變。你可以再試一次；如果一次選取的數量很多，可以分批刪除。"
+        }
+    }
+
     // FIX 3: status-bar commit button label.
 
     /// Always-visible commit button in the status bar: "Delete N · ⌘⌫"
@@ -1495,6 +1514,16 @@ struct L10n: Sendable {
         case .en: return "Deleting… confirm in the system dialog if asked"
         case .ja: return "削除中… システムの確認が出たら応答してください"
         case .zhTW: return "刪除中…如出現系統確認框請回應"
+        }
+    }
+
+    /// Count-aware variant: a large commit can hold the window for minutes, so the
+    /// overlay names how many photos and sets the expectation up front.
+    func deletingOverlay(_ count: Int) -> String {
+        switch language {
+        case .en: return "Deleting \(count) photos… this can take a while for large batches. Confirm in the system dialog if asked."
+        case .ja: return "\(count) 枚を削除中… 枚数が多いと少し時間がかかります。システムの確認が出たら応答してください。"
+        case .zhTW: return "正在刪除 \(count) 張照片…數量多時可能需要一點時間。如出現系統確認框請回應。"
         }
     }
 

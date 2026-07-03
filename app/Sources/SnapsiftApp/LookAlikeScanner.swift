@@ -25,11 +25,22 @@ enum LookAlikeScanner {
     private actor Cache {
         private var hashes: [String: UInt64] = [:]
         private var prints: [String: VNFeaturePrintObservation] = [:]
+        // Negative results: assets whose thumbnail couldn't be read THIS scan.
+        // Pixels don't change within a scan, so an unreadable thumbnail stays
+        // unreadable — without this, the exact-duplicate pass re-requested every
+        // already-failed member and re-paid the full 2 s timeout, serially, in a
+        // dead tail after the scan looked done.
+        private var failedHash: Set<String> = []
+        private var failedPrint: Set<String> = []
         func hash(_ id: String) -> UInt64? { hashes[id] }
         func setHash(_ h: UInt64, for id: String) { hashes[id] = h }
+        func didFailHash(_ id: String) -> Bool { failedHash.contains(id) }
+        func markFailedHash(_ id: String) { failedHash.insert(id) }
         func featurePrint(_ id: String) -> VNFeaturePrintObservation? { prints[id] }
         func setFeaturePrint(_ p: VNFeaturePrintObservation, for id: String) { prints[id] = p }
-        func clear() { hashes = [:]; prints = [:] }
+        func didFailPrint(_ id: String) -> Bool { failedPrint.contains(id) }
+        func markFailedPrint(_ id: String) { failedPrint.insert(id) }
+        func clear() { hashes = [:]; prints = [:]; failedHash = []; failedPrint = [] }
     }
     private static let cache = Cache()
 
@@ -110,10 +121,13 @@ enum LookAlikeScanner {
                                 manager: PHCachingImageManager,
                                 progress: @escaping (Int, Int) -> Void) async -> [String: UInt64] {
         // Serve cache hits first; only compute what this scan hasn't seen yet.
+        // Assets already known unreadable this scan are skipped, not re-fetched.
         var out: [String: UInt64] = [:]
         var missing: [String] = []
         for id in ids {
-            if let h = await cache.hash(id) { out[id] = h } else { missing.append(id) }
+            if let h = await cache.hash(id) { out[id] = h }
+            else if await cache.didFailHash(id) { continue }   // known unreadable — don't re-pay the timeout
+            else { missing.append(id) }
         }
         var done = out.count
         await withTaskGroup(of: (String, UInt64?).self) { group in
@@ -137,6 +151,8 @@ enum LookAlikeScanner {
                 if let h {
                     out[id] = h
                     await cache.setHash(h, for: id)
+                } else {
+                    await cache.markFailedHash(id)   // remember so we never re-fetch it this scan
                 }
                 done += 1
                 if done % 500 == 0 { progress(done, ids.count) }
@@ -158,10 +174,13 @@ enum LookAlikeScanner {
                                       progress: @escaping (Int, Int) -> Void)
         async -> [String: VNFeaturePrintObservation] {
         // Serve cache hits first; only compute what this scan hasn't seen yet.
+        // Assets already known unreadable this scan are skipped, not re-fetched.
         var out: [String: VNFeaturePrintObservation] = [:]
         var missing: [String] = []
         for id in ids {
-            if let fp = await cache.featurePrint(id) { out[id] = fp } else { missing.append(id) }
+            if let fp = await cache.featurePrint(id) { out[id] = fp }
+            else if await cache.didFailPrint(id) { continue }   // known unreadable — don't re-pay the timeout
+            else { missing.append(id) }
         }
         var done = out.count, loaded = out.count
         await withTaskGroup(of: (String, VNFeaturePrintObservation?).self) { group in
@@ -179,6 +198,8 @@ enum LookAlikeScanner {
                 if let fp {
                     out[id] = fp; loaded += 1
                     await cache.setFeaturePrint(fp, for: id)
+                } else {
+                    await cache.markFailedPrint(id)   // remember so we never re-fetch it this scan
                 }
                 done += 1
                 if done % 100 == 0 { progress(done, loaded) }
