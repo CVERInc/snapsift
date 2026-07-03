@@ -1385,5 +1385,14 @@ do {
           "no-survivor keeper line is never left blank")
 }
 
+// append now returns Bool so a write failure (e.g. full disk) can be surfaced
+// instead of silently swallowed. The empty-records no-op reports success without
+// touching disk — the caller must not treat "nothing to log" as a failure.
+print("Audit-log append return contract")
+do {
+    let ok = DeletionAuditLog.append(DeletionSession(timestamp: "2026-07-03T00:00:00Z", records: []))
+    check(ok, "append(empty) returns true (no-op success, no false alarm)")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

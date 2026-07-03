@@ -146,6 +146,20 @@ final class LibraryModel: ObservableObject {
     /// One-shot completion notice for the UI banner ("found N sets" / "nothing
     /// found" / "album gone"). The view shows it and sets it back to nil.
     @Published var scanNotice: String?
+    /// Set when a stale-token restore dropped app-seeded suggestions (see
+    /// `restoreSnapshot`). Drives a PERSISTENT inline bar — this outlives the 3.2 s
+    /// launch banner because the user is least likely to be watching at launch and
+    /// the consequence (their pre-marks are gone) needs a standing pointer to rescan.
+    /// Nil = no standing notice; cleared on rescan or dismissal.
+    @Published var staleRestoreClearedCount: Int?
+    /// True when the most recent commit deleted photos but its audit line couldn't
+    /// be written (e.g. full disk) — the delete still stands, but the accountability
+    /// record is missing and the completion banner must say so.
+    @Published var lastDeleteAuditFailed = false
+    /// One-shot: a snapshot write failed (e.g. full disk) and the user hasn't been
+    /// told this session. The view observes it, banners a disk-full warning, and
+    /// resets it. The private `snapshotWriteFailedNotified` latch guards re-raising.
+    @Published var snapshotSaveFailedNotice = false
     /// Overall scan completion 0…1 for the determinate progress bar; nil while
     /// in a phase whose length is unknown (fetch, quality sidecar).
     @Published var progressFraction: Double?
@@ -166,8 +180,16 @@ final class LibraryModel: ObservableObject {
         func set() { lock.lock(); value = true; lock.unlock() }
     }
     private var abortFlag = AbortFlag()
-    private var lastScanKind: ScanKind = .burst
+    private(set) var lastScanKind: ScanKind = .burst
     private var snapshotSaveTask: Task<Void, Never>?
+    /// Enqueue time of the last full snapshot save — drives the max-deferral cap in
+    /// `scheduleSnapshotSave` so a keystroke cadence faster than the debounce window
+    /// can't re-arm the timer forever and leave a whole session unpersisted.
+    private var lastSnapshotWrite = Date.distantPast
+    /// Latched so repeated debounced write failures (e.g. a full disk) surface once
+    /// per session, not per keystroke; reset on the next successful write so a later
+    /// relapse re-notifies.
+    private var snapshotWriteFailedNotified = false
 
     /// Launch a scan as a cancellable task. UI entry point for all three kinds.
     /// A running face-refine mutates keepers concurrently, so the two pipelines
@@ -183,6 +205,9 @@ final class LibraryModel: ObservableObject {
         // `groups` — it would atomically replace the snapshot (thousands of
         // review decisions) with an empty one.
         snapshotSaveTask?.cancel()
+        // A fresh scan re-proves everything, so the standing stale-restore notice
+        // no longer applies.
+        staleRestoreClearedCount = nil
         lastScanKind = kind
         abortFlag = AbortFlag()
         scanTask = Task { [weak self] in
@@ -1241,17 +1266,52 @@ final class LibraryModel: ObservableObject {
     }
 
     /// Persist the current review state immediately (scan end, after deletes).
+    /// Writes are serialized through ScanSnapshotStore (see saveAsync) so a newer
+    /// snapshot can never be overwritten by an older one still in flight.
     func saveSnapshotNow() {
         guard hasScanned else { return }
         snapshotSaveTask?.cancel()
+        lastSnapshotWrite = Date()
         let snap = makeSnapshot()
-        Task.detached(priority: .utility) { ScanSnapshotStore.save(snap) }
+        ScanSnapshotStore.saveAsync(snap) { [weak self] ok in
+            Task { @MainActor in self?.noteSnapshotWrite(succeeded: ok) }
+        }
+    }
+
+    /// Synchronous flush for app termination: the debounced/async save can't be
+    /// relied on to finish as the process exits, so ⌘Q inside the debounce window
+    /// would otherwise drop the tail of the session. Writes on the calling actor so
+    /// it completes before the app dies.
+    func flushSnapshotSync() {
+        guard hasScanned, !isScanning else { return }
+        snapshotSaveTask?.cancel()
+        ScanSnapshotStore.saveSync(makeSnapshot())
+    }
+
+    /// Record a save outcome. On failure, raise a one-shot disk-full notice (the
+    /// view localizes and banners it) so the user can free space before quitting;
+    /// on success, clear the latch so a later relapse re-notifies.
+    private func noteSnapshotWrite(succeeded: Bool) {
+        if succeeded {
+            snapshotWriteFailedNotified = false
+        } else if !snapshotWriteFailedNotified {
+            snapshotWriteFailedNotified = true
+            snapshotSaveFailedNotice = true
+        }
     }
 
     /// Persist after a decision change, debounced so a burst of keystrokes
     /// (x x x j x…) writes once, not per key.
     func scheduleSnapshotSave() {
         guard hasScanned, !isScanning else { return }
+        // Max-deferral cap: a keystroke cadence faster than the debounce interval
+        // re-arms the timer on every key and would defer persistence indefinitely.
+        // Once enough time has passed since the last save, force one now regardless
+        // of the ongoing burst so a long uninterrupted run can't go unpersisted.
+        if Date().timeIntervalSince(lastSnapshotWrite) > 15 {
+            saveSnapshotNow()
+            return
+        }
         snapshotSaveTask?.cancel()
         snapshotSaveTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -1296,6 +1356,9 @@ final class LibraryModel: ObservableObject {
 
         var restoredGroups: [ReviewGroup] = []
         var exactIDs: Set<ReviewGroup.ID> = []
+        // Count app-seeded suggestions dropped by the stale demotion so the UI can
+        // stand up a persistent notice (a launch banner alone would fade unseen).
+        var staleClearedSeeds = 0
         for gs in snap.groups {
             // Refresh the cheap live flags from the re-fetched assets: a photo
             // favorited OR edited since the scan must be protected NOW, not as of
@@ -1325,6 +1388,7 @@ final class LibraryModel: ObservableObject {
                 .subtracting(protected)   // protection re-applies on restore
             g.autoSeeded = Set(gs.autoSeeded).intersection(g.rejected)
             if !tokenCurrent {
+                staleClearedSeeds += g.autoSeeded.count
                 g.rejected.subtract(g.autoSeeded)   // stale app suggestions die
                 g.autoSeeded = []
             }
@@ -1344,6 +1408,13 @@ final class LibraryModel: ObservableObject {
         exactDupeGroupIDs = exactIDs
         categories = restoredCats
         hasScanned = true
+        // Rehydrate the scan kind so a later makeSnapshot round-trips it and the
+        // stale-restore bar's Rescan re-runs the same kind of scan.
+        if let kind = ScanKind(rawValue: snap.kind) { lastScanKind = kind }
+        // Standing notice: a stale token silently stripped every app-seeded
+        // suggestion above — surface how many so the user isn't left wondering
+        // where yesterday's pre-marks went (nil = nothing dropped).
+        staleRestoreClearedCount = (!tokenCurrent && staleClearedSeeds > 0) ? staleClearedSeeds : nil
         // Carry the ORIGINAL reference token forward so post-restore decision
         // saves preserve the scan's staleness anchor (not "now").
         scanChangeToken = snap.changeToken
@@ -1579,10 +1650,13 @@ final class LibraryModel: ObservableObject {
             PHAssetChangeRequest.deleteAssets(assets as NSArray)
         }
 
-        // Append audit log (best-effort, never aborts the deletion).
+        // Append audit log (best-effort, never aborts the deletion). A write
+        // failure (e.g. full disk) still commits the delete, but the accountability
+        // record is missing — flag it so the completion banner says so honestly.
+        lastDeleteAuditFailed = false
         if !auditRecords.isEmpty {
             let session = DeletionSession(timestamp: timestamp, records: auditRecords)
-            DeletionAuditLog.append(session)
+            lastDeleteAuditFailed = !DeletionAuditLog.append(session)
         }
 
         // Drop deleted frames; a group that loses all but its keeper is resolved.

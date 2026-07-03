@@ -1344,12 +1344,59 @@ struct L10n: Sendable {
         case .zhTW: return "已還原上次掃描：\(n) 組（含你的標記）"
         }
     }
-    /// Same, but the library changed since the snapshot was taken.
+    /// Same, but the library changed since the snapshot was taken — the app's own
+    /// suggestions were cleared, so say so rather than a vague "consider rescanning".
     func snapshotRestoredStale() -> String {
         switch language {
-        case .en: return "Restored your last scan — the library has changed since; consider rescanning"
-        case .ja: return "前回のスキャンを復元しました — その後ライブラリが変わっています。再スキャンをおすすめします"
-        case .zhTW: return "已還原上次掃描：圖庫在那之後有變動，建議重新掃描"
+        case .en: return "Restored your last scan — the library changed since, so app suggestions were cleared. Rescan to re-verify."
+        case .ja: return "前回のスキャンを復元しました — その後ライブラリが変わったため、アプリの提案は解除しました。再スキャンで確認し直せます。"
+        case .zhTW: return "已還原上次掃描：圖庫在那之後有變動，因此已清除 App 的建議。重新掃描即可重新驗證。"
+        }
+    }
+
+    /// Persistent inline bar shown when a stale-token restore dropped N app-seeded
+    /// suggestions — a launch banner fades before the user (who may have relaunched
+    /// in the background) looks, so this stands until they rescan or dismiss it.
+    func staleRestoreBar(_ n: Int) -> String {
+        switch language {
+        case .en: return "Library changed since your last scan — \(n) duplicate suggestions cleared. Rescan to re-verify."
+        case .ja: return "前回のスキャン後にライブラリが変わりました — 重複の提案 \(n) 件を解除しました。再スキャンで確認し直せます。"
+        case .zhTW: return "上次掃描後圖庫有變動：已清除 \(n) 項重複建議。重新掃描即可重新驗證。"
+        }
+    }
+    /// Rescan button in the stale-restore bar.
+    func staleRestoreRescan() -> String {
+        switch language {
+        case .en: return "Rescan"
+        case .ja: return "再スキャン"
+        case .zhTW: return "重新掃描"
+        }
+    }
+    /// Accessibility label for the stale-restore bar's dismiss (×) button.
+    func staleRestoreDismiss() -> String {
+        switch language {
+        case .en: return "Dismiss"
+        case .ja: return "閉じる"
+        case .zhTW: return "關閉"
+        }
+    }
+
+    /// Banner when a snapshot write failed (disk full is the target user's normal
+    /// state) — review decisions live only in that file, so warn before they quit.
+    func snapshotSaveFailed() -> String {
+        switch language {
+        case .en: return "Couldn't save your review progress (disk full?) — free up space before quitting or your decisions won't survive relaunch."
+        case .ja: return "レビューの進行状況を保存できませんでした（ディスクの空き容量不足？）— 終了する前に空き容量を確保しないと、判定が次回起動時に失われます。"
+        case .zhTW: return "無法儲存你的檢視進度（磁碟空間不足？）— 結束前請先釋放空間，否則你的判斷不會保留到下次開啟。"
+        }
+    }
+    /// Appended to the delete-completion banner when the audit line couldn't be
+    /// written — the delete stands but its accountability record is missing.
+    func commitAuditFailed() -> String {
+        switch language {
+        case .en: return "audit record couldn't be written (disk full?)"
+        case .ja: return "監査記録を書き込めませんでした（ディスクの空き容量不足？）"
+        case .zhTW: return "但無法寫入稽核記錄（磁碟空間不足？）"
         }
     }
 

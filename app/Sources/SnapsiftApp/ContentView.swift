@@ -219,6 +219,7 @@ struct ContentView: View {
                 detail
                     .frame(maxWidth: .infinity)
                     .safeAreaInset(edge: .top) { scopeBar }
+                    .safeAreaInset(edge: .top) { staleRestoreBar }
                 if showHelp {
                     Divider()
                     helpPanel
@@ -253,6 +254,23 @@ struct ContentView: View {
                 model.scanNotice = nil
             }
         }
+        // A snapshot write failed (typically a full disk — this app's target
+        // user). Review decisions live only in that file, so warn once before the
+        // user quits and loses them; the model latches so it fires at most once
+        // per failure streak.
+        .onChange(of: model.snapshotSaveFailedNotice) { _, failed in
+            if failed {
+                showBanner(t.snapshotSaveFailed())
+                model.snapshotSaveFailedNotice = false
+            }
+        }
+        // Flush synchronously on ⌘Q: the debounced/async save can't be relied on
+        // to finish as the process exits, so persist the tail of the session now.
+        #if os(macOS)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            model.flushSnapshotSync()
+        }
+        #endif
         // Keep the grid focus in sync when the selection changes by mouse —
         // otherwise focusedFrame keeps pointing into the previously selected
         // group and arrow keys / ⇧⌘R act on a stale frame.
@@ -982,6 +1000,38 @@ struct ContentView: View {
         .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .bottom)
     }
 
+    /// Persistent notice that a stale-token restore cleared app-seeded suggestions.
+    /// Unlike the launch banner it stays until the user rescans or dismisses it —
+    /// the drop happened at the exact moment they were least likely to be watching,
+    /// so a vanishing banner would leave "where did my pre-marks go?" unanswered.
+    @ViewBuilder private var staleRestoreBar: some View {
+        if let n = model.staleRestoreClearedCount {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.reefAmber)
+                Text(t.staleRestoreBar(n))
+                    .font(.callout)
+                    .foregroundStyle(Color.reefText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button(t.staleRestoreRescan()) { requestScan(model.lastScanKind) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.reefMint)
+                    .controlSize(.small)
+                Button { model.staleRestoreClearedCount = nil } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.reefTextDim)
+                .accessibilityLabel(t.staleRestoreDismiss())
+            }
+            .padding(.horizontal, 16).padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(Color.reefAmber.opacity(0.12))
+            .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .bottom)
+        }
+    }
+
     /// A compact menu that lets the user pick "Whole Library" or a specific album.
     /// Albums are loaded once when access is granted; the list is sorted A→Z.
     private var sourceMenu: some View {
@@ -1299,6 +1349,9 @@ struct ContentView: View {
             if n > 0 { parts.append(t.deletedBanner(n)) }
             if protectedDropped > 0 { parts.append(t.commitProtectedKept(protectedDropped)) }
             if burstSkipped > 0 { parts.append(t.commitBurstSkipped(burstSkipped)) }
+            // Honestly report a missing audit record — the delete stood but its
+            // accountability line couldn't be written (disk full is the norm here).
+            if model.lastDeleteAuditFailed { parts.append(t.commitAuditFailed()) }
             if !parts.isEmpty { showBanner(parts.joined(separator: "  ")) }
         } catch {
             // Cancelling macOS's own delete-confirmation sheet is a normal user

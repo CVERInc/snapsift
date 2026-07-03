@@ -94,9 +94,12 @@ public struct DeletionAuditLog: Sendable {
     // MARK: - Write
 
     /// Append one session to the log. Creates the directory and file if needed.
-    /// Errors are swallowed — audit-log failure must NEVER abort a deletion.
-    public static func append(_ session: DeletionSession) {
-        guard !session.records.isEmpty else { return }
+    /// Never throws — audit-log failure must NEVER abort a deletion — but returns
+    /// false so the caller can honestly report a missing record (a mass delete that
+    /// wrote no audit line undermines the accountability story otherwise).
+    @discardableResult
+    public static func append(_ session: DeletionSession) -> Bool {
+        guard !session.records.isEmpty else { return true }
         do {
             let fm = FileManager.default
             let dir = directory
@@ -106,7 +109,7 @@ public struct DeletionAuditLog: Sendable {
             let encoder = JSONEncoder()
             encoder.outputFormatting = []   // compact single line
             let data = try encoder.encode(session)
-            guard var line = String(data: data, encoding: .utf8) else { return }
+            guard var line = String(data: data, encoding: .utf8) else { return false }
             line += "\n"
             let lineData = Data(line.utf8)
             let url = logURL
@@ -123,8 +126,11 @@ public struct DeletionAuditLog: Sendable {
             } else {
                 try lineData.write(to: url, options: .atomic)
             }
+            return true
         } catch {
-            // Intentionally silent — audit log is best-effort.
+            // Never fatal — the deletion already committed — but the caller is told
+            // so it can surface "deleted, but couldn't write the audit record".
+            return false
         }
     }
 

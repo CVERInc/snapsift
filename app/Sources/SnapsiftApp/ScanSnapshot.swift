@@ -50,8 +50,17 @@ enum ScanSnapshotStore {
         DeletionAuditLog.directory.appendingPathComponent("last-scan.json")
     }
 
-    /// Best-effort write — persistence failures must never break a scan.
-    static func save(_ snapshot: ScanSnapshot) {
+    /// Serializes writes so enqueue order equals on-disk order: two same-priority
+    /// detached saves would otherwise race and an older snapshot could overwrite a
+    /// newer one, resurrecting just-deleted frames on relaunch. Callers enqueue
+    /// from the main actor, so FIFO here preserves capture order.
+    private static let saveQueue = DispatchQueue(label: "net.cver.snapsift.snapshot-save", qos: .utility)
+
+    /// Write failures never break a scan, but the snapshot is the SOLE store of
+    /// the user's review decisions (not a rebuildable cache), so a failure must be
+    /// surfaced by the caller — returns false so a disk-full loss doesn't go silent.
+    @discardableResult
+    static func save(_ snapshot: ScanSnapshot) -> Bool {
         do {
             let dir = DeletionAuditLog.directory
             if !FileManager.default.fileExists(atPath: dir.path) {
@@ -59,9 +68,28 @@ enum ScanSnapshotStore {
             }
             let data = try JSONEncoder().encode(snapshot)
             try data.write(to: url, options: .atomic)
+            return true
         } catch {
-            // Intentionally silent — the cache is a convenience layer.
+            return false
         }
+    }
+
+    /// Enqueue an asynchronous, serialized write and report the outcome on the
+    /// caller's actor. The encode+write run on `saveQueue`, so writes land in the
+    /// order they were enqueued regardless of scheduler pressure.
+    static func saveAsync(_ snapshot: ScanSnapshot, completion: @escaping @Sendable (Bool) -> Void) {
+        saveQueue.async {
+            let ok = save(snapshot)
+            completion(ok)
+        }
+    }
+
+    /// Synchronous, ordering-preserving write for app termination: runs on the
+    /// same serial queue so it lands AFTER any already-enqueued async writes, and
+    /// blocks the caller until the bytes are on disk (the process may exit next).
+    @discardableResult
+    static func saveSync(_ snapshot: ScanSnapshot) -> Bool {
+        saveQueue.sync { save(snapshot) }
     }
 
     static func load() -> ScanSnapshot? {
