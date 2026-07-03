@@ -67,15 +67,15 @@ struct PreCommitReviewSheet: View {
             if totalProtected > 0 {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.lock.fill")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.reefRed)
                     Text(t.preCommitProtectedWarning(totalProtected))
                         .font(.callout.bold())
-                        .foregroundStyle(.red)
+                        .foregroundStyle(Color.reefRed)
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.red.opacity(0.08))
+                .background(Color.reefRed.opacity(0.08))
 
                 Divider().background(Color.reefBorder)
             }

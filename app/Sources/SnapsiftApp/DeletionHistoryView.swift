@@ -26,12 +26,15 @@ struct DeletionHistoryView: View {
     @State private var exportError: String?
     @State private var exportSaved = false
 
-    private let displayFmt: DateFormatter = {
+    // Follows the in-app language override, not the system locale — otherwise a
+    // system-en / app-zh-TW user gets English-format dates inside Chinese rows.
+    private var displayFmt: DateFormatter {
         let f = DateFormatter()
+        f.locale = t.language.locale
         f.dateStyle = .medium
         f.timeStyle = .short
         return f
-    }()
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -172,7 +175,7 @@ struct DeletionHistoryView: View {
                                 Text("\(t.historyKeeperLabel()) \(r.keeperFilename.isEmpty && r.keeperIdentifier.isEmpty ? t.historyNoSurvivor() : (r.keeperFilename.isEmpty ? r.keeperIdentifier : r.keeperFilename))")
                                     .font(.caption2)
                                     .foregroundStyle(Color.reefTextDim)
-                                Text("\(t.historyReasonLabel()) \(r.reason.rawValue)")
+                                Text("\(t.historyReasonLabel()) \(t.historyReasonName(r.reason))")
                                     .font(.caption2)
                                     .foregroundStyle(Color.reefTextDim)
                             }
@@ -218,7 +221,21 @@ struct DeletionHistoryView: View {
     private func exportLog() {
         exportSaved = false
         // Build the export string once, here, instead of on every body render.
-        exportDoc = PlainTextDocument(text: DeletionAuditLog.exportText(sessions: sessions))
+        // Localized labels keep the exported file honest in the user's language,
+        // matching the localized filename (Core stays UI-framework-free).
+        let labels = DeletionAuditLog.ExportLabels(
+            title: t.historyExportTitle(),
+            empty: t.historyExportEmpty(),
+            unknown: t.historyUnknown(),
+            reasonLabel: t.historyReasonLabel(),
+            keeperLabel: t.historyKeeperLabel(),
+            noSurvivor: t.historyNoSurvivor(),
+            session: { t.historySessionHeader(date: $0, count: $1) },
+            recoverable: { t.historyRecoverable(until: $0) },
+            reasonName: { t.historyReasonName($0) },
+            dateLocale: t.language.locale
+        )
+        exportDoc = PlainTextDocument(text: DeletionAuditLog.exportText(sessions: sessions, labels: labels))
         exporting = true
     }
 

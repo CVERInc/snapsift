@@ -1385,6 +1385,36 @@ do {
           "no-survivor keeper line is never left blank")
 }
 
+// ExportLabels lets the app layer inject localized strings + a reason mapper
+// so the exported log is honest in the user's language (the filename already is)
+// while SnapsiftCore stays UI-framework-free.
+print("Export label injection")
+do {
+    let rec = DeletionRecord(timestamp: "2026-07-03T00:00:00Z",
+                             assetIdentifier: "U9", filename: "IMG_9.heic",
+                             sizeBytes: 0, keeperIdentifier: "U1",
+                             keeperFilename: "IMG_1.heic", reason: .exactDuplicate)
+    let labels = DeletionAuditLog.ExportLabels(
+        title: "刪除記錄",
+        reasonLabel: "原因：",
+        keeperLabel: "保留：",
+        reasonName: { $0 == .exactDuplicate ? "完全相同（App 標記）" : $0.rawValue }
+    )
+    let text = DeletionAuditLog.exportText(
+        sessions: [DeletionSession(timestamp: "2026-07-03T00:00:00Z", records: [rec])],
+        labels: labels)
+    check(text.contains("刪除記錄"), "export uses the injected title")
+    check(text.contains("原因： 完全相同（App 標記）"),
+          "export uses the injected reason label + localized reason name")
+    check(!text.contains("exactDuplicate"),
+          "raw enum identifier never leaks when a reasonName mapper is supplied")
+    // Default labels keep the English machine-readable form (back-compat).
+    let plain = DeletionAuditLog.exportText(
+        sessions: [DeletionSession(timestamp: "2026-07-03T00:00:00Z", records: [rec])])
+    check(plain.contains("reason: exactDuplicate"),
+          "default labels preserve the stable English/rawValue export")
+}
+
 // append now returns Bool so a write failure (e.g. full disk) can be surfaced
 // instead of silently swallowed. The empty-records no-op reports success without
 // touching disk — the caller must not treat "nothing to log" as a failure.

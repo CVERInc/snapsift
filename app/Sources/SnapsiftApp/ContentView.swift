@@ -111,7 +111,7 @@ struct ContentView: View {
             }
         } message: {
             if let err = model.saveRotationError {
-                Text(err.localizedDescription)
+                Text(t.saveRotationErrorBody(err))
             }
         }
         // Pass 2b: observe save-rotation result published values.
@@ -1174,7 +1174,9 @@ struct ContentView: View {
         if album.estimatedCount >= 0 {
             return "\(album.title)  (\(album.estimatedCount))"
         }
-        return album.title
+        // No cached count yet — show the documented placeholder rather than an
+        // unqualified title that reads as "0" or "unknown".
+        return "\(album.title)  (\(t.albumCountUnknown()))"
     }
 
     // MARK: status bar (reclaim summary)
@@ -1579,7 +1581,9 @@ struct GroupReview: View {
                         }
                         .buttonStyle(.bordered)
                         .tint(group.deleteAll ? .reefRed : .reefTeal)
-                        .help(t.tipDeleteAll())
+                        .help(group.deleteAll && group.includeProtected
+                              ? t.tipDeleteAllIncludingProtected()
+                              : t.tipDeleteAll())
                     }
                     Button { model.keepAll(group: group.id) } label: {
                         Label(group.keepAll ? t.keepingAll() : t.keepAll(),

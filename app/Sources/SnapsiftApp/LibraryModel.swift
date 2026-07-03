@@ -943,7 +943,7 @@ final class LibraryModel: ObservableObject {
         guard let repAsset else { return t.setFallbackName() }
         let tags = await CategoryScanner.labels(for: repAsset, manager: manager)
         guard let top = tags.first else { return t.setFallbackName() }
-        if let pretty = await Apfel.albumName(tags: tags) { return pretty }
+        if let pretty = await Apfel.albumName(tags: tags, language: t.language) { return pretty }
         return CategoryScanner.displayName(top)
     }
 
@@ -1575,7 +1575,11 @@ final class LibraryModel: ObservableObject {
     /// "nothing new" if all assets were already in the albums).
     @discardableResult
     func writeAlbums(_ t: L10n) async throws -> String {
-        guard !isWritingAlbums, !groups.isEmpty else { return t.albumsNothingNew() }
+        // Return a fully formed banner ("Sorted into albums · nothing new to add")
+        // rather than the bare fragment, which reads as an uncapitalized floater.
+        guard !isWritingAlbums, !groups.isEmpty else {
+            return t.albumsWritten(bursts: 0, blurry: 0, docs: 0, exact: 0)
+        }
         isWritingAlbums = true
         progress = t.progWritingAlbums()
         defer { isWritingAlbums = false; progress = "" }

@@ -154,13 +154,57 @@ public struct DeletionAuditLog: Sendable {
 
     // MARK: - Export helpers
 
+    /// Localized labels for the plain-text export. SnapsiftCore stays
+    /// UI-framework-free, so the app layer injects translated strings (and a
+    /// reason mapper) instead of Core importing L10n. Defaults are English, so a
+    /// caller with no localization still gets a sensible file.
+    public struct ExportLabels: Sendable {
+        public let title: String
+        public let empty: String
+        public let unknown: String
+        public let reasonLabel: String
+        public let keeperLabel: String
+        public let noSurvivor: String
+        public let session: @Sendable (_ date: String, _ count: Int) -> String
+        public let recoverable: @Sendable (_ until: String) -> String
+        public let reasonName: @Sendable (DeletionReason) -> String
+        /// Locale used to format the dates embedded in the export.
+        public let dateLocale: Locale
+
+        public init(
+            title: String = "snapsift Deletion History",
+            empty: String = "No deletion history.",
+            unknown: String = "unknown",
+            reasonLabel: String = "reason:",
+            keeperLabel: String = "keeper:",
+            noSurvivor: String = "(no survivor)",
+            session: @escaping @Sendable (String, Int) -> String = { "Session: \($0)  (\($1) photos removed)" },
+            recoverable: @escaping @Sendable (String) -> String = { "In Recently Deleted — recoverable until \($0)" },
+            reasonName: @escaping @Sendable (DeletionReason) -> String = { $0.rawValue },
+            dateLocale: Locale = .current
+        ) {
+            self.title = title
+            self.empty = empty
+            self.unknown = unknown
+            self.reasonLabel = reasonLabel
+            self.keeperLabel = keeperLabel
+            self.noSurvivor = noSurvivor
+            self.session = session
+            self.recoverable = recoverable
+            self.reasonName = reasonName
+            self.dateLocale = dateLocale
+        }
+    }
+
     /// Return a human-readable plain-text summary of all sessions, suitable for
     /// writing to a .txt export file.
-    public static func exportText(sessions: [DeletionSession]) -> String {
-        guard !sessions.isEmpty else { return "No deletion history." }
-        var lines: [String] = ["snapsift Deletion History", "========================", ""]
+    public static func exportText(sessions: [DeletionSession],
+                                  labels: ExportLabels = ExportLabels()) -> String {
+        guard !sessions.isEmpty else { return labels.empty }
+        var lines: [String] = [labels.title, String(repeating: "=", count: 24), ""]
         let df = ISO8601DateFormatter()
         let displayFmt = DateFormatter()
+        displayFmt.locale = labels.dateLocale
         displayFmt.dateStyle = .medium
         displayFmt.timeStyle = .short
         for session in sessions {
@@ -169,18 +213,18 @@ public struct DeletionAuditLog: Sendable {
             if let d = session.recoverableUntil {
                 recoverUntil = displayFmt.string(from: d)
             } else {
-                recoverUntil = "unknown"
+                recoverUntil = labels.unknown
             }
-            lines.append("Session: \(date)  (\(session.records.count) photos removed)")
-            lines.append("In Recently Deleted — recoverable until \(recoverUntil)")
+            lines.append(labels.session(date, session.records.count))
+            lines.append(labels.recoverable(recoverUntil))
             for r in session.records {
                 let name = r.filename.isEmpty ? r.assetIdentifier : r.filename
                 let kb = r.sizeBytes > 0 ? " [\(r.sizeBytes / 1024) KB]" : ""
                 // Empty keeper fields are the no-survivor sentinel (the group's
                 // keeper was itself force-rejected) — never print a blank keeper.
                 let keeper = (r.keeperFilename.isEmpty && r.keeperIdentifier.isEmpty)
-                    ? "(no survivor)" : r.keeperFilename
-                lines.append("  - \(name)\(kb)  reason: \(r.reason.rawValue)  keeper: \(keeper)")
+                    ? labels.noSurvivor : r.keeperFilename
+                lines.append("  - \(name)\(kb)  \(labels.reasonLabel) \(labels.reasonName(r.reason))  \(labels.keeperLabel) \(keeper)")
             }
             lines.append("")
         }

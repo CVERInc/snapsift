@@ -53,6 +53,15 @@ enum AlbumWriter {
     /// as "可安心清 / safe to remove".
     static func albumExact(_ t: L10n) -> String   { prefix + t.albumNameExact() }
 
+    /// Every language's title for a bucket. Album resolution matches ANY of these
+    /// so flipping the UI language between sorts resolves the album the user
+    /// already has instead of spawning a duplicate parallel set — the localized
+    /// title alone can't be the idempotency key. Creation still uses the active
+    /// language's title (passed separately as `name`).
+    static func allTitles(_ suffix: (L10n) -> String) -> [String] {
+        Language.allCases.map { prefix + suffix(L10n($0)) }
+    }
+
     // MARK: - Write
 
     /// Sort the scan result into Photos albums. Returns a summary of how many
@@ -98,19 +107,23 @@ enum AlbumWriter {
         // keeps the operations small and lets PhotoKit interleave UI updates.
         if !burstsAssets.isEmpty {
             result.bursts = try await addAssets(burstsAssets,
-                                                toAlbumNamed: albumBursts(t))
+                                                toAlbumNamed: albumBursts(t),
+                                                candidateTitles: allTitles { $0.albumNameBursts() })
         }
         if !blurryAssets.isEmpty {
             result.blurry = try await addAssets(blurryAssets,
-                                                toAlbumNamed: albumBlurry(t))
+                                                toAlbumNamed: albumBlurry(t),
+                                                candidateTitles: allTitles { $0.albumNameBlurry() })
         }
         if !docsAssets.isEmpty {
             result.documents = try await addAssets(docsAssets,
-                                                   toAlbumNamed: albumDocs(t))
+                                                   toAlbumNamed: albumDocs(t),
+                                                   candidateTitles: allTitles { $0.albumNameDocs() })
         }
         if !exactAssets.isEmpty {
             result.exactDupes = try await addAssets(exactAssets,
-                                                    toAlbumNamed: albumExact(t))
+                                                    toAlbumNamed: albumExact(t),
+                                                    candidateTitles: allTitles { $0.albumNameExact() })
         }
         return result
     }
@@ -194,26 +207,43 @@ enum AlbumWriter {
     /// incoming set, and only add the newcomers. This means re-running the scan
     /// and clicking "Sort into albums" again is always safe — no duplicate
     /// membership, no error.
+    ///
+    /// `name`            — the album title to CREATE under if none exists (active language).
+    /// `candidateTitles` — every language's title for this bucket; resolution
+    ///                     matches any of them so a language flip doesn't duplicate.
     @discardableResult
     private static func addAssets(_ assets: [PHAsset],
-                                  toAlbumNamed name: String) async throws -> Int {
+                                  toAlbumNamed name: String,
+                                  candidateTitles: [String]) async throws -> Int {
         // Step 1: resolve (or create) the album — read-only fetch first to
-        // avoid an unnecessary write transaction.
+        // avoid an unnecessary write transaction. Match ANY language's title.
         let existing = PHAssetCollection.fetchAssetCollections(
             with: .album, subtype: .albumRegular,
             options: {
                 let o = PHFetchOptions()
-                o.predicate = NSPredicate(format: "localizedTitle == %@", name)
+                o.predicate = NSPredicate(format: "localizedTitle IN %@", candidateTitles)
                 return o
             }()
         )
+
+        // If the user accumulated several albums from earlier language flips,
+        // prefer the current-language one; otherwise take the first match.
+        var resolved: PHAssetCollection? = nil
+        existing.enumerateObjects { col, _, stop in
+            if col.localizedTitle == name {
+                resolved = col
+                stop.pointee = true
+            } else if resolved == nil {
+                resolved = col
+            }
+        }
 
         // Step 2: diff against current members so we never double-add.
         // Compute the set of ids we want to add before entering performChanges.
         var toAdd: [PHAsset] = []
         var collectionLocalID: String? = nil
 
-        if let album = existing.firstObject {
+        if let album = resolved {
             collectionLocalID = album.localIdentifier
             let memberResult = PHAsset.fetchAssets(in: album, options: nil)
             var memberIDs = Set<String>()

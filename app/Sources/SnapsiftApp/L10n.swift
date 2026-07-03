@@ -1,4 +1,5 @@
 import Foundation
+import SnapsiftCore
 
 /// All user-facing strings, resolved for one ``Language``. Every message is an
 /// exhaustive `switch`, so the compiler refuses to build until a newly added
@@ -93,13 +94,6 @@ struct L10n: Sendable {
         case .zhTW: return "把你對同一個東西拍了好幾張的成組，整理成有名字的相簿（不刪任何東西）"
         }
     }
-    func progClassifying(_ i: Int, _ total: Int) -> String {
-        switch language {
-        case .en: return "Classifying \(i)/\(total)…"
-        case .ja: return "分類中 \(i)/\(total)…"
-        case .zhTW: return "分類中 \(i)/\(total)…"
-        }
-    }
     func progNaming(_ i: Int, _ total: Int) -> String {
         switch language {
         case .en: return "Naming sets \(i)/\(total)…"
@@ -125,7 +119,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "Keyboard"
         case .ja: return "キーボード"
-        case .zhTW: return "鍵盤快捷"
+        case .zhTW: return "鍵盤快速鍵"
         }
     }
     func helpClose() -> String {
@@ -176,6 +170,7 @@ struct L10n: Sendable {
             ("⏎",              "Keep frame + set keeper ★"),
             ("⇧X",             "Force-reject protected frame"),
             ("R / ⇧R",         "Rotate frame · display only"),
+            ("⇧⌘R",            "Save rotation to Photos"),
             ("Esc",            "Back to list"),
             // Loupe zone
             ("← → ↑ ↓ / hjkl", "Loupe: prev / next frame"),
@@ -188,6 +183,7 @@ struct L10n: Sendable {
             // Global
             ("⌘⌫",             "Commit — delete all rejected"),
             ("⌘⏎",             "Review sheet: confirm delete"),
+            ("⌘1–⌘5",          "Scans · Faces · Sort into Albums"),
             ("?",              "This cheat sheet"),
         ]
         case .ja: return [
@@ -202,6 +198,7 @@ struct L10n: Sendable {
             ("⏎",              "このフレームを残す ★"),
             ("⇧X",             "保護フレームを強制削除"),
             ("R / ⇧R",         "フレームを回転・表示のみ"),
+            ("⇧⌘R",            "回転を写真に保存"),
             ("Esc",            "リストへ戻る"),
             ("← → ↑ ↓ / hjkl", "ルーペ：前／次"),
             ("1–9",            "ルーペ：n 番目を残す ★"),
@@ -212,6 +209,7 @@ struct L10n: Sendable {
             ("スペース / Esc", "ルーペを閉じる"),
             ("⌘⌫",             "削除を実行"),
             ("⌘⏎",             "確認シート：削除を確定"),
+            ("⌘1–⌘5",          "スキャン・顔・アルバムに仕分け"),
             ("?",              "このキー一覧"),
         ]
         case .zhTW: return [
@@ -222,21 +220,23 @@ struct L10n: Sendable {
             ("← → ↑ ↓ / hjkl","格子間移動"),
             ("1–9",            "把第 n 張立為保留 ★"),
             ("空白",            "開啟放大鏡"),
-            ("X / ⌫",          "標刪這張・切換"),
+            ("X / ⌫",          "標刪這張 · 切換"),
             ("⏎",              "保留這張並設為主保留 ★"),
             ("⇧X",             "強制標刪受保護的張"),
-            ("R / ⇧R",         "旋轉這張・僅顯示用"),
+            ("R / ⇧R",         "旋轉這張 · 僅顯示用"),
+            ("⇧⌘R",            "儲存旋轉至「照片」"),
             ("Esc",            "回到清單"),
             ("← → ↑ ↓ / hjkl", "放大鏡：前一張／後一張"),
             ("1–9",            "放大鏡：把第 n 張立為保留 ★"),
-            ("X / ⌫",          "放大鏡：標刪這張・切換"),
+            ("X / ⌫",          "放大鏡：標刪這張 · 切換"),
             ("⏎",              "放大鏡：保留這張並設為主保留 ★"),
             ("⇧X",             "放大鏡：強制標刪受保護的張"),
-            ("R / ⇧R",         "放大鏡：旋轉・僅顯示用"),
+            ("R / ⇧R",         "放大鏡：旋轉 · 僅顯示用"),
             ("空白 / Esc",     "關閉放大鏡"),
             ("⌘⌫",             "執行刪除所有標刪"),
             ("⌘⏎",             "審核視窗：確認刪除"),
-            ("?",              "這張快捷小抄"),
+            ("⌘1–⌘5",          "掃描 · 人臉 · 整理進相簿"),
+            ("?",              "這張快速鍵小抄"),
         ]
         }
     }
@@ -260,7 +260,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "No matches for “\(query)” — clear the search to see all sets"
         case .ja: return "「\(query)」に一致なし — 検索を消すとすべて表示"
-        case .zhTW: return "沒有符合「\(query)」的結果 — 清除搜尋即可看全部"
+        case .zhTW: return "沒有符合「\(query)」的結果 —— 清除搜尋即可看全部"
         }
     }
 
@@ -294,7 +294,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "snapsift needs Full Photos access to find and remove duplicates across your whole library.\n\nYou've currently granted \"Selected Photos\" — snapsift can't see or delete photos outside that selection. Open System Settings ▸ Privacy & Security ▸ Photos and set snapsift to Full Access."
         case .ja: return "snapsift は重複写真をライブラリ全体で検索・削除するために、「すべての写真」へのアクセスが必要です。\n\n現在「選択した写真」のみが許可されています。システム設定 ▸ プライバシーとセキュリティ ▸ 写真 を開き、snapsift を「フルアクセス」に変更してください。"
-        case .zhTW: return "snapsift 需要「完整照片」存取權限，才能掃描整個圖庫並刪除重複照片。\n\n你目前授予的是「已選取的照片」—— snapsift 無法看到或刪除選取範圍以外的照片。請到 系統設定 ▸ 隱私權與安全性 ▸ 照片，把 snapsift 改成「完整存取」。"
+        case .zhTW: return "snapsift 需要「完整取用權限」，才能掃描整個圖庫並刪除重複照片。\n\n你目前授予的是「受限制的取用權限」—— snapsift 無法看到或刪除選取範圍以外的照片。請到 系統設定 ▸ 隱私權與安全性 ▸ 照片，把 snapsift 改成「完整取用權限」。"
         }
     }
 
@@ -323,7 +323,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "snapsift couldn't delete the photos. This usually means Photos access is set to \"Selected Photos\" rather than Full Access.\n\nOpen System Settings ▸ Privacy & Security ▸ Photos and set snapsift to Full Access, then try again."
         case .ja: return "写真を削除できませんでした。多くの場合、写真のアクセスが「フルアクセス」ではなく「選択した写真」に設定されているのが原因です。\n\nシステム設定 ▸ プライバシーとセキュリティ ▸ 写真 で snapsift を「フルアクセス」に変更してから再試行してください。"
-        case .zhTW: return "snapsift 無法刪除照片。通常是因為照片存取權限設為「已選取的照片」而非「完整存取」。\n\n請到 系統設定 ▸ 隱私權與安全性 ▸ 照片，把 snapsift 改成「完整存取」，再試一次。"
+        case .zhTW: return "snapsift 無法刪除照片。通常是因為照片存取權限設為「受限制的取用權限」而非「完整取用權限」。\n\n請到 系統設定 ▸ 隱私權與安全性 ▸ 照片，把 snapsift 改成「完整取用權限」，再試一次。"
         }
     }
 
@@ -390,9 +390,9 @@ struct L10n: Sendable {
     /// Tooltip for the "All protected" label on an all-protected armed group.
     func tipDeleteAllProtected() -> String {
         switch language {
-        case .en: return "Every frame in this group is protected (favorite / edited / document) — nothing will be deleted. Tap to disarm."
+        case .en: return "Every frame in this group is protected (favorite / edited / document) — nothing will be deleted. Click to disarm."
         case .ja: return "このグループのすべてのフレームは保護されています（お気に入り・編集済み・書類）。何も削除されません。タップで解除。"
-        case .zhTW: return "這群的每張都受保護（最愛／已編輯／文件）—— 不會刪任何東西。點一下可解除。"
+        case .zhTW: return "這群的每張都受保護（最愛／已編輯／文件）—— 不會刪任何東西。按一下可解除。"
         }
     }
 
@@ -405,7 +405,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "Protected — snapsift won't delete favorites (★), edited photos (✎), or documents (doc) unless you choose to."
         case .ja: return "保護対象 — お気に入り（★）・編集済み（✎）・書類（doc）はあなたが選ばない限り削除しません。"
-        case .zhTW: return "受保護 — snapsift 不會刪最愛（★）、已編輯（✎）或文件（doc）照片，除非你主動選擇。"
+        case .zhTW: return "受保護 —— snapsift 不會刪最愛（★）、已編輯（✎）或文件（doc）照片，除非你主動選擇。"
         }
     }
 
@@ -419,7 +419,7 @@ struct L10n: Sendable {
         switch language {
         case .en:   return "Couldn't fully check this photo — its original isn't on this Mac. Left un-marked to be safe."
         case .ja:   return "この写真を完全に確認できませんでした — オリジナルがこの Mac にありません。安全のためマークなしのままにしています。"
-        case .zhTW: return "無法完整檢查這張照片 — 原始檔不在這台 Mac 上。為了安全起見，保持未標記狀態。"
+        case .zhTW: return "無法完整檢查這張照片 —— 原始檔不在這台 Mac 上。為了安全起見，保持未標記狀態。"
         }
     }
 
@@ -495,7 +495,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "Protected — ⇧X to force-reject"
         case .ja: return "保護対象 — ⇧X で強制却下"
-        case .zhTW: return "受保護 — ⇧X 強制標刪"
+        case .zhTW: return "受保護 —— ⇧X 強制標刪"
         }
     }
 
@@ -505,7 +505,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "Protected — won't be deleted"
         case .ja: return "保護対象 — 削除されません"
-        case .zhTW: return "受保護 — 不會刪除"
+        case .zhTW: return "受保護 —— 不會刪除"
         }
     }
 
@@ -601,14 +601,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "This one gets deleted — click it to keep it instead"
         case .ja: return "これは削除されます — クリックすれば残せます"
-        case .zhTW: return "這張會被刪 — 點一下改成留它"
-        }
-    }
-    func tipFavorite() -> String {
-        switch language {
-        case .en: return "Favorite — never deleted"
-        case .ja: return "お気に入り — 絶対に削除しません"
-        case .zhTW: return "最愛 — 絕對不刪"
+        case .zhTW: return "這張會被刪 —— 按一下改成留它"
         }
     }
     func tipScan() -> String {
@@ -689,14 +682,14 @@ struct L10n: Sendable {
     /// Shown when oversized dHash-collision clusters were skipped (noise guard).
     func progSkippedClusters(_ n: Int) -> String {
         switch language {
-        case .en: return "Skipped \(n) oversized noise clusters"
+        case .en: return "Skipped \(n) oversized noise cluster\(n == 1 ? "" : "s")"
         case .ja: return "過大なノイズ群 \(n) 件をスキップ"
         case .zhTW: return "略過 \(n) 個過大的噪音群"
         }
     }
     func progFaces(_ i: Int, _ total: Int) -> String {
         switch language {
-        case .en: return "Analysing faces \(i)/\(total)…"
+        case .en: return "Analyzing faces \(i)/\(total)…"
         case .ja: return "顔を解析中 \(i)/\(total)…"
         case .zhTW: return "分析人臉 \(i)/\(total)…"
         }
@@ -715,13 +708,6 @@ struct L10n: Sendable {
         case .en: return "Album not found — it may have been deleted. Choose a source and try again."
         case .ja: return "アルバムが見つかりません（削除された可能性があります）。ソースを選び直して再試行してください。"
         case .zhTW: return "找不到相簿（可能已被刪除）。請重新選擇來源後再試。"
-        }
-    }
-    func contentCheck() -> String {
-        switch language {
-        case .en: return "Content check"
-        case .ja: return "内容チェック"
-        case .zhTW: return "內容驗證"
         }
     }
     func sectionConfident(_ n: Int) -> String {
@@ -756,7 +742,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "Keep every frame in this group — delete nothing"
         case .ja: return "このグループは全て残す（何も削除しない）"
-        case .zhTW: return "這群全部保留 — 不刪任何一張"
+        case .zhTW: return "這群全部保留 —— 不刪任何一張"
         }
     }
     /// Big-preview loader caption — shows the iCloud download % while fetching
@@ -785,9 +771,18 @@ struct L10n: Sendable {
     }
     func tipDeleteAll() -> String {
         switch language {
-        case .en: return "Delete every frame in this group (favourites stay safe)"
-        case .ja: return "このグループを全て削除（お気に入りは保護）"
-        case .zhTW: return "這群全部刪除（★ 最愛仍受保護）"
+        case .en: return "Delete every frame in this group (protected photos stay safe)"
+        case .ja: return "このグループを全て削除（保護対象は残ります）"
+        case .zhTW: return "這群全部刪除（受保護的照片不會被刪）"
+        }
+    }
+    /// Tooltip variant for an armed delete-all group whose include-protected
+    /// override is ON — protection no longer spares anything, so say so plainly.
+    func tipDeleteAllIncludingProtected() -> String {
+        switch language {
+        case .en: return "Delete every frame in this group — including protected photos (override is on)"
+        case .ja: return "このグループを全て削除 — 保護対象も含みます（上書き有効）"
+        case .zhTW: return "這群全部刪除 —— 受保護的照片也會被刪（已開啟覆寫）"
         }
     }
 
@@ -799,7 +794,7 @@ struct L10n: Sendable {
             ? ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) + " · "
             : ""
         switch language {
-        case .en: return "\(size)\(count) photos to delete"
+        case .en: return "\(size)\(count) photo\(count == 1 ? "" : "s") to delete"
         case .ja: return "\(size)削除予定 \(count)枚"
         case .zhTW: return "\(size)待刪 \(count) 張"
         }
@@ -812,13 +807,6 @@ struct L10n: Sendable {
         case .en: return "Moved \(n) to Recently Deleted — permanent after 30 days"
         case .ja: return "\(n)枚を「最近削除した項目」へ — 30日後は完全削除"
         case .zhTW: return "已將 \(n) 張移到「最近刪除」— 30 天後永久刪除"
-        }
-    }
-    func nothingToDelete() -> String {
-        switch language {
-        case .en: return "Nothing marked for deletion"
-        case .ja: return "削除対象がありません"
-        case .zhTW: return "沒有標記要刪除的項目"
         }
     }
     /// Shown after a commit when frames became protected (favorited/edited in
@@ -836,7 +824,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "skipped \(n) burst — delete those in Photos"
         case .ja: return "バースト\(n)件はスキップ — 写真アプリで削除してください"
-        case .zhTW: return "跳過 \(n) 個連拍 — 請在「照片」中刪除"
+        case .zhTW: return "跳過 \(n) 個連拍 —— 請在「照片」中刪除"
         }
     }
 
@@ -938,7 +926,7 @@ struct L10n: Sendable {
         switch language {
         case .en:   return "Write candidates into named Snapsift albums — non-destructive; nothing is deleted"
         case .ja:   return "候補を名前付き Snapsift アルバムに仕分ける（非破壊・何も削除しない）"
-        case .zhTW: return "把候選照片整理進具名的 Snapsift 相簿 — 不破壞原檔，不刪任何東西"
+        case .zhTW: return "把候選照片整理進具名的 Snapsift 相簿 —— 不破壞原檔，不刪任何東西"
         }
     }
     func progWritingAlbums() -> String {
@@ -955,7 +943,13 @@ struct L10n: Sendable {
         if blurry > 0 { parts.append(albumsWrittenBlurry(blurry)) }
         if docs   > 0 { parts.append(albumsWrittenDocs(docs)) }
         if exact  > 0 { parts.append(albumsWrittenExact(exact)) }
-        let summary = parts.isEmpty ? albumsNothingNew() : parts.joined(separator: ", ")
+        // English joins with a comma; CJK uses the ideographic comma 「、」.
+        let sep: String
+        switch language {
+        case .en:         sep = ", "
+        case .ja, .zhTW:  sep = "、"
+        }
+        let summary = parts.isEmpty ? albumsNothingNew() : parts.joined(separator: sep)
         switch language {
         case .en:   return "Sorted into albums · \(summary)"
         case .ja:   return "アルバムに仕分け完了 · \(summary)"
@@ -966,28 +960,28 @@ struct L10n: Sendable {
         switch language {
         case .en:   return "\(n) burst\(n == 1 ? "" : "s")"
         case .ja:   return "バースト \(n)枚"
-        case .zhTW: return "\(n) 近重複"
+        case .zhTW: return "近重複 \(n) 張"
         }
     }
     private func albumsWrittenBlurry(_ n: Int) -> String {
         switch language {
         case .en:   return "\(n) blurry"
         case .ja:   return "ブレ \(n)枚"
-        case .zhTW: return "\(n) 模糊"
+        case .zhTW: return "模糊 \(n) 張"
         }
     }
     private func albumsWrittenDocs(_ n: Int) -> String {
         switch language {
         case .en:   return "\(n) doc\(n == 1 ? "" : "s")"
         case .ja:   return "書類 \(n)枚"
-        case .zhTW: return "\(n) 文件"
+        case .zhTW: return "文件 \(n) 張"
         }
     }
     private func albumsWrittenExact(_ n: Int) -> String {
         switch language {
         case .en:   return "\(n) exact dup\(n == 1 ? "" : "s")"
         case .ja:   return "完全重複 \(n)枚"
-        case .zhTW: return "\(n) 完全相同"
+        case .zhTW: return "完全相同 \(n) 張"
         }
     }
     func albumsNothingNew() -> String {
@@ -1015,16 +1009,16 @@ struct L10n: Sendable {
         switch language {
         case .en:   return "Exact duplicate — same image saved twice. Safe to remove (goes to Recently Deleted)"
         case .ja:   return "完全な重複 — 同じ画像が2回保存されています。削除して問題ありません（「最近削除した項目」に移動）"
-        case .zhTW: return "完全相同 — 同一張圖存了兩份，可安心清（移到「最近刪除」，30 天內可復原）"
+        case .zhTW: return "完全相同 —— 同一張圖存了兩份，可安心清（移到「最近刪除」，30 天內可復原）"
         }
     }
     /// Tooltip for a protected frame that is in an exact-dup group — even here,
     /// protection wins.
     func tipExactDupeProtected() -> String {
         switch language {
-        case .en:   return "Exact duplicate, but protected (favorite / edited / document) — never deleted"
-        case .ja:   return "完全な重複ですが保護対象（お気に入り・編集済み・書類）— 削除しません"
-        case .zhTW: return "完全相同，但受保護（最愛／已編輯／文件）—— 絕對不刪"
+        case .en:   return "Exact duplicate, but protected (favorite / edited / document) — not deleted unless you force it (⇧X)"
+        case .ja:   return "完全な重複ですが保護対象（お気に入り・編集済み・書類）— ⇧X で強制しない限り削除しません"
+        case .zhTW: return "完全相同，但受保護（最愛／已編輯／文件）—— 不會被刪，除非你用 ⇧X 強制"
         }
     }
 
@@ -1094,7 +1088,7 @@ struct L10n: Sendable {
         switch language {
         case .en:   return "Includes \(m) protected photo\(m == 1 ? "" : "s") — favorites / edited / documents"
         case .ja:   return "保護対象 \(m)枚を含む — お気に入り・編集済み・書類"
-        case .zhTW: return "包含 \(m) 張受保護照片 — 最愛／已編輯／文件"
+        case .zhTW: return "包含 \(m) 張受保護照片 —— 最愛／已編輯／文件"
         }
     }
 
@@ -1157,7 +1151,7 @@ struct L10n: Sendable {
         switch language {
         case .en:   return "⚠️ \(n) group\(n == 1 ? "" : "s") will have no photo left — the whole set goes to Recently Deleted"
         case .ja:   return "⚠️ \(n)つのグループに写真が残りません — グループ全体が「最近削除した項目」へ"
-        case .zhTW: return "⚠️ \(n) 個群組將不留任何照片 — 整個群組都會移到「最近刪除」"
+        case .zhTW: return "⚠️ \(n) 個群組將不留任何照片 —— 整個群組都會移到「最近刪除」"
         }
     }
 
@@ -1197,7 +1191,7 @@ struct L10n: Sendable {
         switch language {
         case .en:   return "In Recently Deleted — recoverable until \(until)"
         case .ja:   return "「最近削除した項目」に保存中 — \(until) まで復元可能"
-        case .zhTW: return "在「最近刪除」中 — 可在 \(until) 前復原"
+        case .zhTW: return "在「最近刪除」中 —— 可在 \(until) 前復原"
         }
     }
     func historyExpired() -> String {
@@ -1264,6 +1258,70 @@ struct L10n: Sendable {
         case .en:   return "reason:"
         case .ja:   return "理由："
         case .zhTW: return "原因："
+        }
+    }
+    /// Human-readable, localized reason a photo was in a deletion batch. This is
+    /// the surface where the app's honest attribution shows — app-seeded exact
+    /// marks must read differently from the user's own force-removals.
+    func historyReasonName(_ reason: DeletionReason) -> String {
+        switch language {
+        case .en:
+            switch reason {
+            case .exactDuplicate:                 return "exact duplicate (app-marked)"
+            case .userRejected:                   return "you marked for removal"
+            case .forceIncludedProtectedFavorite: return "you force-removed (favorite)"
+            case .forceIncludedProtectedEdited:   return "you force-removed (edited)"
+            case .forceIncludedProtectedDocument: return "you force-removed (document)"
+            case .forceIncludedProtectedMultiple: return "you force-removed (protected)"
+            case .burstNonKeeper:                 return "burst non-keeper"
+            case .blurry:                         return "blurry"
+            }
+        case .ja:
+            switch reason {
+            case .exactDuplicate:                 return "完全な重複（App が検出）"
+            case .userRejected:                   return "自分で削除に指定"
+            case .forceIncludedProtectedFavorite: return "強制削除（お気に入り）"
+            case .forceIncludedProtectedEdited:   return "強制削除（編集済み）"
+            case .forceIncludedProtectedDocument: return "強制削除（書類）"
+            case .forceIncludedProtectedMultiple: return "強制削除（保護対象）"
+            case .burstNonKeeper:                 return "バースト非採用"
+            case .blurry:                         return "ブレ"
+            }
+        case .zhTW:
+            switch reason {
+            case .exactDuplicate:                 return "完全相同（App 標記）"
+            case .userRejected:                   return "你標記移除"
+            case .forceIncludedProtectedFavorite: return "你強制移除（最愛）"
+            case .forceIncludedProtectedEdited:   return "你強制移除（已編輯）"
+            case .forceIncludedProtectedDocument: return "你強制移除（文件）"
+            case .forceIncludedProtectedMultiple: return "你強制移除（受保護）"
+            case .burstNonKeeper:                 return "連拍非保留"
+            case .blurry:                         return "模糊"
+            }
+        }
+    }
+    /// Title line of the exported plain-text deletion log.
+    func historyExportTitle() -> String {
+        switch language {
+        case .en:   return "snapsift Deletion History"
+        case .ja:   return "snapsift 削除履歴"
+        case .zhTW: return "snapsift 刪除記錄"
+        }
+    }
+    /// Body of the export when there is no history.
+    func historyExportEmpty() -> String {
+        switch language {
+        case .en:   return "No deletion history."
+        case .ja:   return "削除履歴はありません。"
+        case .zhTW: return "沒有刪除記錄。"
+        }
+    }
+    /// Placeholder for an unresolvable recovery deadline in the export.
+    func historyUnknown() -> String {
+        switch language {
+        case .en:   return "unknown"
+        case .ja:   return "不明"
+        case .zhTW: return "未知"
         }
     }
     /// Keeper value for a no-survivor group — every frame (keeper included) was
@@ -1345,6 +1403,39 @@ struct L10n: Sendable {
         }
     }
 
+    /// Localized body for the save-rotation error alert. Keeps the mixed-language
+    /// seam closed: RotationSaveError's own errorDescription is English-only, so
+    /// map the case here instead of surfacing err.localizedDescription raw.
+    func saveRotationErrorBody(_ error: Error) -> String {
+        switch error as? RotationSaveError {
+        case .noEditingInput:
+            switch language {
+            case .en:   return "Couldn't get editing access to this photo. Try again, or check that snapsift has Full Photos access."
+            case .ja:   return "この写真の編集アクセスを取得できませんでした。もう一度試すか、snapsift に「フルアクセス」があるか確認してください。"
+            case .zhTW: return "無法取得這張照片的編輯權限。請再試一次，或確認 snapsift 已取得「完整取用權限」。"
+            }
+        case .noSourceImage:
+            switch language {
+            case .en:   return "Couldn't load the full-size original. The photo may still be downloading from iCloud."
+            case .ja:   return "フルサイズのオリジナルを読み込めませんでした。iCloud からまだダウンロード中の可能性があります。"
+            case .zhTW: return "無法載入完整原始檔，這張照片可能還在從 iCloud 下載。"
+            }
+        case .renderFailed:
+            switch language {
+            case .en:   return "Couldn't render the rotated image."
+            case .ja:   return "回転した画像を生成できませんでした。"
+            case .zhTW: return "無法產生旋轉後的影像。"
+            }
+        case .photoKitWriteFailed(let underlying):
+            switch language {
+            case .en:   return "Photos couldn't save the rotation: \(underlying.localizedDescription)"
+            case .ja:   return "写真が回転を保存できませんでした：\(underlying.localizedDescription)"
+            case .zhTW: return "「照片」無法儲存旋轉：\(underlying.localizedDescription)"
+            }
+        case nil:
+            return error.localizedDescription
+        }
+    }
     /// Dismiss button for the save-rotation error alert.
     func saveRotationErrorDismiss() -> String {
         switch language {
@@ -1368,7 +1459,7 @@ struct L10n: Sendable {
     /// Banner after a scan that found something. `n` = review sets found.
     func scanDoneBanner(_ n: Int) -> String {
         switch language {
-        case .en: return "Scan complete — \(n) sets to review"
+        case .en: return "Scan complete — \(n) set\(n == 1 ? "" : "s") to review"
         case .ja: return "スキャン完了 — 確認する組は \(n) 件"
         case .zhTW: return "掃描完成：找到 \(n) 組可檢視"
         }
@@ -1447,7 +1538,7 @@ struct L10n: Sendable {
     /// Banner when the last scan was restored from disk on launch.
     func snapshotRestored(_ n: Int) -> String {
         switch language {
-        case .en: return "Restored your last scan — \(n) sets, decisions included"
+        case .en: return "Restored your last scan — \(n) set\(n == 1 ? "" : "s"), decisions included"
         case .ja: return "前回のスキャンを復元しました — \(n) 組（判定も含む）"
         case .zhTW: return "已還原上次掃描：\(n) 組（含你的標記）"
         }
@@ -1533,7 +1624,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "snapsift reads your library's own quality scores and file sizes from Photos.sqlite (read-only). Without Full Disk Access those are unavailable, so scans still work but no reclaimable-space estimate is shown. Click to open System Settings."
         case .ja: return "snapsift は Photos.sqlite（読み取り専用）からライブラリ自身の品質スコアとファイルサイズを読み取ります。フルディスクアクセスがないと利用できず、スキャンは動作しますが解放できる容量は表示されません。クリックでシステム設定を開きます。"
-        case .zhTW: return "snapsift 會從 Photos.sqlite（唯讀）讀取圖庫自己的品質分數與檔案大小。沒有完整磁碟取用權限時掃描仍可用，但不會顯示可釋放的空間。點一下開啟「系統設定」。"
+        case .zhTW: return "snapsift 會從 Photos.sqlite（唯讀）讀取圖庫自己的品質分數與檔案大小。沒有完整磁碟取用權限時掃描仍可用，但不會顯示可釋放的空間。按一下開啟「系統設定」。"
         }
     }
 

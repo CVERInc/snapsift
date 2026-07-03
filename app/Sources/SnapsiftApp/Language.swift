@@ -10,6 +10,11 @@ enum Language: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    /// Locale for formatting dates/numbers in the active language, so composite
+    /// strings don't mix the system locale's conventions into the chosen
+    /// language. The raw values are already full locale codes.
+    var locale: Locale { Locale(identifier: rawValue) }
+
     /// The language's own name, for the menu.
     var endonym: String {
         switch self {
