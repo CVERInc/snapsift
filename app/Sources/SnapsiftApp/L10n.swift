@@ -135,6 +135,30 @@ struct L10n: Sendable {
         case .zhTW: return "關閉"
         }
     }
+    /// VoiceOver label / tooltip for the globe language switcher (icon-only).
+    func languageMenuLabel() -> String {
+        switch language {
+        case .en: return "Language"
+        case .ja: return "言語"
+        case .zhTW: return "語言"
+        }
+    }
+    /// VoiceOver label for the iOS toolbar actions menu (icon-only).
+    func actionsMenuLabel() -> String {
+        switch language {
+        case .en: return "Actions"
+        case .ja: return "操作"
+        case .zhTW: return "動作"
+        }
+    }
+    /// VoiceOver label for the full-screen loupe close button (icon-only).
+    func loupeCloseLabel() -> String {
+        switch language {
+        case .en: return "Close preview"
+        case .ja: return "プレビューを閉じる"
+        case .zhTW: return "關閉預覽"
+        }
+    }
     /// (keys, what it does) rows for the keyboard cheat sheet.
     func helpRows() -> [(String, String)] {
         switch language {
@@ -146,6 +170,7 @@ struct L10n: Sendable {
             ("d",              "Reject whole group"),
             // Grid zone
             ("← → ↑ ↓ / hjkl","Move between frames"),
+            ("1–9",            "Crown frame n as keeper ★"),
             ("Space",          "Open loupe"),
             ("X / ⌫",          "Reject frame · toggle"),
             ("⏎",              "Keep frame + set keeper ★"),
@@ -153,7 +178,11 @@ struct L10n: Sendable {
             ("R / ⇧R",         "Rotate frame · display only"),
             ("Esc",            "Back to list"),
             // Loupe zone
-            ("← → / h l",     "Loupe: prev / next frame"),
+            ("← → ↑ ↓ / hjkl", "Loupe: prev / next frame"),
+            ("1–9",            "Loupe: crown frame n ★"),
+            ("X / ⌫",          "Loupe: reject frame · toggle"),
+            ("⏎",              "Loupe: keep frame + set keeper ★"),
+            ("⇧X",             "Loupe: force-reject protected"),
             ("R / ⇧R",         "Loupe: rotate · display only"),
             ("Space / Esc",    "Close loupe"),
             // Global
@@ -167,13 +196,18 @@ struct L10n: Sendable {
             ("a",              "グループ全部を残す"),
             ("d",              "グループ全部を却下"),
             ("← → ↑ ↓ / hjkl","写真を移動"),
+            ("1–9",            "n 番目を残す ★"),
             ("スペース",        "ルーペを開く"),
             ("X / ⌫",          "フレームを却下・切替"),
             ("⏎",              "このフレームを残す ★"),
             ("⇧X",             "保護フレームを強制削除"),
             ("R / ⇧R",         "フレームを回転・表示のみ"),
             ("Esc",            "リストへ戻る"),
-            ("← → / h l",     "ルーペ：前／次"),
+            ("← → ↑ ↓ / hjkl", "ルーペ：前／次"),
+            ("1–9",            "ルーペ：n 番目を残す ★"),
+            ("X / ⌫",          "ルーペ：却下・切替"),
+            ("⏎",              "ルーペ：このフレームを残す ★"),
+            ("⇧X",             "ルーペ：保護を強制削除"),
             ("R / ⇧R",         "ルーペ：回転・表示のみ"),
             ("スペース / Esc", "ルーペを閉じる"),
             ("⌘⌫",             "削除を実行"),
@@ -186,13 +220,18 @@ struct L10n: Sendable {
             ("a",              "整群保留"),
             ("d",              "整群標刪"),
             ("← → ↑ ↓ / hjkl","格子間移動"),
+            ("1–9",            "把第 n 張立為保留 ★"),
             ("空白",            "開啟放大鏡"),
             ("X / ⌫",          "標刪這張・切換"),
             ("⏎",              "保留這張並設為主保留 ★"),
             ("⇧X",             "強制標刪受保護的張"),
             ("R / ⇧R",         "旋轉這張・僅顯示用"),
             ("Esc",            "回到清單"),
-            ("← → / h l",     "放大鏡：前一張／後一張"),
+            ("← → ↑ ↓ / hjkl", "放大鏡：前一張／後一張"),
+            ("1–9",            "放大鏡：把第 n 張立為保留 ★"),
+            ("X / ⌫",          "放大鏡：標刪這張・切換"),
+            ("⏎",              "放大鏡：保留這張並設為主保留 ★"),
+            ("⇧X",             "放大鏡：強制標刪受保護的張"),
             ("R / ⇧R",         "放大鏡：旋轉・僅顯示用"),
             ("空白 / Esc",     "關閉放大鏡"),
             ("⌘⌫",             "執行刪除所有標刪"),
@@ -206,6 +245,22 @@ struct L10n: Sendable {
         case .en: return smart ? "Search · ↩ for smart match" : "Filter categories"
         case .ja: return smart ? "検索 · ↩ でスマート検索" : "カテゴリを絞り込む"
         case .zhTW: return smart ? "搜尋 · ↩ 智慧比對" : "篩選類別"
+        }
+    }
+    /// In-flight label while an apfel (Apple Intelligence) smart match runs.
+    func smartMatching() -> String {
+        switch language {
+        case .en: return "Smart matching…"
+        case .ja: return "スマート検索中…"
+        case .zhTW: return "智慧比對中…"
+        }
+    }
+    /// Shown in the sidebar when a search filters every set out.
+    func noSearchMatches(_ query: String) -> String {
+        switch language {
+        case .en: return "No matches for “\(query)” — clear the search to see all sets"
+        case .ja: return "「\(query)」に一致なし — 検索を消すとすべて表示"
+        case .zhTW: return "沒有符合「\(query)」的結果 — 清除搜尋即可看全部"
         }
     }
 
@@ -441,6 +496,16 @@ struct L10n: Sendable {
         case .en: return "Protected — ⇧X to force-reject"
         case .ja: return "保護対象 — ⇧X で強制却下"
         case .zhTW: return "受保護 — ⇧X 強制標刪"
+        }
+    }
+
+    /// Touch (iOS) variant of the protected block: swipe-up can't reject a
+    /// protected frame, and there is no keyboard ⇧X to mention on touch.
+    func protectedHintTouch() -> String {
+        switch language {
+        case .en: return "Protected — won't be deleted"
+        case .ja: return "保護対象 — 削除されません"
+        case .zhTW: return "受保護 — 不會刪除"
         }
     }
 
@@ -1154,6 +1219,30 @@ struct L10n: Sendable {
         case .en:   return "snapsift-deletion-history"
         case .ja:   return "snapsift-削除履歴"
         case .zhTW: return "snapsift-刪除記錄"
+        }
+    }
+    /// Alert title when writing the exported audit log fails (full disk, denied volume).
+    func historyExportFailedTitle() -> String {
+        switch language {
+        case .en:   return "Couldn't save the log"
+        case .ja:   return "ログを保存できませんでした"
+        case .zhTW: return "無法儲存記錄"
+        }
+    }
+    /// Confirmation shown next to the Export button after a successful write.
+    func historyExportSaved() -> String {
+        switch language {
+        case .en:   return "Log saved"
+        case .ja:   return "ログを保存しました"
+        case .zhTW: return "記錄已儲存"
+        }
+    }
+    /// Button that opens the Photos app so the user can reach Recently Deleted.
+    func historyOpenPhotos() -> String {
+        switch language {
+        case .en:   return "Open Photos"
+        case .ja:   return "写真を開く"
+        case .zhTW: return "打開「照片」"
         }
     }
     func historyClose() -> String {

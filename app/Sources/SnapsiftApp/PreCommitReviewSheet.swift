@@ -114,7 +114,11 @@ struct PreCommitReviewSheet: View {
                 }
                 .padding(16)
             }
-            .frame(maxHeight: 420)
+            // Let the list flex: on iOS it fills the full-screen sheet (no more
+            // 420pt letterbox with dead space under the footer); on macOS it gets
+            // a floor and grows with the enlarged sheet frame below, so far more
+            // than ~3 groups are visible on the irreversible-commit surface.
+            .desktopSheetFrame(minHeight: 300, maxHeight: .infinity)
 
             Divider().background(Color.reefBorder)
 
@@ -141,7 +145,7 @@ struct PreCommitReviewSheet: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
         }
-        .desktopSheetFrame(minWidth: 560, maxWidth: 700)
+        .desktopSheetFrame(minWidth: 560, minHeight: 520, maxWidth: 700, maxHeight: 860)
         .background(Color.reefGround)
         .preferredColorScheme(.dark)
     }
@@ -211,7 +215,13 @@ private struct GroupPreCommitRow: View {
                         .frame(width: 62, alignment: .leading)
 
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
+                        // LazyHStack, not HStack: a "delete all" on a large cluster
+                        // otherwise instantiates every 52pt thumbnail and fires all
+                        // their network-allowed image requests the moment this row
+                        // scrolls in — the same eager-burst the vertical LazyVStack
+                        // above already guards against, one axis down. All frames
+                        // stay scroll-reachable (the sheet's contract), just lazy.
+                        LazyHStack(spacing: 6) {
                             ForEach(group.toRemove) { p in
                                 ZStack {
                                     AssetThumbnail(asset: model.asset(for: p.uuid),

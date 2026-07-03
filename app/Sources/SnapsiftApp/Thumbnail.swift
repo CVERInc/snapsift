@@ -176,8 +176,11 @@ struct BigPreview: View {
                 }
             }
         }
-        .focusable()
-        .onKeyPress { _ in onClose(); return .handled }
+        // Deliberately NOT .focusable(): BigPreview lives only inside LoupeOverlay,
+        // which already owns every close path (Esc/Space via handleLoupeKey,
+        // onExitCommand, background tap, the HUD ✕). A focusable catch-all here
+        // would let Tab strand focus on the preview so the next arrow/x key closed
+        // the loupe instead of navigating/judging.
         .task(id: asset?.localIdentifier) { await load() }
     }
 

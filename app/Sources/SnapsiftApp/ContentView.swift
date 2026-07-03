@@ -19,6 +19,9 @@ struct ContentView: View {
     @FocusState private var sidebarFocused: Bool
     @FocusState private var gridFocused: Bool
     @State private var banner: String?
+    // Only the most-recent banner's dismiss timer may clear it. Without this,
+    // an earlier banner's 3.2s timer truncates whatever banner replaced it.
+    @State private var bannerGeneration = 0
     @State private var writingAlbums = false
     @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
     // FIX 2: persistent delete-failure alert
@@ -208,6 +211,8 @@ struct ContentView: View {
                 ForEach(Language.allCases) { l in Text(l.endonym).tag(l.rawValue) }
             }.pickerStyle(.inline)
         } label: { Image(systemName: "globe") }
+        .help(t.languageMenuLabel())
+        .accessibilityLabel(t.languageMenuLabel())
     }
 
     // MARK: main split
@@ -222,7 +227,12 @@ struct ContentView: View {
             // width. A plain HStack keeps the toolbar laid out normally.
             HStack(spacing: 0) {
                 detail
-                    .frame(maxWidth: .infinity)
+                    // A floor for the detail pane so opening the fixed-width help
+                    // column grows the window instead of crushing the GroupReview
+                    // header buttons (Include protected / Delete all / …) into
+                    // slivers at the 820pt window floor. macOS-only — an iPhone
+                    // detail must stay free to size to a narrow screen.
+                    .frame(minWidth: detailMinWidth, maxWidth: .infinity)
                     .safeAreaInset(edge: .top) { scopeBar }
                     .safeAreaInset(edge: .top) { staleRestoreBar }
                 if showHelp {
@@ -449,6 +459,16 @@ struct ContentView: View {
         #endif
     }
 
+    /// Floor for the detail pane so the docked help column can't squeeze the
+    /// GroupReview header controls. macOS-only (see the frame comment).
+    private var detailMinWidth: CGFloat {
+        #if os(macOS)
+        return 460
+        #else
+        return 0
+        #endif
+    }
+
     private func toggleHelp() {
         withAnimation(.easeOut(duration: 0.18)) { showHelp.toggle() }
     }
@@ -468,6 +488,7 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.reefTextDim)
                     .help(t.helpClose())
+                    .accessibilityLabel(t.helpClose())
                 }
                 ForEach(t.helpRows(), id: \.0) { row in
                     HStack(alignment: .top, spacing: 12) {
@@ -635,15 +656,24 @@ struct ContentView: View {
                 handleSaveRotationKey(); return .handled
             }
             handleRotateKey(modifiers: kp.modifiers); return .handled
+        // 1–9 crown the nth frame — the same number the card badges advertise.
+        case let c where c.count == 1 && c.first!.isNumber:
+            if let n = Int(c), n >= 1, n <= g.photos.count {
+                model.promote(group: g.id, to: g.photos[n - 1].uuid)
+                focusedFrame = g.photos[n - 1].uuid
+            }
+            return .handled
         default: return .ignored
         }
     }
 
     /// Key handler while the loupe is open — same frame actions + prev/next + close.
     private func handleLoupeKey(_ kp: KeyPress, _ g: ReviewGroup) -> KeyPress.Result {
+        // Full nav parity with the grid: ↑/↓ and j/k work here too, so muscle
+        // memory doesn't break the moment the loupe opens.
         switch kp.key {
-        case .leftArrow:  moveFrame(-1, g); return .handled
-        case .rightArrow: moveFrame(1, g);  return .handled
+        case .leftArrow, .upArrow:    moveFrame(-1, g); return .handled
+        case .rightArrow, .downArrow: moveFrame(1, g);  return .handled
         case .escape:
             loupeOpen = false; previewID = nil; return .handled
         case .return:
@@ -654,8 +684,8 @@ struct ContentView: View {
         default: break
         }
         switch kp.characters {
-        case "h": moveFrame(-1, g); return .handled
-        case "l": moveFrame(1, g);  return .handled
+        case "h", "k": moveFrame(-1, g); return .handled
+        case "l", "j": moveFrame(1, g);  return .handled
         case " ":
             loupeOpen = false; previewID = nil; return .handled
         case "x", "X":
@@ -667,6 +697,13 @@ struct ContentView: View {
                 handleSaveRotationKey(); return .handled
             }
             handleRotateKey(modifiers: kp.modifiers); return .handled
+        // 1–9 crown the nth frame (the loupe follows focusedFrame to it).
+        case let c where c.count == 1 && c.first!.isNumber:
+            if let n = Int(c), n >= 1, n <= g.photos.count {
+                model.promote(group: g.id, to: g.photos[n - 1].uuid)
+                focusedFrame = g.photos[n - 1].uuid
+            }
+            return .handled
         default: return .ignored
         }
     }
@@ -734,7 +771,23 @@ struct ContentView: View {
         if model.browseMode {
             List {
                 Section(t.similarSets()) {
+                    // Smart match (apfel) runs for seconds — show it's working so
+                    // ↩ doesn't feel like a dead key.
+                    if model.apfelSearching {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(t.smartMatching())
+                                .font(.caption).foregroundStyle(Color.reefTextDim)
+                        }
+                    }
                     ForEach(model.filteredCategories) { categoryRow($0) }
+                    // A search that filters everything out must say so, not render
+                    // a blank list that reads as a broken/hung app.
+                    if !model.apfelSearching && model.filteredCategories.isEmpty
+                        && !model.searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+                        Text(t.noSearchMatches(model.searchQuery))
+                            .font(.caption).foregroundStyle(Color.reefTextDim)
+                    }
                 }
             }
             .searchable(text: $model.searchQuery, placement: .sidebar,
@@ -846,7 +899,12 @@ struct ContentView: View {
                         focusedFrame: gridFocused ? focusedFrame : nil,
                         isExactDupeGroup: model.exactDupeGroupIDs.contains(g.id),
                         protectedHintFrame: protectedHintFrame,
-                        onOpenLoupe: touchOpenLoupe)
+                        onOpenLoupe: touchOpenLoupe,
+                        onDesktopTap: { uuid in
+                            model.promote(group: g.id, to: uuid)
+                            focusedFrame = uuid
+                            gridFocused = true
+                        })
                 .focusable()
                 .focused($gridFocused)
                 .onKeyPress { handleGridKey($0) }
@@ -934,7 +992,9 @@ struct ContentView: View {
                 Text("snapsift").font(.system(size: 26, weight: .bold)).foregroundStyle(.white)
                 Text("v\(appVersion)")
                     .font(.caption.monospaced())
-                    .foregroundStyle(Color.reefTextDim.opacity(0.6))
+                    // One dilution step only (reefTextDim is already diluted) so
+                    // the version stays above AA contrast.
+                    .foregroundStyle(Color.reefTextDim)
                 Text(t.privacyPitch())
                     .font(.callout)
                     .foregroundStyle(Color.reefTextDim)
@@ -1148,7 +1208,10 @@ struct ContentView: View {
                 .help(t.fdaHintHelp())
             }
             Text("snapsift v\(appVersion)")
-                .foregroundStyle(Color.reefTextDim.opacity(0.55))
+                // reefTextDim is already a diluted token; a second .opacity step
+                // dropped this under AA contrast — one dilution reads secondary
+                // AND stays legible.
+                .foregroundStyle(Color.reefTextDim)
             // FIX 3: always-visible commit button in the status bar.
             // The toolbar Delete button is the last of ~6 primaryAction items and
             // collapses into the » overflow on narrow windows, making it
@@ -1218,6 +1281,7 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "sparkle.magnifyingglass")
             }
+            .accessibilityLabel(t.actionsMenuLabel())
         }
         ToolbarItem { languageMenu }
         #else
@@ -1399,10 +1463,14 @@ struct ContentView: View {
     }
 
     private func showBanner(_ text: String) {
+        bannerGeneration += 1
+        let gen = bannerGeneration
         withAnimation(.spring(duration: 0.3)) { banner = text }
         Task {
             try? await Task.sleep(nanoseconds: 3_200_000_000)
-            withAnimation(.easeOut) { banner = nil }
+            // A generation counter (not a text compare) also handles the same
+            // message shown twice in quick succession without early dismissal.
+            if bannerGeneration == gen { withAnimation(.easeOut) { banner = nil } }
         }
     }
 }
@@ -1420,6 +1488,10 @@ struct GroupReview: View {
     /// Touch platforms: tapping a thumbnail opens the loupe here instead of
     /// promoting (the desktop click behaviour) — set by ContentView on iOS.
     var onOpenLoupe: ((String) -> Void)? = nil
+    /// Desktop: a card click promotes AND reclaims keyboard focus into the grid
+    /// zone, mirroring the sidebar row. Without it, keys after a click still go
+    /// to the (unfocused) list zone and the natural x/Space/R keystrokes die.
+    var onDesktopTap: ((String) -> Void)? = nil
 
     // FIX C: confirmation alert state for including protected frames in deletion.
     @State private var showDeleteProtectedAlert = false
@@ -1481,19 +1553,25 @@ struct GroupReview: View {
                     // Use amber + a distinct "All protected" label instead so the
                     // visual state truthfully reflects what will happen.
                     if group.deleteAll && group.deletionIDs.isEmpty {
-                        // Armed but all-protected: show a non-red "all protected" pill.
-                        Label(t.deleteAllProtected(), systemImage: "lock.fill")
-                            .font(.callout)
-                            .foregroundStyle(Color.reefAmber)
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(Color.reefAmber.opacity(0.15),
-                                        in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .strokeBorder(Color.reefAmber.opacity(0.4), lineWidth: 1)
-                            )
-                            .help(t.tipDeleteAllProtected())
-                            .onTapGesture { model.toggleDeleteAll(group: group.id) }
+                        // Armed but all-protected: a non-red "all protected" pill
+                        // that also DISARMS on tap. It's a real Button (not a
+                        // gesture-on-Label) so it gets keyboard focus, VoiceOver
+                        // button semantics, and pressed feedback — it changes an
+                        // arming state, so it must not read as a static badge.
+                        Button { model.toggleDeleteAll(group: group.id) } label: {
+                            Label(t.deleteAllProtected(), systemImage: "lock.fill")
+                                .font(.callout)
+                                .foregroundStyle(Color.reefAmber)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .background(Color.reefAmber.opacity(0.15),
+                                            in: RoundedRectangle(cornerRadius: 8))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .strokeBorder(Color.reefAmber.opacity(0.4), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .help(t.tipDeleteAllProtected())
                     } else {
                         Button { model.toggleDeleteAll(group: group.id) } label: {
                             Label(group.deleteAll ? t.deletingAll() : t.deleteAll(),
@@ -1580,7 +1658,12 @@ struct GroupReview: View {
             targetHeight: Double(targetRowHeight),
             spacing: Double(gallerySpacing)
         )
-        return VStack(alignment: .leading, spacing: gallerySpacing) {
+        // LazyVStack, not VStack: a look-alike group can chain into hundreds of
+        // frames; an eager stack instantiates every card and fires every
+        // network-allowed 2× thumbnail request at selection time. Laziness keeps
+        // offscreen rows' .task from firing. Row heights are precomputed by
+        // JustifiedLayout so laziness costs no layout accuracy.
+        return LazyVStack(alignment: .leading, spacing: gallerySpacing) {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 HStack(alignment: .top, spacing: gallerySpacing) {
                     ForEach(row.items, id: \.index) { item in
@@ -1680,10 +1763,11 @@ struct GroupReview: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            // Desktop click = promote (mouse users have hover context and the
-            // keeper-why tooltip). Touch tap = open the loupe — inspect first,
-            // decide with swipes there; promotion happens inside the loupe.
+            // Desktop click = promote + reclaim grid focus (onDesktopTap). Touch
+            // tap = open the loupe — inspect first, decide with swipes there;
+            // promotion happens inside the loupe.
             if let onOpenLoupe { onOpenLoupe(p.uuid) }
+            else if let onDesktopTap { onDesktopTap(p.uuid) }
             else { model.promote(group: group.id, to: p.uuid) }
         }
         .help(
@@ -1693,6 +1777,31 @@ struct GroupReview: View {
             : keep ? keeperWhyTooltip(for: p, group: group, t: t)
             : t.tipDelete()
         )
+        // The card is a ZStack, not a Button — expose it to VoiceOver as one
+        // labelled, actionable element carrying the frame's filename + decision
+        // state + protection reasons (the amber chips inside are decorative and
+        // ignored, their meaning is folded into this label).
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(cardAccessibilityLabel(for: p, keep: keep, del: del,
+                                                    exactSuggested: isExactSuggested))
+    }
+
+    /// One spoken line for a frame card: filename · decision · protection reasons.
+    /// Reuses the loupe HUD's localized state tokens so VoiceOver and the visible
+    /// HUD stay in lockstep.
+    private func cardAccessibilityLabel(for p: Photo, keep: Bool, del: Bool,
+                                        exactSuggested: Bool) -> String {
+        let fname = p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename
+        var parts: [String] = []
+        if keep { parts.append(t.loupeKeeper()) }
+        else if exactSuggested { parts.append(t.exactDupeBadge()) }
+        else if del { parts.append(t.loupeReject()) }
+        else { parts.append(t.loupeNoDecision()) }
+        if p.favorite   { parts.append(t.loupeFav()) }
+        if p.edited     { parts.append(t.loupeEdited()) }
+        if p.isDocument { parts.append(t.loupeDoc()) }
+        return "\(fname) · \(parts.joined(separator: " · "))"
     }
 
     /// Badge row for a single frame card.
@@ -1827,6 +1936,12 @@ struct LoupeOverlay: View {
     let onPrev: () -> Void
     let onNext: () -> Void
 
+    #if os(iOS)
+    // Transient "protected — won't be deleted" hint after a blocked swipe-up.
+    // On touch there's no ⇧X, so a silent no-op would read as a broken gesture.
+    @State private var protectedHintVisible = false
+    #endif
+
     private var currentIndex: Int {
         group.photos.firstIndex { $0.uuid == currentID } ?? 0
     }
@@ -1887,6 +2002,8 @@ struct LoupeOverlay: View {
                             .foregroundStyle(.white.opacity(0.8))
                     }
                     .buttonStyle(.plain)
+                    .help(t.loupeCloseLabel())
+                    .accessibilityLabel(t.loupeCloseLabel())
                     .padding(.top, 14).padding(.trailing, 14)
                 }
                 Spacer()
@@ -1895,14 +2012,33 @@ struct LoupeOverlay: View {
         #if os(iOS)
         // Touch gestures mirror the keyboard verbs: swipe left/right = ←/→
         // (prev/next), swipe up = X (toggle reject), swipe down = ⏎ (keep +
-        // set keeper). Protected frames stay blocked exactly like plain X.
+        // set keeper). A swipe-up on a protected frame is blocked just like plain
+        // X — and, like plain X, it surfaces a hint so the gesture never fails
+        // silently.
+        .overlay(alignment: .bottom) {
+            if protectedHintVisible {
+                Text(t.protectedHintTouch())
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Color.reefAmber.opacity(0.92), in: Capsule())
+                    .padding(.bottom, 40)
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+            }
+        }
         .highPriorityGesture(
             DragGesture(minimumDistance: 40).onEnded { value in
                 let dx = value.translation.width, dy = value.translation.height
                 if abs(dx) > abs(dy) {
                     dx > 0 ? onPrev() : onNext()
                 } else if dy < 0 {
-                    model.toggleReject(group: group.id, frameID: currentID)
+                    if !model.toggleReject(group: group.id, frameID: currentID) {
+                        withAnimation { protectedHintVisible = true }
+                        Task {
+                            try? await Task.sleep(nanoseconds: 2_500_000_000)
+                            withAnimation { protectedHintVisible = false }
+                        }
+                    }
                 } else {
                     model.promote(group: group.id, to: currentID)
                 }
