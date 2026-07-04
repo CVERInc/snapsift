@@ -19,9 +19,9 @@ import SnapsiftCore
 ///     deleted or chosen as keeper anyway.
 enum PhotoFlags {
 
-    // MARK: - cheap, metadata-only (no pixels)
+    // MARK: - `edited` via PhotoKit — FALLBACK ONLY (sidecar unavailable)
 
-    /// True when the user applied adjustments to this asset.
+    /// True when the user applied adjustments to this asset — PhotoKit path.
     ///
     /// We rely on the reliable PUBLIC PhotoKit signals, NOT `modificationDate !=
     /// creationDate` — iCloud sync, metadata writes (favoriting, captioning),
@@ -34,11 +34,33 @@ enum PhotoFlags {
     ///      is the canonical "this asset carries edit data" signal.
     ///   2. `PHAsset.adjustmentFormatIdentifier` (macOS 12+) is non-nil for an
     ///      edited asset — a cheap corroborating signal, OR-ed in.
-    static func edited(_ asset: PHAsset) -> Bool {
+    ///
+    /// ⚠️ Both signals are SYNCHRONOUS XPC round-trips into photolibraryd with
+    /// no timeout of their own. If the daemon restarts mid-call the reply never
+    /// arrives and the calling thread wedges FOREVER — and because the fetch
+    /// funnels through the one shared library CoreData queue, every later
+    /// PhotoKit metadata call convoys behind it (live incident 2026-07-03: a
+    /// scan hung >24 h with all 8 enrich workers — the entire Swift-concurrency
+    /// cooperative pool — blocked behind one wedged call). NEVER call this from
+    /// a concurrency task; go through `editedFallback`. The primary source for
+    /// `edited` is the sidecar's `ZASSET.ZADJUSTMENTSSTATE` (semantically
+    /// identical, zero XPC — see `QualitySidecar`).
+    private static func editedViaPhotoKit(_ asset: PHAsset) -> Bool {
         if asset.adjustmentFormatIdentifier != nil { return true }
         let resources = PHAssetResource.assetResources(for: asset)
         return resources.contains { $0.type == .adjustmentData }
     }
+
+    /// Wedge-proof wrapper around `editedViaPhotoKit`, for when the sidecar is
+    /// unreadable (no Full Disk Access) — see `PhotoKitSyncLane` for the
+    /// machinery. nil = could not determine (timed out, or the lane's breaker
+    /// already tripped): callers keep their stored value (protection simply
+    /// isn't upgraded — the safe direction for a best-effort signal).
+    static func editedFallback(_ asset: PHAsset) async -> Bool? {
+        await PhotoKitSyncLane.call { editedViaPhotoKit(asset) }
+    }
+
+    // MARK: - cheap, metadata-only (no pixels)
 
     /// True when the frame still carries original camera-capture metadata (EXIF
     /// Make/Model) rather than an EXIF-stripped social re-save.

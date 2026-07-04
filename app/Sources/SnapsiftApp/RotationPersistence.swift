@@ -98,9 +98,10 @@ enum RotationSaveError: LocalizedError {
 ///   - This contrasts with the scan path (all offline, never network).
 ///
 /// After a successful save, the photo will be marked as edited
-/// (PHAdjustmentData present), so `PhotoFlags.edited()` will return true
-/// and snapsift will treat this frame as protected. This is correct and
-/// expected — the UI informs the user before they confirm.
+/// (PHAdjustmentData present, and the library's ZADJUSTMENTSSTATE flips with
+/// it), so the sidecar-backed `edited` flag reads true and snapsift will
+/// treat this frame as protected. This is correct and expected — the UI
+/// informs the user before they confirm.
 func saveRotation(asset: PHAsset, quarterTurns: Int) async throws {
     let net = ((quarterTurns % 4) + 4) % 4
     guard net != 0 else { return }  // 0 or 360° → nothing to save

@@ -1464,6 +1464,17 @@ struct L10n: Sendable {
         case .zhTW: return "掃描完成：找到 \(n) 組可檢視"
         }
     }
+    /// Suffix appended to the scan-complete banner when some videos could not
+    /// be verified as Live Photo paired videos (photolibraryd unresponsive)
+    /// and were excluded to be safe — the scan must say so rather than
+    /// silently narrow its scope.
+    func scanPairedVideosSkipped(_ n: Int) -> String {
+        switch language {
+        case .en: return "\(n) video\(n == 1 ? "" : "s") couldn't be checked for Live Photo pairing, so \(n == 1 ? "it was" : "they were") left out to be safe."
+        case .ja: return "Live Photos のペア動画かどうか確認できなかったビデオ \(n) 本は、安全のため対象から外しました。"
+        case .zhTW: return "有 \(n) 部影片無法確認是否為原況照片的配對影片，為了安全先排除。"
+        }
+    }
     /// Banner after a scan that found nothing.
     func scanDoneNothing() -> String {
         switch language {

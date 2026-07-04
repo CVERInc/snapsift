@@ -316,10 +316,11 @@ final class LibraryModel: ObservableObject {
     // Photos via PHContentEditingOutput + PHAdjustmentData. The original is
     // preserved by Photos; the user can "Revert to Original" at any time.
     //
-    // Saving marks the photo as edited (PHAdjustmentData present), so
-    // PhotoFlags.edited() will return true and snapsift will then treat the
-    // frame as a protected frame. This is expected and is disclosed in the
-    // confirmation dialog.
+    // Saving marks the photo as edited (PHAdjustmentData present, and the
+    // library's ZADJUSTMENTSSTATE flips with it), so the sidecar-backed
+    // `edited` flag reads true and snapsift will then treat the frame as a
+    // protected frame. This is expected and is disclosed in the confirmation
+    // dialog.
 
     /// True when the save-rotation confirmation alert should be shown.
     @Published var showSaveRotationConfirm = false
@@ -467,7 +468,10 @@ final class LibraryModel: ObservableObject {
         result.enumerateObjects { asset, _, _ in assets.append(asset) }
         // FIX 1 — Live Photo paired-video guard (off the main actor; see
         // excludeLivePhotoPairedVideos). Only relevant when videos are included.
-        if includeVideo { assets = await excludeLivePhotoPairedVideos(assets) }
+        var pairedVideoUndetermined = 0
+        if includeVideo {
+            (assets, pairedVideoUndetermined) = await excludeLivePhotoPairedVideos(assets)
+        }
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
@@ -579,7 +583,11 @@ final class LibraryModel: ObservableObject {
         // Verdicts were just proven against the CURRENT library — anchor the
         // staleness reference here (see `scanChangeToken`).
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
-        scanNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
+        var doneNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
+        if pairedVideoUndetermined > 0 {
+            doneNotice += " " + t.scanPairedVideosSkipped(pairedVideoUndetermined)
+        }
+        scanNotice = doneNotice
         await releaseScanCaches()
         saveSnapshotNow()
     }
@@ -610,37 +618,56 @@ final class LibraryModel: ObservableObject {
     /// `PHAssetResource.assetResources(for:)` is a synchronous per-asset XPC
     /// round-trip; running it inside the main-actor enumeration froze the UI for
     /// minutes on a video-heavy library (the same stall makePhoto documents for
-    /// `edited`). Do it off the main actor instead, honouring the abort flag so
-    /// Cancel stays responsive.
-    private func excludeLivePhotoPairedVideos(_ assets: [PHAsset]) async -> [PHAsset] {
+    /// `edited`). Every lookup therefore goes through `PhotoKitSyncLane` —
+    /// off the cooperative pool, timeout-guarded — and the abort flag is
+    /// honoured between items so Cancel stays responsive.
+    ///
+    /// SAFETY DIRECTION on a lane timeout (photolibraryd unresponsive): a
+    /// video whose pairing we could not determine is treated as paired and
+    /// EXCLUDED from the scan. Under-scanning only hides suggestions; guessing
+    /// "not paired" could put a Live Photo's motion half into a deletable set,
+    /// where deleting it destroys the pair unrecoverably. `undetermined`
+    /// counts those exclusions so the scan-complete banner can say so instead
+    /// of silently narrowing scope.
+    private func excludeLivePhotoPairedVideos(_ assets: [PHAsset]) async
+        -> (kept: [PHAsset], undetermined: Int) {
         let videos = assets.filter { $0.mediaType == .video }
-        guard !videos.isEmpty else { return assets }
-        let flag = abortFlag
-        let pairedIDs: Set<String> = await Task.detached(priority: .userInitiated) {
-            var out: Set<String> = []
-            for v in videos {
-                if flag.isSet { break }
-                let resources = PHAssetResource.assetResources(for: v)
-                if resources.contains(where: {
+        guard !videos.isEmpty else { return (assets, 0) }
+        var excluded: Set<String> = []
+        var undetermined = 0
+        for v in videos {
+            if abortFlag.isSet { break }   // scan is cancelling; result unused
+            let paired: Bool? = await PhotoKitSyncLane.call {
+                PHAssetResource.assetResources(for: v).contains {
                     $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
-                }) { out.insert(v.localIdentifier) }
+                }
             }
-            return out
-        }.value
-        guard !pairedIDs.isEmpty else { return assets }
-        return assets.filter { !pairedIDs.contains($0.localIdentifier) }
+            switch paired {
+            case true:
+                excluded.insert(v.localIdentifier)
+            case false:
+                break
+            case nil:
+                excluded.insert(v.localIdentifier)
+                undetermined += 1
+            }
+        }
+        guard !excluded.isEmpty else { return (assets, 0) }
+        return (assets.filter { !excluded.contains($0.localIdentifier) }, undetermined)
     }
 
     /// Build a Core Photo from a PHAsset, enriched with Apple quality + size.
     ///
-    /// STRICTLY cheap metadata only. `edited` is NOT computed here: its
-    /// `PHAssetResource.assetResources` lookup costs an XPC round-trip per
-    /// asset, and mapping the whole library through it was the real "reading
+    /// STRICTLY cheap metadata only. `edited` now IS cheap: it rides the same
+    /// sidecar row as quality/size (`ZASSET.ZADJUSTMENTSSTATE`), zero XPC.
+    /// It must never go back to per-asset PhotoKit lookups here: the
+    /// `PHAssetResource.assetResources` variant cost an XPC round-trip per
+    /// asset — mapping the whole library through it was the real "reading
     /// quality scores" multi-minute stall (sampled live: ~80% of scan wall
-    /// time inside PhotoFlags.edited), during which the main thread was too
-    /// busy to even process the Cancel click. Like `isDocument`/`sharpness`,
-    /// `edited` only matters for frames that end up in a group — enrichFlags
-    /// fills it over cluster members only.
+    /// time), and the same sync XPC later wedged a scan for >24 h when
+    /// photolibraryd restarted mid-call. Without Full Disk Access the sidecar
+    /// is empty and `edited` starts false; enrichFlags upgrades cluster
+    /// members via the wedge-proof PhotoKit fallback.
     private func makePhoto(from asset: PHAsset, enr: [String: QualitySidecar.Enrichment]) -> Photo {
         let id = asset.localIdentifier
         let e = enr[QualitySidecar.zuuid(fromLocalIdentifier: id)]
@@ -652,17 +679,25 @@ final class LibraryModel: ObservableObject {
                      size: e?.size ?? 0, uti: uti,
                      kind: asset.mediaType == .video ? 1 : 0,
                      favorite: asset.isFavorite, quality: e?.quality ?? 0,
-                     edited: false,   // filled by enrichFlags (cluster members only)
+                     edited: e?.edited ?? false,   // sidecar; no-FDA fallback in enrichFlags
                      originalCamera: PhotoFlags.originalCamera(asset))
     }
 
     /// Fill the per-frame flags that are too expensive for the whole library —
-    /// `isDocument`/`sharpness` (Vision/pixels) and `edited` (a per-asset
-    /// PHAssetResource XPC round-trip) — over cluster members only. Returns the
-    /// clusters with those photos rebuilt; quality/size (from `makePhoto`) are
-    /// preserved.
+    /// `isDocument`/`sharpness` (Vision/pixels) — over cluster members only.
+    /// Returns the clusters with those photos rebuilt; quality/size/edited
+    /// (from `makePhoto`) are preserved.
     /// Bounded concurrency with a per-image timeout, like the scanners, so a stuck
     /// thumbnail can't stall it.
+    ///
+    /// `edited` normally arrives from the sidecar at Photo-build time (zero
+    /// XPC). Only when the sidecar is unreadable (no Full Disk Access) is it
+    /// upgraded here per cluster member — and then ONLY via
+    /// `PhotoFlags.editedFallback`: the raw PhotoKit lookup is a synchronous
+    /// XPC round-trip that wedged a scan for >24 h when photolibraryd
+    /// restarted mid-call, all 8 workers convoyed behind one dead queue with
+    /// no way to observe cancellation. The fallback confines that risk to a
+    /// single sacrificial thread with a timeout + breaker.
     ///
     /// FIX #4: uses `PhotoFlags.isDocumentResult` (returns `(isDocument, degraded)`)
     /// instead of the plain bool variant so we can record whether the Vision pass
@@ -679,7 +714,8 @@ final class LibraryModel: ObservableObject {
         var edits: [String: Bool] = [:]
         var done = 0
         let lookup = assetsByID
-        await withTaskGroup(of: (String, Bool, Bool, Double, Bool).self) { group in
+        let needEditedFallback = !qualityAvailable
+        await withTaskGroup(of: (String, Bool, Bool, Double, Bool?).self) { group in
             var next = 0
             let limit = 8
             func add() {
@@ -693,7 +729,8 @@ final class LibraryModel: ObservableObject {
                         // 512px thumbnail independently (double I/O per member).
                         let localCG = await PhotoFlags.localThumb(a, mgr)
                         async let docResult = PhotoFlags.isDocumentResult(a, manager: mgr, localCG: localCG)
-                        let edited = PhotoFlags.edited(a)
+                        let edited: Bool? = needEditedFallback
+                            ? await PhotoFlags.editedFallback(a) : nil
                         let shp = localCG.map(PhotoFlags.sharpness(from:)) ?? 0
                         let (isDoc, degraded) = await docResult
                         return (id, isDoc, degraded, shp, edited)
@@ -706,7 +743,7 @@ final class LibraryModel: ObservableObject {
                 docs[id] = doc
                 docsDegraded[id] = degraded
                 sharps[id] = shp
-                edits[id] = edited
+                if let edited { edits[id] = edited }
                 done += 1
                 if done % 25 == 0 { progress(done, uuids.count) }
                 add()
@@ -757,7 +794,10 @@ final class LibraryModel: ObservableObject {
         assets.reserveCapacity(result.count)
         result.enumerateObjects { a, _, _ in assets.append(a) }
         // FIX 1 — Live Photo paired-video guard (off the main actor; see scan()).
-        if includeVideo { assets = await excludeLivePhotoPairedVideos(assets) }
+        var pairedVideoUndetermined = 0
+        if includeVideo {
+            (assets, pairedVideoUndetermined) = await excludeLivePhotoPairedVideos(assets)
+        }
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
@@ -810,7 +850,11 @@ final class LibraryModel: ObservableObject {
         progressFraction = 1.0
         hasScanned = true
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
-        scanNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
+        var doneNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
+        if pairedVideoUndetermined > 0 {
+            doneNotice += " " + t.scanPairedVideosSkipped(pairedVideoUndetermined)
+        }
+        scanNotice = doneNotice
         await releaseScanCaches()
         saveSnapshotNow()
     }
@@ -850,7 +894,10 @@ final class LibraryModel: ObservableObject {
         assets.reserveCapacity(result.count)
         result.enumerateObjects { a, _, _ in assets.append(a) }
         // FIX 1 — Live Photo paired-video guard (off the main actor; see scan()).
-        if includeVideo { assets = await excludeLivePhotoPairedVideos(assets) }
+        var pairedVideoUndetermined = 0
+        if includeVideo {
+            (assets, pairedVideoUndetermined) = await excludeLivePhotoPairedVideos(assets)
+        }
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
@@ -929,7 +976,11 @@ final class LibraryModel: ObservableObject {
         progressFraction = 1.0
         hasScanned = true
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
-        scanNotice = categories.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(categories.count)
+        var catNotice = categories.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(categories.count)
+        if pairedVideoUndetermined > 0 {
+            catNotice += " " + t.scanPairedVideosSkipped(pairedVideoUndetermined)
+        }
+        scanNotice = catNotice
         await releaseScanCaches()
         saveSnapshotNow()
     }
@@ -1437,6 +1488,38 @@ final class LibraryModel: ObservableObject {
     /// Assets are re-fetched; anything unresolvable is dropped and a group that
     /// falls under 2 frames dissolves. Returns true when something was restored.
     @discardableResult
+    /// Live `edited` state for specific frames, re-checked AFTER the scan (the
+    /// commit-time protection sweep and the stale-snapshot restore both exist
+    /// to catch edits made since). Primary: one targeted Photos.sqlite query,
+    /// opened WAL-aware so a minutes-old edit is visible (see
+    /// `QualitySidecar.editedFlags`). Fallback (no Full Disk Access): per-asset
+    /// PhotoKit through the wedge-proof sacrificial thread — NEVER the raw
+    /// synchronous call, which wedged a scan for >24 h when photolibraryd
+    /// restarted mid-flight. Returns only the frames it could determine;
+    /// callers keep the stored value for the rest.
+    private func currentEditedFlags(for targets: [(uuid: String, asset: PHAsset)]) async -> [String: Bool] {
+        guard !targets.isEmpty else { return [:] }
+        let zuuidByLocal = Dictionary(uniqueKeysWithValues: targets.map {
+            ($0.uuid, QualitySidecar.zuuid(fromLocalIdentifier: $0.uuid))
+        })
+        let zuuids = Array(Set(zuuidByLocal.values))
+        let sidecar = await Task.detached(priority: .userInitiated) {
+            QualitySidecar.editedFlags(zuuids: zuuids)
+        }.value
+        if let sidecar {
+            var out: [String: Bool] = [:]
+            for (local, z) in zuuidByLocal {
+                if let e = sidecar[z] { out[local] = e }
+            }
+            return out
+        }
+        var out: [String: Bool] = [:]
+        for t in targets {
+            if let e = await PhotoFlags.editedFallback(t.asset) { out[t.uuid] = e }
+        }
+        return out
+    }
+
     func restoreSnapshot(_ t: L10n, quiet: Bool = false) async -> Bool {
         guard !isScanning, groups.isEmpty, categories.isEmpty else { return false }
 
@@ -1474,26 +1557,40 @@ final class LibraryModel: ObservableObject {
         // only exist while their byte-verified verdict is known-current.
         let tokenCurrent = ScanSnapshotStore.changeTokenIsCurrent(snap.changeToken)
 
+        // Refresh the cheap live flags from the re-fetched assets: a photo
+        // favorited OR edited since the scan must be protected NOW, not as of
+        // the snapshot (isFavorite is a prefetched property; `edited` is one
+        // batched sidecar query — see currentEditedFlags) — only isDocument
+        // (Vision, pixels) still needs a rescan. When the token is stale we
+        // re-check `edited` for the frames the user REJECTED, so a frame
+        // edited after being rejected re-protects itself instead of surviving
+        // inside the delete bucket.
+        var editedNowByID: [String: Bool] = [:]
+        if !tokenCurrent {
+            let recheckTargets: [(uuid: String, asset: PHAsset)] = snap.groups.flatMap { gs in
+                let rejectedSet = Set(gs.rejected)
+                return gs.photos.compactMap { p -> (uuid: String, asset: PHAsset)? in
+                    guard rejectedSet.contains(p.uuid), !p.edited,
+                          let asset = map[p.uuid] else { return nil }
+                    return (p.uuid, asset)
+                }
+            }
+            editedNowByID = await currentEditedFlags(for: recheckTargets)
+            // Same rule as after the snapshot load: a scan that started during
+            // the await gap wins over this now-stale restore.
+            guard !isScanning, groups.isEmpty, categories.isEmpty else { return false }
+        }
+
         var restoredGroups: [ReviewGroup] = []
         var exactIDs: Set<ReviewGroup.ID> = []
         // Count app-seeded suggestions dropped by the stale demotion so the UI can
         // stand up a persistent notice (a launch banner alone would fade unseen).
         var staleClearedSeeds = 0
         for gs in snap.groups {
-            // Refresh the cheap live flags from the re-fetched assets: a photo
-            // favorited OR edited since the scan must be protected NOW, not as of
-            // the snapshot. Both are free metadata (isFavorite is a property;
-            // PhotoFlags.edited is a synchronous adjustmentData check) — only
-            // isDocument (Vision, pixels) still needs a rescan. When the token is
-            // stale we re-check `edited` for the frames the user REJECTED, so a
-            // frame edited after being rejected re-protects itself instead of
-            // surviving inside the delete bucket.
-            let rejectedSet = Set(gs.rejected)
             let photos: [Photo] = gs.photos.compactMap { p in
                 guard let asset = map[p.uuid] else { return nil }
                 let favNow = asset.isFavorite
-                let editedNow = (!tokenCurrent && rejectedSet.contains(p.uuid) && !p.edited)
-                    ? PhotoFlags.edited(asset) : p.edited
+                let editedNow = editedNowByID[p.uuid] ?? p.edited
                 guard favNow != p.favorite || editedNow != p.edited else { return p }
                 return p.with(favorite: favNow, edited: editedNow)
             }
@@ -1649,8 +1746,9 @@ final class LibraryModel: ObservableObject {
         // big library, exactly when a user flips to Photos.app and stars/edits).
         // Drop any newly-protected frame from its group's delete bucket unless the
         // user force-opted-in for that group (`includeProtected` is per-group
-        // informed consent). `favorite` is a free property; `edited` is a cheap
-        // metadata call bounded by mark count, evaluated off-main. `isDocument`
+        // informed consent). `favorite` is a free prefetched property; `edited`
+        // is one batched WAL-aware sidecar query (see currentEditedFlags — never
+        // the raw sync PhotoKit call, which can wedge forever). `isDocument`
         // (Vision/pixels) stays rescan-only. A newly-protected frame must never be
         // deleted without the ⇧X path, nor booked .exactDuplicate/.userRejected.
         let sweepTargets: [(gi: Int, uuid: String, asset: PHAsset)] =
@@ -1664,14 +1762,9 @@ final class LibraryModel: ObservableObject {
                 }
             }
         if !sweepTargets.isEmpty {
-            let flags = await withTaskGroup(of: (Int, String, Bool, Bool).self) { group -> [(Int, String, Bool, Bool)] in
-                for target in sweepTargets {
-                    let a = target.asset
-                    group.addTask { (target.gi, target.uuid, a.isFavorite, PhotoFlags.edited(a)) }
-                }
-                var out: [(Int, String, Bool, Bool)] = []
-                for await r in group { out.append(r) }
-                return out
+            let editedNow = await currentEditedFlags(for: sweepTargets.map { ($0.uuid, $0.asset) })
+            let flags: [(Int, String, Bool, Bool)] = sweepTargets.map {
+                ($0.gi, $0.uuid, $0.asset.isFavorite, editedNow[$0.uuid] ?? false)
             }
             var dropped = 0
             for (gi, uuid, fav, edited) in flags where fav || edited {
