@@ -33,6 +33,22 @@ let package = Package(
             .product(name: "Signet", package: "signet"),
         ]),
         .executableTarget(name: "SnapsiftTests", dependencies: ["SnapsiftCore"]),
+        // Live-machine harness (`swift run SnapsiftLiveTests`): exercises the
+        // REAL PhotoKit/Vision/sidecar paths against dedicated throwaway assets
+        // it imports itself — never existing photos. Needs Photos permission
+        // (TCC prompt on first run) and, for the delete step, a click on the
+        // system confirmation. Complements SnapsiftTests, which stays pure.
+        // The Info.plist is section-embedded into the Mach-O so TCC can attribute
+        // the Photos prompt (a bare executable has no usage string → the request
+        // hangs). MUST be run from a real Terminal for the prompt to surface.
+        .executableTarget(name: "SnapsiftLiveTests", dependencies: ["SnapsiftCore"],
+            exclude: ["Info.plist"],   // section-embedded via the linker, not a bundle resource
+            linkerSettings: [.unsafeFlags([
+                "-Xlinker", "-sectcreate",
+                "-Xlinker", "__TEXT",
+                "-Xlinker", "__info_plist",
+                "-Xlinker", "Sources/SnapsiftLiveTests/Info.plist",
+            ])]),
         // Icon generator: `swift run SnapsiftIcon` → Assets/AppIcon.icns (+1024 PNG)
         // via Signet's shared CVERAppIcon pipeline. Run manually when the icon
         // artwork changes; the .icns is committed and bundled by build-app.sh.
