@@ -146,7 +146,10 @@ setbuf(stdout, nil)   // unbuffered: progress shows live even if a call hangs
 
 let wantDelete = CommandLine.arguments.contains("--delete")
 
-let sema = DispatchSemaphore(value: 0)
+// NB: the driver runs as a detached Task and the MAIN thread is handed to
+// dispatchMain() below — never blocked on a semaphore. PHImageManager delivers
+// its resultHandler on the main queue; if we blocked main waiting for the Task,
+// those callbacks would never fire and the bitmap requests would deadlock.
 Task {
     print("Photos authorization")
     let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
@@ -290,7 +293,6 @@ Task {
     }
 
     print(failures == 0 ? "\n✅ live harness: all checks passed" : "\n❌ \(failures) failure(s)")
-    sema.signal()
+    exit(failures == 0 ? 0 : 1)
 }
-sema.wait()
-exit(failures == 0 ? 0 : 1)
+dispatchMain()   // service the main queue so PhotoKit main-queue callbacks fire
