@@ -101,7 +101,9 @@ public func rankKey(_ p: Photo) -> RankKey {
             uuid: p.uuid)
 }
 
-/// The single frame to keep from a cluster.
+/// The single frame to keep from a cluster. Precondition: the cluster is
+/// non-empty (clustering never emits empty groups); an empty input traps here
+/// rather than returning a fabricated keeper.
 public func keeper(_ group: [Photo]) -> Photo {
     group.max { rankKey($0) < rankKey($1) }!
 }
@@ -114,8 +116,13 @@ public func keeper(_ group: [Photo]) -> Photo {
 /// routes through `isProtected` too so a protected frame can never end up
 /// pre-marked anywhere. Ranking signals (sharpness, originalCamera) only choose
 /// WHICH frame is the keeper — they can never put a frame into this set.
+///
+/// Degenerate inputs degrade to "delete nothing" — the only safe answer for the
+/// function whose output feeds the delete pipeline: an empty group has nothing
+/// to delete (and must not crash picking a keeper from nobody), and a
+/// single-frame group keeps its one frame.
 public func deletions(_ group: [Photo]) -> [Photo] {
-    let keep = keeper(group)
+    guard let keep = group.max(by: { rankKey($0) < rankKey($1) }) else { return [] }
     return group.filter { $0.uuid != keep.uuid && !$0.isProtected }
 }
 

@@ -94,6 +94,10 @@ final class LibraryModel: ObservableObject {
     @Published var auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @Published var groups: [ReviewGroup] = []
     @Published var isScanning = false
+    /// True while `deleteReviewed` runs. Scans, face refines, album writes and
+    /// snapshot flushes all gate on it: they mutate `groups` (or persist them),
+    /// and racing a delete's post-await state rewrite corrupts both sides.
+    @Published var isDeleting = false
     @Published var progress = ""
     @Published var includeVideo = false
     /// True once Apple's quality scores have been read from the library sidecar.
@@ -160,6 +164,10 @@ final class LibraryModel: ObservableObject {
     /// told this session. The view observes it, banners a disk-full warning, and
     /// resets it. The private `snapshotWriteFailedNotified` latch guards re-raising.
     @Published var snapshotSaveFailedNotice = false
+    /// A snapshot file existed but couldn't be decoded (corrupt / stale schema).
+    /// One-shot: the view banners it and resets. The unreadable bytes are kept
+    /// aside as last-scan.unreadable.json by ScanSnapshotStore.
+    @Published var snapshotUnreadableNotice = false
     /// Overall scan completion 0…1 for the determinate progress bar; nil while
     /// in a phase whose length is unknown (fetch, quality sidecar).
     @Published var progressFraction: Double?
@@ -195,7 +203,7 @@ final class LibraryModel: ObservableObject {
     /// A running face-refine mutates keepers concurrently, so the two pipelines
     /// are mutually exclusive here (and again in `refineWithFaces`).
     func startScan(_ kind: ScanKind, _ t: L10n) {
-        guard !isScanning, !refiningFaces else { return }
+        guard !isScanning, !refiningFaces, !isDeleting else { return }
         // Set synchronously — the scan method body runs in a separately-enqueued
         // task, and a guard that only trips once the body executes lets a second
         // startScan in the same runloop turn clobber scanTask/abortFlag (Cancel
@@ -478,9 +486,12 @@ final class LibraryModel: ObservableObject {
         assetsByID = map
 
         // Enrich with Apple's quality scores + real file size from the library's
-        // Photos.sqlite (read-only). Loaded once and cached; degrades silently if
-        // the database isn't readable (no Full Disk Access / non-standard path).
-        if enrichment == nil {
+        // Photos.sqlite (read-only). A SUCCESSFUL load is cached for the session;
+        // an empty one (no Full Disk Access / non-standard path / aborted) is
+        // re-probed on every scan — otherwise granting FDA mid-session would
+        // change nothing until relaunch, with no hint why quality is still off.
+        // The re-probe costs one failed sqlite open per scan for a no-FDA user.
+        if enrichment?.isEmpty != false {
             progress = t.progReadingQuality()
             progressFraction = nil   // length unknown — indeterminate
             let flag = abortFlag
@@ -1155,10 +1166,11 @@ final class LibraryModel: ObservableObject {
     /// re-pick each keeper to favour the frame where people look their best.
     /// Bounded to cluster members; favorites stay protected.
     func refineWithFaces(_ t: L10n) async {
-        // Mutually exclusive with scans: a refine that completes over a newer
-        // scan's groups would re-pick keepers from stale face scores and stomp
-        // the scan's progress text.
-        guard !refiningFaces, !isScanning else { return }
+        // Mutually exclusive with scans AND deletes: a refine that completes over
+        // a newer scan's groups would re-pick keepers from stale face scores and
+        // stomp the scan's progress text; one racing a delete re-crowns keepers
+        // in groups the delete is about to rewrite.
+        guard !refiningFaces, !isScanning, !isDeleting else { return }
         refiningFaces = true
         // Fresh abort flag so a prior cancelled scan/refine can't abort this one;
         // cancelScan() sets it and the loop below drains cooperatively.
@@ -1443,7 +1455,11 @@ final class LibraryModel: ObservableObject {
     /// would otherwise drop the tail of the session. Writes on the calling actor so
     /// it completes before the app dies.
     func flushSnapshotSync() {
-        guard hasScanned, !isScanning else { return }
+        // Not during a delete either: `groups` still shows the pre-delete marks
+        // while performChanges runs, so a ⌘Q flush would persist a snapshot
+        // claiming photos exist (and are marked) that Photos just removed.
+        // `deleteReviewed` writes its own fresh snapshot when it finishes.
+        guard hasScanned, !isScanning, !isDeleting else { return }
         snapshotSaveTask?.cancel()
         ScanSnapshotStore.saveSync(makeSnapshot())
     }
@@ -1527,23 +1543,35 @@ final class LibraryModel: ObservableObject {
         // actor: a whole-library snapshot is multi-MB JSON and
         // fetchAssets(withLocalIdentifiers:) over tens of thousands of IDs blocks
         // for seconds — on .onAppear that beachballed every launch.
-        let loaded: (ScanSnapshot, [String: PHAsset])? = await Task.detached(priority: .userInitiated) {
-            guard let snap = ScanSnapshotStore.load() else { return nil }
-            let allIDs = Set(snap.groups.flatMap { $0.photos.map(\.uuid) }
-                + snap.categories.flatMap { $0.photos.map(\.uuid) })
-            guard !allIDs.isEmpty else { return nil }
-            // Must match the scan fetch: without includeAllBurstAssets the burst
-            // sub-frames don't resolve and their groups silently dissolve on
-            // restore (live-observed: 2755 → 2632 groups).
-            let fetchOpts = PHFetchOptions()
-            fetchOpts.includeAllBurstAssets = true
-            let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(allIDs), options: fetchOpts)
-            var map: [String: PHAsset] = [:]
-            map.reserveCapacity(fetched.count)
-            fetched.enumerateObjects { a, _, _ in map[a.localIdentifier] = a }
-            return (snap, map)
+        enum RestoreLoad { case none, unreadable, ok(ScanSnapshot, [String: PHAsset]) }
+        let loaded: RestoreLoad = await Task.detached(priority: .userInitiated) {
+            switch ScanSnapshotStore.loadOutcome() {
+            case .none: return .none
+            case .unreadable: return .unreadable
+            case .ok(let snap):
+                let allIDs = Set(snap.groups.flatMap { $0.photos.map(\.uuid) }
+                    + snap.categories.flatMap { $0.photos.map(\.uuid) })
+                guard !allIDs.isEmpty else { return .none }
+                // Must match the scan fetch: without includeAllBurstAssets the burst
+                // sub-frames don't resolve and their groups silently dissolve on
+                // restore (live-observed: 2755 → 2632 groups).
+                let fetchOpts = PHFetchOptions()
+                fetchOpts.includeAllBurstAssets = true
+                let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(allIDs), options: fetchOpts)
+                var map: [String: PHAsset] = [:]
+                map.reserveCapacity(fetched.count)
+                fetched.enumerateObjects { a, _, _ in map[a.localIdentifier] = a }
+                return .ok(snap, map)
+            }
         }.value
-        guard let (snap, map) = loaded else { return false }
+        // A corrupt session file must never masquerade as "nothing to restore"
+        // (that reads as silent loss of every review decision — because it is);
+        // the store moved the bytes aside for post-mortem, the banner says so.
+        if case .unreadable = loaded {
+            snapshotUnreadableNotice = true
+            return false
+        }
+        guard case .ok(let snap, let map) = loaded else { return false }
         // RE-CHECK the entry guards after the await gap: a scan (or another
         // restore) started meanwhile must win over this now-stale snapshot rather
         // than be clobbered by it.
@@ -1674,7 +1702,7 @@ final class LibraryModel: ObservableObject {
     func writeAlbums(_ t: L10n) async throws -> String {
         // Return a fully formed banner ("Sorted into albums · nothing new to add")
         // rather than the bare fragment, which reads as an uncapitalized floater.
-        guard !isWritingAlbums, !groups.isEmpty else {
+        guard !isWritingAlbums, !isDeleting, !groups.isEmpty else {
             return t.albumsWritten(bursts: 0, blurry: 0, docs: 0, exact: 0)
         }
         isWritingAlbums = true
@@ -1718,8 +1746,12 @@ final class LibraryModel: ObservableObject {
     ) async throws -> Int {
         // Never commit while a scan or face-refine is rebuilding group state:
         // a delete would race the pipeline over `groups` and persist a
-        // half-built snapshot over the previous complete one.
-        guard !isScanning, !refiningFaces else { return 0 }
+        // half-built snapshot over the previous complete one. And never
+        // re-enter: a second confirm racing the first would double-book the
+        // audit log and delete against indices the first is rewriting.
+        guard !isScanning, !refiningFaces, !isDeleting else { return 0 }
+        isDeleting = true
+        defer { isDeleting = false }
         var ids = groups.flatMap(\.deletionIDs)
         guard !ids.isEmpty else { return 0 }
 
@@ -1751,9 +1783,13 @@ final class LibraryModel: ObservableObject {
         // the raw sync PhotoKit call, which can wedge forever). `isDocument`
         // (Vision/pixels) stays rescan-only. A newly-protected frame must never be
         // deleted without the ⇧X path, nor booked .exactDuplicate/.userRejected.
+        // Swept in EVERY group, including includeProtected ones: that per-group
+        // consent covered the frames the user SAW as protected in the sheet —
+        // a frame that became protected only after the scan was never part of
+        // it, so it gets the same last-gate re-check as everywhere else. Only
+        // scan-time-protected frames (already consented) are exempt.
         let sweepTargets: [(gi: Int, uuid: String, asset: PHAsset)] =
             groups.indices.flatMap { i -> [(Int, String, PHAsset)] in
-                guard !groups[i].includeProtected else { return [] }
                 return groups[i].rejected.compactMap { uuid in
                     guard let asset = live[uuid],
                           let p = groups[i].photos.first(where: { $0.uuid == uuid }),
@@ -1763,13 +1799,26 @@ final class LibraryModel: ObservableObject {
             }
         if !sweepTargets.isEmpty {
             let editedNow = await currentEditedFlags(for: sweepTargets.map { ($0.uuid, $0.asset) })
-            let flags: [(Int, String, Bool, Bool)] = sweepTargets.map {
-                ($0.gi, $0.uuid, $0.asset.isFavorite, editedNow[$0.uuid] ?? false)
+            // `editedNow` holds only the frames that could be DETERMINED. For a
+            // no-FDA user whose sync-lane breaker has tripped, nothing can be:
+            // the stored value is itself an unverified guess there, so an
+            // undetermined frame must resolve to the protective direction and
+            // be un-marked — never coerced to "not edited" at the last gate
+            // before performChanges (same rule as the paired-video check:
+            // cannot verify → cannot delete).
+            let flags: [(gi: Int, uuid: String, fav: Bool, edited: Bool, undetermined: Bool)] = sweepTargets.map {
+                ($0.gi, $0.uuid, $0.asset.isFavorite, editedNow[$0.uuid] ?? false, editedNow[$0.uuid] == nil)
             }
             var dropped = 0
-            for (gi, uuid, fav, edited) in flags where fav || edited {
+            for (gi, uuid, fav, edited, undetermined) in flags where fav || edited || undetermined {
                 guard let j = groups[gi].photos.firstIndex(where: { $0.uuid == uuid }) else { continue }
-                groups[gi].photos[j] = groups[gi].photos[j].with(favorite: fav, edited: edited)
+                if fav || edited {
+                    // Real new protection — upgrade the stored flags so the UI
+                    // and every later guard agree. An undetermined frame keeps
+                    // its stored flags (stamping edited=true would be a lie);
+                    // it is only un-marked for THIS commit.
+                    groups[gi].photos[j] = groups[gi].photos[j].with(favorite: fav, edited: edited)
+                }
                 groups[gi].rejected.remove(uuid)
                 groups[gi].autoSeeded.remove(uuid)
                 dropped += 1

@@ -54,6 +54,21 @@ def test_max_span_caps_chained_drift():
     assert sum(sizes(capped)) <= 6 and len(capped) >= 2
 
 
+def test_null_dimensions_never_cluster_together():
+    # NULL width/height (unprocessed/corrupt import row) must not compare
+    # equal to another NULL row — None == None is True in Python and would
+    # otherwise silently merge two unrelated dimension-less photos.
+    photos = [p(1, 0, w=None, h=None), p(2, 1, w=None, h=None)]
+    assert list(cluster(photos, gap_sec=3, size_tol=0.10)) == []
+
+
+def test_null_dimensions_dont_join_a_real_burst():
+    # A dimension-less frame sandwiched between two real-dimension frames
+    # must not bridge them into one cluster, and must not join either side.
+    photos = [p(1, 0), p(2, 1, w=None, h=None), p(3, 2)]
+    assert list(cluster(photos, gap_sec=3, size_tol=0.10)) == []
+
+
 def test_quality_score_positive_minus_negative():
     s = quality_score({"sharply_focused": 0.9, "well_framed": 0.8,
                        "noise": 0.3, "failure": 0.1})

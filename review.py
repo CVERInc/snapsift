@@ -121,9 +121,14 @@ function render() {
         (p.is_keeper ? '<span class="badge k">KEEP</span>' : '') +
         (del ? '<span class="badge d">DELETE</span>' : '') +
         (p.favorite ? '<span class="badge f">★</span>' : '') +
-        `<img loading="lazy" src="/thumb?uuid=${p.uuid}">` +
-        `<div class="meta">${p.filename || p.uuid.slice(0,8)}` +
-        `${p.quality ? ' · q'+p.quality.toFixed(1) : ''}</div>`;
+        `<img loading="lazy" src="/thumb?uuid=${p.uuid}">`;
+      // filename comes straight from Photos' ZORIGINALFILENAME and is
+      // attacker-influenceable (AirDrop/Messages/downloads) — use textContent
+      // so it can never be parsed as markup, unlike the innerHTML above.
+      const meta = document.createElement('div'); meta.className = 'meta';
+      meta.textContent = (p.filename || p.uuid.slice(0,8)) +
+        (p.quality ? ' · q'+p.quality.toFixed(1) : '');
+      card.appendChild(meta);
       card.onclick = () => { promote(gi, pi); };
       row.appendChild(card);
     });

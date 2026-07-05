@@ -1600,6 +1600,15 @@ struct L10n: Sendable {
         case .zhTW: return "無法儲存你的檢視進度（磁碟空間不足？）— 結束前請先釋放空間，否則你的判斷不會保留到下次開啟。"
         }
     }
+    /// Banner when a saved session file existed but couldn't be read (corrupt
+    /// file or an old schema) — must never pass silently as a fresh start.
+    func snapshotUnreadable() -> String {
+        switch language {
+        case .en: return "Couldn't read your last session's file — starting fresh. The unreadable file was kept next to it as last-scan.unreadable.json."
+        case .ja: return "前回のセッションのファイルを読み込めなかったため、新規に開始します。読み込めなかったファイルは last-scan.unreadable.json として同じ場所に残してあります。"
+        case .zhTW: return "無法讀取你上次的工作階段檔案，已重新開始。無法讀取的檔案保留在原位，名為 last-scan.unreadable.json。"
+        }
+    }
     /// Appended to the delete-completion banner when the audit line couldn't be
     /// written — the delete stands but its accountability record is missing.
     func commitAuditFailed() -> String {

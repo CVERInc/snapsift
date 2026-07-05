@@ -92,11 +92,34 @@ enum ScanSnapshotStore {
         saveQueue.sync { save(snapshot) }
     }
 
+    /// Distinguishes "nothing to restore" from "there WAS a session but its file
+    /// can't be read" — the snapshot is the sole store of the user's review
+    /// decisions, so the second case must surface, never silently pass as the
+    /// first (an empty launch after hours of review reads as data loss, because
+    /// it is).
+    enum LoadOutcome {
+        case none                  // no snapshot on disk — a genuinely fresh start
+        case unreadable            // file exists but corrupt / stale schema
+        case ok(ScanSnapshot)
+    }
+
+    static func loadOutcome() -> LoadOutcome {
+        guard let data = try? Data(contentsOf: url) else { return .none }
+        guard let snap = try? JSONDecoder().decode(ScanSnapshot.self, from: data),
+              snap.schema == ScanSnapshot.currentSchema else {
+            // Preserve the bytes for post-mortem instead of letting the next
+            // save clobber them; the notice tells the user what happened.
+            let aside = url.deletingPathExtension().appendingPathExtension("unreadable.json")
+            try? FileManager.default.removeItem(at: aside)
+            try? FileManager.default.moveItem(at: url, to: aside)
+            return .unreadable
+        }
+        return .ok(snap)
+    }
+
     static func load() -> ScanSnapshot? {
-        guard let data = try? Data(contentsOf: url),
-              let snap = try? JSONDecoder().decode(ScanSnapshot.self, from: data),
-              snap.schema == ScanSnapshot.currentSchema else { return nil }
-        return snap
+        if case .ok(let snap) = loadOutcome() { return snap }
+        return nil
     }
 
     static func clear() {

@@ -155,7 +155,7 @@ def iter_assets(conn: sqlite3.Connection, include_video: bool = False):
 def cluster(photos, gap_sec: float, size_tol: float, max_span: float = 0.0):
     """
     Single-pass clustering: a photo joins the current cluster iff
-        same (width, height)
+        same (width, height), both known (NULL never matches, even NULL==NULL)
         AND (taken_at - prev.taken_at) < gap_sec
         AND |size - prev.size| / prev.size < size_tol  (only if prev.size > 0)
         AND (max_span <= 0  OR  taken_at - cluster[0].taken_at <= max_span)
@@ -175,9 +175,14 @@ def cluster(photos, gap_sec: float, size_tol: float, max_span: float = 0.0):
                 abs(p.size - prev.size) / prev.size < size_tol
             )
             span_ok = max_span <= 0 or (p.taken_at - cluster[0].taken_at) <= max_span
+            # NULL width/height (unprocessed/corrupt import) must never count as
+            # a dimension match — None == None is True in Python, which would
+            # otherwise silently merge unrelated dimension-less photos.
+            dims_ok = (p.width is not None and p.height is not None
+                       and prev.width is not None and prev.height is not None
+                       and p.width == prev.width and p.height == prev.height)
             if (gap < gap_sec
-                    and p.width == prev.width
-                    and p.height == prev.height
+                    and dims_ok
                     and size_ok
                     and span_ok):
                 cluster.append(p)

@@ -98,11 +98,11 @@ public struct DeletionAuditLog: Sendable {
     /// false so the caller can honestly report a missing record (a mass delete that
     /// wrote no audit line undermines the accountability story otherwise).
     @discardableResult
-    public static func append(_ session: DeletionSession) -> Bool {
+    public static func append(_ session: DeletionSession, to url: URL = logURL) -> Bool {
         guard !session.records.isEmpty else { return true }
         do {
             let fm = FileManager.default
-            let dir = directory
+            let dir = url.deletingLastPathComponent()
             if !fm.fileExists(atPath: dir.path) {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
@@ -112,7 +112,6 @@ public struct DeletionAuditLog: Sendable {
             guard var line = String(data: data, encoding: .utf8) else { return false }
             line += "\n"
             let lineData = Data(line.utf8)
-            let url = logURL
             if fm.fileExists(atPath: url.path) {
                 // Throwing variants only: the legacy seekToEndOfFile()/write()
                 // raise ObjC exceptions on I/O failure that Swift's catch can't
@@ -137,15 +136,19 @@ public struct DeletionAuditLog: Sendable {
     // MARK: - Read
 
     /// Load all sessions from the log, newest-first. Returns empty array if the
-    /// file doesn't exist or can't be parsed.
-    public static func loadSessions() -> [DeletionSession] {
-        guard let data = try? Data(contentsOf: logURL),
-              let text = String(data: data, encoding: .utf8) else { return [] }
+    /// file doesn't exist; a malformed line costs that line only.
+    /// `url` defaults to the real log — tests point it at a temp file so the
+    /// I/O path is exercised without touching the user's actual history.
+    public static func loadSessions(from url: URL = logURL) -> [DeletionSession] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
         let decoder = JSONDecoder()
         var sessions: [DeletionSession] = []
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            if let lineData = String(line).data(using: .utf8),
-               let session = try? decoder.decode(DeletionSession.self, from: lineData) {
+        // Split on raw newline BYTES — never a whole-file UTF-8 decode, where a
+        // single corrupt byte (torn write, disk fault) nils the decode and
+        // silently blanks the ENTIRE accountability history. Line-scoped
+        // decoding keeps every intact session readable around the damage.
+        for lineData in data.split(separator: UInt8(ascii: "\n")) where !lineData.isEmpty {
+            if let session = try? decoder.decode(DeletionSession.self, from: Data(lineData)) {
                 sessions.append(session)
             }
         }

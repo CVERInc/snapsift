@@ -53,9 +53,16 @@ enum PhotoKitSyncLane {
 
     private final class Breaker: @unchecked Sendable {
         private let lock = NSLock()
-        private var tripped = false
-        var isTripped: Bool { lock.lock(); defer { lock.unlock() }; return tripped }
-        func trip() { lock.lock(); tripped = true; lock.unlock() }
+        private var trippedUntil: DispatchTime = DispatchTime(uptimeNanoseconds: 0)
+        /// Trips for 60 s, not for the process lifetime: the failure this
+        /// guards against (photolibraryd restarting mid-call) is itself
+        /// transient — the daemon is back within seconds. After the cooldown
+        /// the next caller probes the lane again; a still-dead daemon re-trips
+        /// on that probe's timeout (cost: one timed-out call per minute),
+        /// while a recovered one restores edited/paired-video metadata for the
+        /// rest of the session instead of silently degrading it for days.
+        var isTripped: Bool { lock.lock(); defer { lock.unlock() }; return .now() < trippedUntil }
+        func trip() { lock.lock(); trippedUntil = .now() + .seconds(60); lock.unlock() }
     }
 
     /// First-caller-wins guard so the work block and the timeout can never

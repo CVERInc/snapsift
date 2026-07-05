@@ -1424,5 +1424,77 @@ do {
     check(ok, "append(empty) returns true (no-op success, no false alarm)")
 }
 
+// The zero-input boundary: every grouping/keeper entry point must degrade to
+// "nothing" rather than trap — deletions() especially, since its output feeds
+// the delete pipeline.
+print("Zero-input boundaries")
+check(cluster([], gapSec: 3, sizeTol: 0.10).isEmpty, "cluster([]) → []")
+check(groupByHash([(UInt64, Photo)](), maxDistance: 2).isEmpty, "groupByHash([]) → []")
+check(deletions([]).isEmpty, "deletions([]) → [] (never traps picking a keeper from nobody)")
+check(deletions([ph(1, 0)]).isEmpty, "single-frame group deletes nothing")
+check(keeper([ph(1, 0)]).uuid == "U1", "single-frame group keeps its one frame")
+check(exactDuplicateSuggestions([]).isEmpty, "exactDuplicateSuggestions([]) → []")
+
+// Rotation payload normalisation: values land in 0…3 no matter what goes in —
+// including raw payloads that never passed through encodeQuarterTurns.
+print("Rotation encoding normalisation")
+check(decodeQuarterTurns(from: encodeQuarterTurns(-1)) == 3, "encode(-1) round-trips to 3")
+check(decodeQuarterTurns(from: encodeQuarterTurns(5)) == 1, "encode(5) round-trips to 1")
+check(decodeQuarterTurns(from: Data("{\"quarterTurns\":7}".utf8)) == 3,
+      "raw un-normalised payload (7) decodes to 3")
+check(decodeQuarterTurns(from: Data("{\"quarterTurns\":-3}".utf8)) == 1,
+      "raw negative payload (-3) decodes to 1")
+check(decodeQuarterTurns(from: Data("not json".utf8)) == nil, "garbage payload → nil")
+
+// Degenerate layout inputs are clamped, never propagated: a zero/negative
+// target height or spacing must still yield finite, positive frames.
+print("JustifiedLayout degenerate sizing")
+do {
+    let rows = JustifiedLayout.rows(aspectRatios: [1.5, 0.8, 1.0], containerWidth: 800,
+                                    targetHeight: 0, spacing: -5)
+    let allFrames = rows.flatMap(\.items)
+    check(!allFrames.isEmpty && allFrames.allSatisfy {
+        $0.width.isFinite && $0.height.isFinite && $0.width > 0 && $0.height > 0
+    }, "targetHeight 0 + negative spacing → clamped, finite, positive frames")
+}
+
+// The real file-I/O path of the accountability log, against a temp file: the
+// exact code that runs right after a destructive commit, previously untested.
+print("Audit-log file round-trip")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("snapsift-test-\(ProcessInfo.processInfo.processIdentifier)")
+    let url = dir.appendingPathComponent("deletions.jsonl")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let rec = DeletionRecord(timestamp: "2026-07-05T00:00:00Z", assetIdentifier: "A1",
+                             filename: "IMG_1.heic", sizeBytes: 1_000,
+                             keeperIdentifier: "K1", keeperFilename: "IMG_0.heic",
+                             reason: .userRejected)
+    check(DeletionAuditLog.append(
+        DeletionSession(timestamp: "2026-07-05T00:00:00Z", records: [rec]), to: url),
+        "first append creates dir + file and succeeds")
+    check(DeletionAuditLog.append(
+        DeletionSession(timestamp: "2026-07-05T01:00:00Z", records: [rec]), to: url),
+        "second append extends the existing file")
+    let sessions = DeletionAuditLog.loadSessions(from: url)
+    check(sessions.count == 2, "round-trip: both sessions load back")
+    check(sessions.first?.timestamp == "2026-07-05T01:00:00Z", "sessions load newest-first")
+
+    // One corrupt line — including a byte that is invalid UTF-8 — must cost
+    // that line only, never blank the whole history (regression guard for the
+    // whole-file decode wipe).
+    let handle = try FileHandle(forWritingTo: url)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data([0x7B, 0xFF, 0xFE, 0x0A]))   // "{" + invalid utf8 + \n
+    try handle.close()
+    check(DeletionAuditLog.append(
+        DeletionSession(timestamp: "2026-07-05T02:00:00Z", records: [rec]), to: url),
+        "append still works after a corrupt line")
+    let survived = DeletionAuditLog.loadSessions(from: url)
+    check(survived.count == 3, "one corrupt byte costs one line, not the whole history")
+    check(survived.first?.timestamp == "2026-07-05T02:00:00Z",
+          "sessions around the damage stay readable, newest-first")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

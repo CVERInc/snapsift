@@ -33,6 +33,7 @@ struct AssetThumbnail: View {
     var fill: Bool = false
 
     @State private var image: PlatformImage?
+    @State private var failed = false
 
     /// Normalised quarter-turns 0…3.
     private var turns: Int { ((quarterTurns % 4) + 4) % 4 }
@@ -57,6 +58,12 @@ struct AssetThumbnail: View {
                     .clipped()
                     // …THEN rotate it into the on-screen box. 90°·n clockwise.
                     .rotationEffect(.degrees(Double(turns) * 90))
+            } else if failed {
+                // Terminal state, not a forever-spinner: the request came back
+                // with no image (evicted original offline, damaged asset).
+                Rectangle().fill(Color.reefDeep)
+                Image(systemName: "photo.badge.exclamationmark")
+                    .foregroundStyle(Color.reefMint.opacity(0.6))
             } else {
                 Rectangle().fill(Color.reefDeep)
                 ProgressView().controlSize(.small).tint(.reefMint)
@@ -70,6 +77,7 @@ struct AssetThumbnail: View {
 
     private func load() async {
         guard let asset else { return }
+        failed = false
         let opts = PHImageRequestOptions()
         opts.isNetworkAccessAllowed = true        // pull from iCloud if evicted
         opts.deliveryMode = .highQualityFormat    // single callback
@@ -84,7 +92,7 @@ struct AssetThumbnail: View {
                 cont.resume(returning: img)
             }
         }
-        if let result { image = result }
+        if let result { image = result } else { failed = true }
     }
 }
 

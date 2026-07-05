@@ -281,6 +281,15 @@ struct ContentView: View {
                 model.snapshotSaveFailedNotice = false
             }
         }
+        // The saved session existed but couldn't be read (corrupt file / old
+        // schema). Without this, a lost session is indistinguishable from a
+        // fresh start — hours of review decisions vanishing without a word.
+        .onChange(of: model.snapshotUnreadableNotice) { _, unreadable in
+            if unreadable {
+                showBanner(t.snapshotUnreadable())
+                model.snapshotUnreadableNotice = false
+            }
+        }
         // Flush synchronously on ⌘Q: the debounced/async save can't be relied on
         // to finish as the process exits, so persist the tail of the session now.
         #if os(macOS)
@@ -1349,6 +1358,7 @@ struct ContentView: View {
                 Image(systemName: "questionmark.circle")
             }
             .help(t.helpTitle())
+            .accessibilityLabel(t.helpTitle())   // icon-only: VoiceOver needs a name
             .keyboardShortcut("?", modifiers: .command)
         }
         ToolbarItem { languageMenu }
