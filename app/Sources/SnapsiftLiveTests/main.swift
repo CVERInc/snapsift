@@ -6,9 +6,6 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 import SnapsiftCore
-#if os(macOS)
-import AppKit   // NSImage — PHImageManager's completion type on macOS
-#endif
 
 // Live-machine harness: exercises the REAL PhotoKit / Vision / byte-gate paths
 // against throwaway assets it generates and imports itself. It never touches
@@ -90,21 +87,24 @@ func sha256(asset: PHAsset) async -> String? {
     }
 }
 
-/// Request a bitmap for an asset (synchronous PhotoKit image request).
-func bitmap(asset: PHAsset, edge: CGFloat) async -> CGImage? {
+/// Decode an asset's original bitmap via its image DATA + ImageIO — not
+/// `requestImage`, which returns nil for a just-imported asset whose cached
+/// rendition PhotoKit hasn't generated yet. Synchronous delivery on the calling
+/// (background) thread, so no main-queue dependency. This is the true original
+/// pixels, exactly what the dHash/featureprint gates should see.
+func bitmap(asset: PHAsset) async -> CGImage? {
     let opts = PHImageRequestOptions()
     opts.isNetworkAccessAllowed = false
     opts.deliveryMode = .highQualityFormat
-    opts.isSynchronous = false
+    opts.isSynchronous = true
     return await withCheckedContinuation { cont in
-        PHImageManager.default().requestImage(
-            for: asset, targetSize: CGSize(width: edge, height: edge),
-            contentMode: .aspectFit, options: opts) { img, _ in
-            #if os(macOS)
-            cont.resume(returning: img?.cgImage(forProposedRect: nil, context: nil, hints: nil))
-            #else
-            cont.resume(returning: img?.cgImage)
-            #endif
+        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { data, _, _, _ in
+            guard let data,
+                  let src = CGImageSourceCreateWithData(data as CFData, nil),
+                  let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+                cont.resume(returning: nil); return
+            }
+            cont.resume(returning: img)
         }
     }
 }
@@ -217,10 +217,10 @@ Task {
 
     // 4. Perceptual gates + Core predicate, on real PhotoKit bitmaps.
     print("Perceptual gates (real bitmaps through Core predicates)")
-    guard let bmA = await bitmap(asset: aA, edge: 512),
-          let bmCopy = await bitmap(asset: aCopy, edge: 512),
-          let bmReenc = await bitmap(asset: aReenc, edge: 512),
-          let bmB = await bitmap(asset: aB, edge: 512) else { die("bitmap requests failed") }
+    guard let bmA = await bitmap(asset: aA),
+          let bmCopy = await bitmap(asset: aCopy),
+          let bmReenc = await bitmap(asset: aReenc),
+          let bmB = await bitmap(asset: aB) else { die("bitmap requests failed") }
     let hamCopy = hamming(dHashOf(bmA), dHashOf(bmCopy))
     let hamB = hamming(dHashOf(bmA), dHashOf(bmB))
     check(hamCopy == 0, "dHash(A, byte-copy) hamming == 0 (got \(hamCopy))")
