@@ -25,10 +25,16 @@ Usage:
 """
 
 from __future__ import annotations
-import argparse, io, json, webbrowser
+import argparse, io, json, re, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+
+# Photos asset UUIDs are uppercase hex-and-dash, 36 chars. Everything that
+# arrives over HTTP is validated against this before touching the filesystem
+# or the export file — a stray "../" would otherwise reach Path.glob (which
+# raises on "..") and the uuid list is later fed to delete tooling.
+UUID_RE = re.compile(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\Z")
 
 from pick import keeper, is_protected   # default keeper choice + protection guard
 from hash import resolve_thumb          # locate a thumbnail for a uuid
@@ -179,6 +185,8 @@ class Handler(BaseHTTPRequestHandler):
                               "application/json; charset=utf-8")
         if u.path == "/thumb":
             uuid = (parse_qs(u.query).get("uuid") or [""])[0]
+            if not UUID_RE.fullmatch(uuid):
+                return self._send(404, b"", "image/jpeg")
             return self._send_thumb(uuid)
         return self._send(404, "not found")
 
@@ -210,7 +218,9 @@ class Handler(BaseHTTPRequestHandler):
         # the groups we loaded and strip any such uuid before writing.
         protected = {p["uuid"] for g in self.groups for p in g["photos"]
                      if p["protected"]}
-        uuids = [x for x in payload.get("deletes", []) if x and x not in protected]
+        uuids = [x for x in payload.get("deletes", [])
+                 if isinstance(x, str) and UUID_RE.fullmatch(x)
+                 and x not in protected]
         self.uuid_out.write_text("\n".join(uuids) + ("\n" if uuids else ""))
         self._send(200, json.dumps({"written": len(uuids),
                                     "path": str(self.uuid_out)}),

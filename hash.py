@@ -148,6 +148,10 @@ def _load_pixels(thm_path: Path, size: int = 8):
     try:
         with Image.open(thm_path) as im:
             small = im.convert("L").resize((size + 1, size), Image.BILINEAR)
+            # getdata() is deprecated for removal in Pillow 14; for a
+            # single-band "L" image the flattened data is the same sequence.
+            if hasattr(small, "get_flattened_data"):
+                return list(small.get_flattened_data())
             return list(small.getdata())
     except Exception:
         return None
