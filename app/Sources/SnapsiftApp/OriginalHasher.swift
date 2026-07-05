@@ -25,12 +25,18 @@ enum OriginalHasher {
         }
     }
 
+    /// `PHAssetResource.assetResources(for:)` returned through the sync lane —
+    /// the array itself is immutable after creation and only read once back on
+    /// the caller's side.
+    private struct ResourceBox: @unchecked Sendable {
+        let resources: [PHAssetResource]
+    }
+
     /// Hex SHA-256 of the asset's primary original resource, or nil when the
     /// original is unavailable locally, the read fails, OR the asset carries
     /// more than its primary still — in which case hashing that one resource
     /// would falsely certify interchangeability the byte gate never proved.
     static func sha256(asset: PHAsset) async -> String? {
-        let resources = PHAssetResource.assetResources(for: asset)
         // A multi-resource asset is NEVER interchangeable with a single-resource
         // still even when the primary photo bytes match — the very rationale
         // `exactGroupPrecheck` states for RAW+JPEG. We hash only the primary
@@ -39,7 +45,16 @@ enum OriginalHasher {
         // stripped copy and be pre-marked exact, silently discarding the extra
         // half on delete. Return nil ("cannot verify" → NOT exact) so such assets
         // still appear in ordinary review buckets but are never auto-seeded.
+        // (`mediaSubtypes` is in-memory fetch metadata — checked first, no XPC.)
         if asset.mediaSubtypes.contains(.photoLive) { return nil }
+        // `assetResources(for:)` is a synchronous XPC round-trip into
+        // photolibraryd — the exact wedge class PhotoKitSyncLane exists for.
+        // Run it through the lane so a daemon restart mid-exact-pass strands
+        // the one sacrificial thread, not a cooperative-pool thread. nil
+        // (timed out / breaker tripped) = cannot verify → NOT exact.
+        guard let resources = (await PhotoKitSyncLane.call {
+            ResourceBox(resources: PHAssetResource.assetResources(for: asset))
+        })?.resources else { return nil }
         guard resources.filter({ $0.type != .adjustmentData }).count <= 1 else { return nil }
         // Prefer the true original still; fall back to the first resource so
         // re-imports whose only resource is e.g. .fullSizePhoto still hash.
