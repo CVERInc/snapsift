@@ -47,6 +47,8 @@ struct ContentView: View {
         let bytes: Int
         let protectedCount: Int
         let noSurvivor: Int
+        /// Groups shown but NOT committed: their keeper is gone from the library.
+        let withdrawnCount: Int
     }
     @State private var preCommitPayload: PreCommitPayload?
     // Feature 4: deletion history sheet
@@ -66,6 +68,9 @@ struct ContentView: View {
     // Post-commit held-back report (protected/burst/undetermined/audit) — a
     // persistent bar, not a 3.2s toast: it explains marks that just "vanished".
     @State private var commitNotice: String?
+    /// The degraded-protection bar was dismissed for this scan (the per-scan
+    /// states re-raise it; the one-shot ones clear themselves).
+    @State private var degradedProtectionDismissed = false
 
     private var language: Language { Language(rawValue: langRaw) ?? .en }
     private var t: L10n { L10n(language) }
@@ -249,6 +254,7 @@ struct ContentView: View {
                     .frame(minWidth: detailMinWidth, maxWidth: .infinity)
                     .safeAreaInset(edge: .top) { scopeBar }
                     .safeAreaInset(edge: .top) { staleRestoreBar }
+                    .safeAreaInset(edge: .top) { degradedProtectionBar }
                     .safeAreaInset(edge: .top) { commitNoticeBar }
                 if showHelp {
                     Divider()
@@ -278,6 +284,9 @@ struct ContentView: View {
             // of an empty window that demands a multi-minute rescan. Decode +
             // asset resolution run off the main actor (see restoreSnapshot), so
             // launch never beachballs on a whole-library snapshot.
+            // A commit that died between performChanges and the history write
+            // left a journal behind; book what actually went missing, then say so.
+            model.reconcileDeletionJournal()
             Task { await model.restoreSnapshot(t) }
         }
         // Scan-completion feedback: every scan ends with an explicit banner
@@ -287,6 +296,10 @@ struct ContentView: View {
             if let notice {
                 showBanner(notice)
                 model.scanNotice = nil
+                // A fresh scan re-raises the degraded-protection bar: the states
+                // it reports are per-scan, and a dismissal from the last one
+                // must not hide a new one.
+                degradedProtectionDismissed = false
             }
         }
         // A snapshot write failed (typically a full disk — this app's target
@@ -334,6 +347,7 @@ struct ContentView: View {
                 reclaimableBytes: payload.bytes,
                 totalProtected: payload.protectedCount,
                 noSurvivorCount: payload.noSurvivor,
+                withdrawnCount: payload.withdrawnCount,
                 model: model,
                 t: t,
                 onConfirm: {
@@ -646,7 +660,12 @@ struct ContentView: View {
         case "j": moveSelection(1, proxy);  return .handled
         case "l": enterGrid(); return .handled
         case "a": if let id = selection { model.keepAll(group: id) }; return .handled
-        case "d": if let id = selection { model.rejectAll(group: id) }; return .handled
+        case "d":
+            if let id = selection {
+                let withheld = model.rejectAll(group: id)
+                if withheld > 0 { showBanner(t.bulkRejectWithheld(withheld)) }
+            }
+            return .handled
         case let c where c.count == 1 && c.first!.isNumber:
             if let n = Int(c), n >= 1 { pickNth(n - 1) }; return .handled
         default: return .ignored
@@ -697,7 +716,10 @@ struct ContentView: View {
             if let f = focusedFrame { previewID = f; loupeOpen = true }
             return .handled
         case "a":      model.keepAll(group: g.id); return .handled
-        case "d":      model.rejectAll(group: g.id); return .handled
+        case "d":
+            let withheld = model.rejectAll(group: g.id)
+            if withheld > 0 { showBanner(t.bulkRejectWithheld(withheld)) }
+            return .handled
         case "x", "X":
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
         // FIX 3: display-only rotate. R = clockwise, ⇧R = counter-clockwise.
@@ -1182,6 +1204,66 @@ struct ContentView: View {
         }
     }
 
+    /// Standing, dismissible bar for every DEGRADED PROTECTION state. Doctrine:
+    /// a degraded state must be visible — a protection the user cannot see is
+    /// indistinguishable from no protection, and this app's entire promise is
+    /// "it never deletes a photo you wanted". Covers: the sidecar isn't provably
+    /// the library in use; frames whose edit state couldn't be read (kept safe);
+    /// exact duplicates left unmarked because the copy carries albums/a caption;
+    /// marks whose photo vanished; a deletion history repaired from a journal.
+    @ViewBuilder private var degradedProtectionBar: some View {
+        let lines = degradedProtectionLines
+        if !lines.isEmpty {
+            HStack(spacing: 10) {
+                Image(systemName: "lock.shield")
+                    .foregroundStyle(Color.reefAmber)
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(lines, id: \.self) { line in
+                        Text(line)
+                            .font(.callout)
+                            .foregroundStyle(Color.reefText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 8)
+                Button {
+                    model.journalRecoveredCount = nil
+                    model.vanishedMarkCount = nil
+                    model.uniqueMetadataWithheld = 0
+                    degradedProtectionDismissed = true
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.reefTextDim)
+                .accessibilityLabel(t.staleRestoreDismiss())
+            }
+            .padding(.horizontal, CVERSpacing.lg).padding(.vertical, CVERSpacing.sm)
+            .frame(maxWidth: .infinity)
+            .background(Color.reefAmber.opacity(0.10))
+            .background(.ultraThinMaterial)
+            .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .bottom)
+        }
+    }
+
+    private var degradedProtectionLines: [String] {
+        var out: [String] = []
+        if let n = model.journalRecoveredCount { out.append(t.journalRecovered(n)) }
+        if let n = model.vanishedMarkCount { out.append(t.vanishedMarks(n)) }
+        guard !degradedProtectionDismissed else { return out }
+        // Only while there is a scan to be degraded ABOUT: the unverified-library
+        // line before the first scan would be a warning about nothing.
+        if model.hasScanned && !model.libraryIdentity.isVerified && model.qualityAvailable {
+            out.append(t.libraryUnverified())
+        }
+        let undetermined = model.undeterminedEditCount
+        if undetermined > 0 { out.append(t.protectionDegraded(undetermined)) }
+        if model.uniqueMetadataWithheld > 0 {
+            out.append(t.uniqueMetadataWithheld(model.uniqueMetadataWithheld))
+        }
+        return out
+    }
+
     /// Persistent post-commit report of everything the delete HELD BACK — the
     /// same treatment staleRestoreBar earned, for the same reason: the news
     /// arrives at the exact moment the user is least likely to be watching.
@@ -1330,8 +1412,13 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.reefRed)
                 // A commit must never race a pipeline that is rebuilding
-                // `groups` — same gate as every other toolbar action.
-                .disabled(deleting || model.isScanning || model.refiningFaces)
+                // `groups` — same gate as every other toolbar action, INCLUDING
+                // the album write. This button is the always-visible one, so it
+                // was the only way to reach the pre-commit sheet during a
+                // "Sort into Albums" run: the sheet appeared, the user confirmed,
+                // `deleteReviewed` refused, and nothing said so.
+                .disabled(deleting || model.isScanning || model.refiningFaces
+                          || model.isWritingAlbums)
             }
         }
         .font(.caption)
@@ -1474,10 +1561,20 @@ struct ContentView: View {
     /// The actual PHPhotoLibrary delete only happens after the user confirms.
     private func runDelete() async {
         // The .disabled gates above cover the buttons; this covers the ⌘⌫
-        // shortcut and any future caller.
+        // shortcut and any future caller. isWritingAlbums included: confirming a
+        // delete during an album write used to produce a sheet whose Confirm did
+        // nothing at all.
         guard model.totalDeletions > 0, !deleting,
-              !model.isScanning, !model.refiningFaces else { return }
-        // Build PreCommitGroup snapshots from current group state.
+              !model.isScanning, !model.refiningFaces, !model.isWritingAlbums else { return }
+        // LIVE keeper check before the sheet is drawn. The sheet's "KEEP
+        // IMG_1234" is the promise the whole surface rests on; between the scan
+        // and this moment (hours, on a big library) that photo can have been
+        // deleted from an iPhone — and it is the likeliest one to be, since the
+        // natural human action is "two identical shots, bin one". Such a group
+        // is shown as WITHDRAWN and contributes nothing to the totals; the
+        // commit re-checks independently right before performChanges, because
+        // the sheet can sit open for a long time too.
+        let missingKeepers = await model.missingKeeperGroupIDs()
         let pendingGroups = model.groups.compactMap { g -> PreCommitGroup? in
             let toRemove = g.photos.filter { g.isDelete($0) }
             guard !toRemove.isEmpty else { return nil }
@@ -1491,15 +1588,24 @@ struct ContentView: View {
                 keeper: keeper,
                 keeperReason: why,
                 toRemove: toRemove,
-                includeProtected: g.includeProtected
+                includeProtected: g.includeProtected,
+                keeperMissing: missingKeepers.contains(g.id),
+                uniqueMetadataIDs: model.uniqueMetadataIDs.intersection(toRemove.map(\.uuid))
             )
         }
+        let withdrawn = pendingGroups.filter(\.keeperMissing)
+        let withdrawnDeletions = withdrawn.reduce(0) { $0 + $1.toRemove.count }
+        let withdrawnBytes = withdrawn.reduce(0) { $0 + $1.toRemove.reduce(0) { $0 + $1.size } }
         preCommitPayload = PreCommitPayload(
             groups: pendingGroups,
-            deletions: model.totalDeletions,
-            bytes: model.reclaimableBytes,
-            protectedCount: pendingGroups.reduce(0) { $0 + $1.toRemove.filter(\.isProtected).count },
-            noSurvivor: noSurvivorCountForCurrentGroups()
+            // Withdrawn groups are displayed but not committed, so they must not
+            // be counted in "Move N photos" or in the space estimate either.
+            deletions: model.totalDeletions - withdrawnDeletions,
+            bytes: model.reclaimableBytes - withdrawnBytes,
+            protectedCount: pendingGroups.filter { !$0.keeperMissing }
+                .reduce(0) { $0 + $1.toRemove.filter(\.isProtected).count },
+            noSurvivor: noSurvivorCountForCurrentGroups(),
+            withdrawnCount: withdrawn.count
         )
     }
 
@@ -1520,6 +1626,7 @@ struct ContentView: View {
             var protectedDropped = 0
             var burstSkipped = 0
             var undeterminedSkipped = 0
+            var keeperMissing = 0
             let n = try await model.deleteReviewed(
                 staleWarning: { [self] staleCount, foundCount in
                     // FIX 3: stale-asset warning — suspend until the user responds.
@@ -1531,7 +1638,8 @@ struct ContentView: View {
                 },
                 onProtectedDropped: { protectedDropped = $0 },
                 onBurstSkipped: { burstSkipped = $0 },
-                onUndeterminedSkipped: { undeterminedSkipped = $0 }
+                onUndeterminedSkipped: { undeterminedSkipped = $0 },
+                onKeeperMissing: { keeperMissing = $0 }
             )
             if !model.groups.contains(where: { $0.id == selection }) { selection = nil }
             // FIX 5: success banner explicitly states the 30-day recovery window
@@ -1546,6 +1654,7 @@ struct ContentView: View {
             if protectedDropped > 0 { held.append(t.commitProtectedKept(protectedDropped)) }
             if burstSkipped > 0 { held.append(t.commitBurstSkipped(burstSkipped)) }
             if undeterminedSkipped > 0 { held.append(t.commitUndeterminedSkipped(undeterminedSkipped)) }
+            if keeperMissing > 0 { held.append(t.commitKeeperMissing(keeperMissing)) }
             if model.lastDeleteAuditFailed { held.append(t.commitAuditFailed()) }
             if !held.isEmpty { commitNotice = held.joined(separator: "  ·  ") }
         } catch {
@@ -1553,6 +1662,13 @@ struct ContentView: View {
             // decision, not a failure — it must never trigger the scary
             // "delete failed, open Settings" alert.
             if let ph = error as? PHPhotosError, ph.code == .userCancelled { return }
+            // Blocked by another library write: the user confirmed a destructive
+            // action and nothing happened. That is news, not an error — say it
+            // plainly instead of the "delete failed, open Settings" alert.
+            if case CommitError.busy = error {
+                commitNotice = t.commitBusy()
+                return
+            }
             // FIX 2: failed delete must be LOUD and actionable, not a silent 3s banner.
             // A destructive action that fails invisibly breaks trust completely.
             // Only a permission problem (access downgraded to Selected Photos)
@@ -1735,12 +1851,21 @@ struct GroupReview: View {
     /// the actual confirmation alert is anchored at the top-level ContentView.
     @ViewBuilder private var saveRotationButton: some View {
         if let focused = focusedFrame, model.rotation(for: focused) % 4 != 0 {
+            // Never offered for a frame that already carries the user's own
+            // edits: saving would flatten them (PhotoKit hands back the RENDERED
+            // version of an adjusted asset) and "Revert to Original" would then
+            // also lose their crop. Disabled rather than hidden, with the reason
+            // in the tooltip — an affordance that silently disappears reads as a
+            // bug, and the model refuses this path too.
+            let isEdited = group.photos.contains { $0.uuid == focused && $0.edited }
             Button { model.showSaveRotationConfirm = true } label: {
                 Label(t.saveRotationButton(), systemImage: "arrow.clockwise.circle.fill")
             }
             .buttonStyle(.bordered)
             .tint(.reefMint)
-            .help(t.tipSaveRotation())
+            .help(isEdited ? t.saveRotationErrorBody(RotationSaveError.frameAlreadyEdited)
+                           : t.tipSaveRotation())
+            .disabled(isEdited)
             .keyboardShortcut("r", modifiers: [.shift, .command])
         }
     }
@@ -1952,6 +2077,15 @@ struct GroupReview: View {
                 chip(symbol: "icloud.slash", text: nil,
                      Color.reefTextDim.opacity(0.9), Color.reefGround)
                     .help(t.tipDocumentEvalDegraded())
+            }
+            // Edit state UNREADABLE (no Full Disk Access with the sync-lane
+            // breaker tripped, or a Photos library we could not confirm). The
+            // frame is protected, and that has to be VISIBLE: a protection the
+            // user can't see reads exactly like the app deciding on its own.
+            if p.editedUndetermined {
+                chip(symbol: "questionmark.circle", text: nil,
+                     Color.reefAmber.opacity(0.9), Color(hex: 0x1a1203))
+                    .help(t.tipEditedUndetermined())
             }
         }
         .padding(7)

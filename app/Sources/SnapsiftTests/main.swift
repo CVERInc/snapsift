@@ -15,11 +15,13 @@ func ph(_ pk: Int, _ takenAt: Double, w: Int = 4032, h: Int = 3024,
         size: Int = 2_000_000, uti: String = "public.heic",
         fav: Bool = false, quality: Double = 0,
         edited: Bool = false, isDocument: Bool = false,
-        sharpness: Double = 0, originalCamera: Bool = false) -> Photo {
+        sharpness: Double = 0, originalCamera: Bool = false,
+        docDegraded: Bool = false, editedUnknown: Bool = false) -> Photo {
     Photo(uuid: "U\(pk)", filename: "IMG_\(pk).heic", takenAt: takenAt,
           width: w, height: h, size: size, uti: uti, favorite: fav, quality: quality,
           edited: edited, isDocument: isDocument, sharpness: sharpness,
-          originalCamera: originalCamera)
+          originalCamera: originalCamera,
+          documentEvalDegraded: docDegraded, editedUndetermined: editedUnknown)
 }
 func sizes(_ g: [[Photo]]) -> [Int] { g.map(\.count) }
 
@@ -447,21 +449,18 @@ do {
 
 print("FIX C — includeProtected override (slice-1 guarantee, pure-Core)")
 
-/// Pure-function mirror of ReviewGroup.isDelete — tests the override logic
-/// without depending on the App-layer type.
-func reviewIsDelete(_ p: Photo, keeperID: String,
-                    keepAll: Bool, deleteAll: Bool, includeProtected: Bool) -> Bool {
-    guard !keepAll else { return false }
-    // Protected frames excluded UNLESS user opted in AND group is armed.
-    if p.isProtected && !(deleteAll && includeProtected) { return false }
-    return deleteAll || p.uuid != keeperID
-}
-
+/// NOT a mirror any more. `ReviewGroup.isDelete` now calls Core's
+/// `isEffectiveDeletion`, and so does this — the same function the app runs, so
+/// deleting the guard turns these red instead of leaving them green.
+/// (`deleteAll` here means "the group's marks cover every candidate", which the
+/// rejected-set model expresses directly: this shim just builds that set.)
 func reviewDeletionIDs(_ photos: [Photo], keeperID: String,
                        deleteAll: Bool, includeProtected: Bool) -> Set<String> {
-    Set(photos.filter {
-        reviewIsDelete($0, keeperID: keeperID, keepAll: false,
-                       deleteAll: deleteAll, includeProtected: includeProtected)
+    let rejected: Set<String> = deleteAll
+        ? Set(photos.map(\.uuid))
+        : Set(photos.filter { $0.uuid != keeperID }.map(\.uuid))
+    return Set(photos.filter {
+        isEffectiveDeletion($0, rejected: rejected, includeProtected: includeProtected)
     }.map(\.uuid))
 }
 
@@ -508,14 +507,20 @@ do {
 }
 
 do {
-    // (4) Auto-mark path (deleteAll=false): protected NEVER deleted even when
-    //     includeProtected=true — the user must first arm the group.
+    // (4) The override is not enough on its own. A protected frame is deleted
+    //     only when it is ALSO in `rejected`, which nothing but the ⇧X /
+    //     "include protected" path (both behind a confirm dialog) can do — the
+    //     scanner never puts one there. Marks alone or consent alone: safe.
     let fav = ph(1, 0, fav: true)
     let plain = ph(2, 1)
-    let ids = reviewDeletionIDs([fav, plain], keeperID: "U2",
-                                deleteAll: false, includeProtected: true)
-    check(!ids.contains("U1"),
-          "includeProtected=true but deleteAll=false: protected safe in auto-mark path")
+    check(!isEffectiveDeletion(fav, rejected: ["U2"], includeProtected: true),
+          "includeProtected=true but the frame is not marked: protected frame is safe")
+    check(!isEffectiveDeletion(fav, rejected: ["U1"], includeProtected: false),
+          "marked but no consent: protected frame is safe")
+    check(isEffectiveDeletion(fav, rejected: ["U1"], includeProtected: true),
+          "marked AND consented: the informed-consent path still works")
+    check(!isEffectiveDeletion(plain, rejected: [], includeProtected: true),
+          "an unmarked plain frame is never deleted either")
 }
 
 do {
@@ -550,17 +555,12 @@ do {
 
 print("Per-frame reject model (Pass 1)")
 
-// Mirror of the new ReviewGroup.isDelete
-func rejectIsDelete(_ p: Photo, keeperID: String, rejected: Set<String>, includeProtected: Bool) -> Bool {
-    guard rejected.contains(p.uuid) else { return false }
-    if p.isProtected && !includeProtected { return false }
-    return true
-}
-
+/// Calls the REAL rule (Core `isEffectiveDeletion`, which `ReviewGroup.isDelete`
+/// is now a one-line call to) rather than restating it here.
 func rejectDeletionIDs(_ photos: [Photo], keeperID: String,
                         rejected: Set<String>, includeProtected: Bool) -> Set<String> {
     Set(photos.filter {
-        rejectIsDelete($0, keeperID: keeperID, rejected: rejected, includeProtected: includeProtected)
+        isEffectiveDeletion($0, rejected: rejected, includeProtected: includeProtected)
     }.map(\.uuid))
 }
 
@@ -574,10 +574,8 @@ do {
     let doc   = ph(5, 4, isDocument: true)
     let photos = [keep, plain, fav, edited_, doc]
     let keeperID = keeper(photos).uuid   // should be U1 (highest quality)
-    // Auto-seed: all non-keeper non-protected.
-    let autoSeeded: Set<String> = Set(photos.compactMap { p in
-        (p.uuid != keeperID && !p.isProtected) ? p.uuid : nil
-    })
+    // The REAL composition rule the app seeds and `d` bulk-marks with.
+    let autoSeeded = bulkRejectCandidates(photos: photos, keeperID: keeperID)
     check(!autoSeeded.contains("U3"), "auto-seed: favorite never in rejected")
     check(!autoSeeded.contains("U4"), "auto-seed: edited never in rejected")
     check(!autoSeeded.contains("U5"), "auto-seed: document never in rejected")
@@ -651,9 +649,7 @@ do {
     let fav   = ph(3, 2, fav: true)
     let photos = [keep, plain, fav]
     let keeperID = "U1"
-    let rejectAllSeeded: Set<String> = Set(photos.compactMap { p in
-        (p.uuid != keeperID && !p.isProtected) ? p.uuid : nil
-    })
+    let rejectAllSeeded = bulkRejectCandidates(photos: photos, keeperID: keeperID)
     check(!rejectAllSeeded.contains("U1"), "rejectAll: keeper never auto-rejected")
     check(!rejectAllSeeded.contains("U3"), "rejectAll: protected never auto-rejected")
     check(rejectAllSeeded.contains("U2"), "rejectAll: plain non-keeper IS rejected")
@@ -671,9 +667,7 @@ do {
     let keep = ph(1, 0, quality: 0.9)
     let plain = ph(2, 1)
     let keeperID = keeper([keep, plain]).uuid
-    let autoSeeded: Set<String> = Set([keep, plain].compactMap { p in
-        (p.uuid != keeperID && !p.isProtected) ? p.uuid : nil
-    })
+    let autoSeeded = bulkRejectCandidates(photos: [keep, plain], keeperID: keeperID)
     check(!autoSeeded.contains(keeperID), "keeper never in auto-seeded rejected")
 }
 
@@ -1009,12 +1003,11 @@ do {
 
 print("FIX #4 — documentEvalDegraded auto-seeding guard (pure-Core)")
 
-// Helper: mirror the FIX #4 aware seeding logic from LibraryModel.scan().
-// Confident group: reject non-keeper, non-protected, non-degraded frames.
+// The REAL seeding rule — Core `bulkRejectCandidates`, which
+// `seedExactRejections`, `rejectAll` and `toggleKeepAll` all call. Removing the
+// degraded-frame exclusion from it turns the checks below red.
 func seedRejected(photos: [Photo], keeperID: String) -> Set<String> {
-    Set(photos.compactMap { p in
-        (p.uuid != keeperID && !p.isProtected && !p.documentEvalDegraded) ? p.uuid : nil
-    })
+    bulkRejectCandidates(photos: photos, keeperID: keeperID)
 }
 
 do {
@@ -1064,7 +1057,14 @@ do {
                          width: 100, height: 100, size: 1000, uti: "public.heic",
                          documentEvalDegraded: true)
     check(!degraded.isProtected,
-          "degraded: documentEvalDegraded alone does not set isProtected (user can still force-reject)")
+          "degraded: documentEvalDegraded alone does not set isProtected")
+    // …but it IS unverifiable, and unverifiable frames are never deletable —
+    // not even through the informed-consent override, because there is no fact
+    // to consent to. This is the half that was missing: `d` used to mark them.
+    check(degraded.isUnverifiable && !degraded.isDeletable,
+          "degraded: unverifiable ⇒ not deletable")
+    check(!isEffectiveDeletion(degraded, rejected: ["UD2"], includeProtected: true),
+          "degraded: includeProtected cannot force an unclassifiable frame into the delete set")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1494,6 +1494,313 @@ do {
     check(survived.count == 3, "one corrupt byte costs one line, not the whole history")
     check(survived.first?.timestamp == "2026-07-05T02:00:00Z",
           "sessions around the damage stay readable, newest-first")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMIT-PATH DECISIONS (SnapsiftCore/DeleteDecision.swift)
+//
+// These do NOT restate the rules — they call the same functions LibraryModel
+// calls. Each block ends with its NEGATIVE CONTROL noted: the one-line change
+// to the production rule that turns it red. Verified by making that change and
+// watching it fail, then restoring it (receipts in REPORT-fix-r1).
+// ─────────────────────────────────────────────────────────────────────────────
+
+print("Commit decision — keeper liveness (P1-1)")
+do {
+    let keep = ph(1, 0, quality: 0.9)
+    let dupe = ph(2, 1)
+    let state = CommitGroupState(index: 0, photos: [keep, dupe], keeperID: "U1",
+                                 rejected: ["U2"], includeProtected: false)
+
+    // Everything alive → the duplicate is committed, nothing withdrawn.
+    let ok = commitSweepDecision(groups: [state],
+                                 live: LiveCommitFacts(resolved: ["U1", "U2"],
+                                                       favoriteNow: ["U2": false],
+                                                       editedNow: ["U2": false]))
+    check(ok.deleteIDs == ["U2"] && ok.withdrawnGroupIndexes.isEmpty,
+          "keeper alive → the marked duplicate commits")
+
+    // The KEEPER was deleted elsewhere (iPhone, Photos.app) after the scan. The
+    // sheet said "KEEP IMG_1.heic". Committing the other frame would leave ZERO
+    // copies of that image and book a keeper that does not exist.
+    let gone = commitSweepDecision(groups: [state],
+                                   live: LiveCommitFacts(resolved: ["U2"],
+                                                         favoriteNow: ["U2": false],
+                                                         editedNow: ["U2": false]))
+    check(gone.deleteIDs.isEmpty, "keeper gone → NOTHING from that group is deleted")
+    check(gone.withdrawnGroupIndexes == [0], "keeper gone → the whole group is withdrawn, and named")
+    // NEGATIVE CONTROL: drop the keeper-liveness branch from
+    // commitSweepDecision and `keeper gone → NOTHING…` fails (deleteIDs == ["U2"]).
+}
+do {
+    // A group the user DELIBERATELY emptied (no-survivor, acknowledged via the
+    // sheet checkbox) has no keeper to lose — it must not be withdrawn.
+    let a = ph(1, 0), b = ph(2, 1)
+    let state = CommitGroupState(index: 0, photos: [a, b], keeperID: "U1",
+                                 rejected: ["U1", "U2"], includeProtected: false)
+    let d = commitSweepDecision(groups: [state],
+                                live: LiveCommitFacts(resolved: ["U1", "U2"],
+                                                      favoriteNow: ["U1": false, "U2": false],
+                                                      editedNow: ["U1": false, "U2": false]))
+    check(Set(d.deleteIDs) == ["U1", "U2"] && d.withdrawnGroupIndexes.isEmpty,
+          "deliberate no-survivor group is not confused with a lost keeper")
+}
+
+print("Commit decision — live protection sweep")
+do {
+    let keep = ph(1, 0, quality: 0.9)
+    let starred = ph(2, 1)      // favorited on an iPhone after the scan
+    let edited_ = ph(3, 2)      // edited in Photos.app after the scan
+    let plain = ph(4, 3)
+    let state = CommitGroupState(index: 0, photos: [keep, starred, edited_, plain],
+                                 keeperID: "U1", rejected: ["U2", "U3", "U4"],
+                                 includeProtected: false)
+    let d = commitSweepDecision(groups: [state],
+        live: LiveCommitFacts(resolved: ["U1", "U2", "U3", "U4"],
+                              favoriteNow: ["U2": true, "U3": false, "U4": false],
+                              editedNow: ["U2": false, "U3": true, "U4": false]))
+    check(d.deleteIDs == ["U4"], "favorited/edited since the scan are swept out of the commit")
+    check(d.newlyProtectedCount == 2, "…and reported, so the banner can say how many")
+    // NEGATIVE CONTROL: make the sweep read `editedNow[uuid] ?? false` without
+    // the favorite check and "U2" reappears in deleteIDs.
+}
+do {
+    // Edit state UNREADABLE (no Full Disk Access + tripped sync-lane breaker,
+    // or a library we couldn't verify). Missing key == undetermined.
+    let keep = ph(1, 0, quality: 0.9)
+    let unknown = ph(2, 1)
+    let state = CommitGroupState(index: 0, photos: [keep, unknown], keeperID: "U1",
+                                 rejected: ["U2"], includeProtected: false)
+    let d = commitSweepDecision(groups: [state],
+        live: LiveCommitFacts(resolved: ["U1", "U2"],
+                              favoriteNow: ["U2": false], editedNow: [:]))
+    check(d.deleteIDs.isEmpty, "undetermined edit state ⇒ not deleted")
+    check(d.undeterminedCount == 1, "undetermined frames are counted for the UI, not silent")
+    // NEGATIVE CONTROL: coerce the missing key to `false` (`editedNow[uuid] ?? false`)
+    // and the first check fails — the exact regression this arm exists for.
+}
+do {
+    // Force-included protected frames stay force-included: the user consented
+    // to those on this sheet. But a frame protected only AFTER the scan was
+    // never part of that consent, so the sweep still runs in such groups.
+    let fav = ph(1, 0, fav: true)
+    let plain = ph(2, 1)
+    let state = CommitGroupState(index: 0, photos: [fav, plain], keeperID: "U2",
+                                 rejected: ["U1", "U2"], includeProtected: true)
+    let d = commitSweepDecision(groups: [state],
+        live: LiveCommitFacts(resolved: ["U1", "U2"],
+                              favoriteNow: ["U2": true], editedNow: ["U2": false]))
+    check(d.deleteIDs == ["U1"], "consented protected frame still commits")
+    check(d.newlyProtectedCount == 1, "newly-favorited frame is swept even in an includeProtected group")
+}
+do {
+    // A marked frame that no longer exists: counted as vanished, never in the
+    // commit set, and it does NOT take the rest of the group with it.
+    let keep = ph(1, 0, quality: 0.9), a = ph(2, 1), b = ph(3, 2)
+    let state = CommitGroupState(index: 0, photos: [keep, a, b], keeperID: "U1",
+                                 rejected: ["U2", "U3"], includeProtected: false)
+    let d = commitSweepDecision(groups: [state],
+        live: LiveCommitFacts(resolved: ["U1", "U3"],
+                              favoriteNow: ["U3": false], editedNow: ["U3": false]))
+    check(d.deleteIDs == ["U3"] && d.vanishedCount == 1,
+          "a mark whose photo is gone is counted, not committed")
+}
+
+print("Delete-set composition + unverifiable frames (P2-3)")
+do {
+    let keep = ph(1, 0, quality: 0.9)
+    let plain = ph(2, 1)
+    let fav = ph(3, 2, fav: true)
+    let evicted = ph(4, 3, docDegraded: true)      // iCloud-evicted: never classified
+    let unreadable = ph(5, 4, editedUnknown: true) // edit state unreadable
+    let photos = [keep, plain, fav, evicted, unreadable]
+    let seeded = bulkRejectCandidates(photos: photos, keeperID: "U1")
+    check(seeded == ["U2"], "`d` / auto-seed marks ONLY frames it is allowed to: no protected, no unverifiable")
+    check(bulkRejectWithheld(photos: photos, keeperID: "U1") == ["U4", "U5"],
+          "…and reports what it withheld, so the button's promise stays true")
+    // NEGATIVE CONTROL: change bulkRejectCandidates' filter to `!$0.isProtected`
+    // and the first check fails with U4/U5 marked (the old `d` behaviour).
+    check(!isEffectiveDeletion(unreadable, rejected: ["U5"], includeProtected: true),
+          "unverifiable frames are not deletable even with includeProtected")
+    // The FAVORITE wins the keeper slot here (favorite is rankKey's top signal),
+    // so the deletable set is the two plain frames — and neither unverifiable
+    // frame is in it, which is the point.
+    check(Set(deletions(photos).map(\.uuid)) == ["U1", "U2"],
+          "Core deletions() excludes unverifiable frames too")
+}
+
+print("No-survivor: one definition for the sheet and the model (P2-7)")
+do {
+    // Keeper is marked, but it is a favorite and the group is NOT overridden:
+    // it survives. The sheet's keeper row and noSurvivorGroupCount must agree.
+    let favKeeper = ph(1, 0, fav: true)
+    let plain = ph(2, 1)
+    let rejected: Set<String> = ["U1", "U2"]
+    let k = survivingKeeper(photos: [favKeeper, plain], keeperID: "U1",
+                            rejected: rejected, includeProtected: false)
+    check(k?.uuid == "U1", "protected-and-not-overridden keeper still survives → sheet shows it")
+    check(noSurvivorGroupCount([(photos: [favKeeper, plain], rejected: rejected,
+                                 includeProtected: false)]) == 0,
+          "…and the model counts zero no-survivor groups — the two agree")
+    check(!hasNoSurvivor(photos: [favKeeper, plain], rejected: rejected, includeProtected: false),
+          "hasNoSurvivor agrees with both")
+
+    // Override on: the keeper really does go, and BOTH surfaces say so.
+    let k2 = survivingKeeper(photos: [favKeeper, plain], keeperID: "U1",
+                             rejected: rejected, includeProtected: true)
+    check(k2 == nil, "overridden keeper is gone → sheet shows the no-survivor row")
+    check(noSurvivorGroupCount([(photos: [favKeeper, plain], rejected: rejected,
+                                 includeProtected: true)]) == 1,
+          "…and the counter arms the acknowledge checkbox — same answer, same rule")
+}
+
+print("Exact duplicates: carries unique metadata (P2-2)")
+do {
+    let keeperMeta = LibraryMetadata(albumCount: 0, hasDescription: false)
+    check(!carriesUniqueMetadata(candidate: LibraryMetadata(albumCount: 0, hasDescription: false),
+                                 keeper: keeperMeta),
+          "a plain copy with nothing extra is safe to suggest")
+    check(carriesUniqueMetadata(candidate: LibraryMetadata(albumCount: 3, hasDescription: false),
+                                keeper: keeperMeta),
+          "the copy filed into 3 albums is NOT interchangeable with the keeper")
+    check(carriesUniqueMetadata(candidate: LibraryMetadata(albumCount: 0, hasDescription: true),
+                                keeper: keeperMeta),
+          "the copy carrying the user's caption is NOT interchangeable either")
+    check(carriesUniqueMetadata(candidate: LibraryMetadata(albumCount: nil, hasDescription: nil),
+                                keeper: keeperMeta),
+          "undetermined metadata ⇒ treated as carrying (unknown ⇒ protected)")
+    check(carriesUniqueMetadata(candidate: LibraryMetadata(albumCount: 0, hasDescription: false),
+                                keeper: LibraryMetadata()),
+          "…including when it is the KEEPER's metadata we could not read")
+    check(!carriesUniqueMetadata(candidate: LibraryMetadata(albumCount: 1, hasDescription: false),
+                                 keeper: LibraryMetadata(albumCount: 2, hasDescription: true)),
+          "a copy carrying LESS than the keeper is still interchangeable")
+    // NEGATIVE CONTROL: make the undetermined guard `return false` and the two
+    // "undetermined ⇒ carries" checks fail.
+}
+
+print("Library identity: is the sidecar the library PhotoKit serves? (P2-1)")
+do {
+    let real = "/Volumes/Photos SSD/Photos Library.photoslibrary"
+    let stale = "/Users/x/Pictures/Photos Library.photoslibrary"
+    check(evaluateLibraryIdentity(sidecarPath: real, photosLibraryPath: real,
+                                  sampledNewest: 12, foundInSidecar: 12) == .verified,
+          "same path + live contents → verified")
+    check(evaluateLibraryIdentity(sidecarPath: stale, photosLibraryPath: real,
+                                  sampledNewest: 12, foundInSidecar: 12)
+            == .unverified(.pathMismatch),
+          "the stale ~/Pictures copy is caught by PATH — its asset UUIDs all still match")
+    check(evaluateLibraryIdentity(sidecarPath: real, photosLibraryPath: nil)
+            == .unverified(.pathUnknown),
+          "couldn't establish where the library is ⇒ unverified, never 'probably fine'")
+    check(evaluateLibraryIdentity(sidecarPath: real, photosLibraryPath: real,
+                                  sampledNewest: 12, foundInSidecar: 9)
+            == .unverified(.staleContents),
+          "right path, frozen contents (newest assets missing) → unverified")
+    check(evaluateLibraryIdentity(sidecarPath: real + "/", photosLibraryPath: real,
+                                  sampledNewest: 4, foundInSidecar: 4) == .verified,
+          "a trailing slash is not a different library")
+    check(evaluateLibraryIdentity(sidecarPath: "", photosLibraryPath: real)
+            == .unverified(.pathUnknown),
+          "iOS / empty sidecar path ⇒ unverified")
+    // NEGATIVE CONTROL: drop the path comparison and the pathMismatch check fails.
+}
+
+print("Own-write token restamp (P2-6)")
+do {
+    let ours: Set<String> = ["U1", "U2"]
+    check(ownWriteOnly(inserted: [], updated: ["U1"], deleted: ["U2"], ourIDs: ours),
+          "only our own ids moved → safe to advance the staleness anchor")
+    check(!ownWriteOnly(inserted: [], updated: ["U9"], deleted: [], ourIDs: ours),
+          "someone else's edit during our write → do NOT stamp over it")
+    check(!ownWriteOnly(inserted: ["U9"], updated: [], deleted: [], ourIDs: ours),
+          "an asset inserted during our write is never ours")
+    check(!ownWriteOnly(inserted: [], updated: [], deleted: ["U9"], ourIDs: ours),
+          "an asset deleted elsewhere during our write is never ours")
+}
+
+print("Preferred language (gate P2-6)")
+do {
+    check(preferredLanguageTag(from: ["ja-US", "en-US"], supported: { $0.hasPrefix("ja") || $0.hasPrefix("en") }) == "ja-US",
+          "the FIRST preferred language wins, not the format region")
+    check(preferredLanguageTag(from: ["ko-KR", "zh-Hant-TW"], supported: { $0.hasPrefix("zh") }) == "zh-Hant-TW",
+          "an unsupported first preference falls through to the next")
+    check(preferredLanguageTag(from: ["ko-KR"], supported: { $0.hasPrefix("zh") }) == nil,
+          "nothing supported → nil (caller defaults to English)")
+    check(preferredLanguageTag(from: [], supported: { _ in true }) == nil,
+          "empty preference list → nil")
+}
+
+print("Photo: snapshot decoding stays backward compatible")
+do {
+    // last-scan.json is the SOLE store of the user's review decisions. A photo
+    // written by a build without `editedUndetermined` must still decode, or the
+    // upgrade reads as "every mark you made is gone".
+    let legacy = """
+    {"uuid":"U1","filename":"IMG_1.heic","takenAt":1.0,"width":4,"height":3,
+     "size":100,"uti":"public.heic","kind":0,"favorite":true,"quality":0.5,
+     "edited":false,"isDocument":false,"sharpness":0.1,"originalCamera":false,
+     "documentEvalDegraded":false}
+    """
+    let decoded = try? JSONDecoder().decode(Photo.self, from: Data(legacy.utf8))
+    check(decoded?.uuid == "U1" && decoded?.favorite == true,
+          "a snapshot photo without the new field still decodes")
+    check(decoded?.editedUndetermined == false, "…defaulting the missing flag to false")
+
+    let ancient = """
+    {"uuid":"U2","filename":"a.jpg","takenAt":0.0,"width":1,"height":1,
+     "size":1,"uti":"public.jpeg"}
+    """
+    check((try? JSONDecoder().decode(Photo.self, from: Data(ancient.utf8)))?.uuid == "U2",
+          "…and so does one from before the whole slice-1 flag set")
+
+    let round = try? JSONDecoder().decode(
+        Photo.self, from: JSONEncoder().encode(ph(9, 0, editedUnknown: true)))
+    check(round?.editedUndetermined == true, "the new flag round-trips")
+}
+
+print("Deletion-intent journal (P2-5)")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("snapsift-journal-\(UUID().uuidString)")
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let intentURL = dir.appendingPathComponent("pending-delete.json")
+
+    func rec(_ id: String) -> DeletionRecord {
+        DeletionRecord(timestamp: "2026-09-15T10:00:00Z", assetIdentifier: id,
+                       filename: "\(id).heic", sizeBytes: 100,
+                       keeperIdentifier: "K", keeperFilename: "K.heic",
+                       reason: .exactDuplicate)
+    }
+    let intent = DeletionSession(timestamp: "2026-09-15T10:00:00Z",
+                                 records: [rec("A"), rec("B"), rec("C")])
+    check(DeletionAuditLog.pendingIntent(at: intentURL) == nil, "no journal before a commit")
+    check(DeletionAuditLog.writeIntent(intent, to: intentURL), "journal is written before performChanges")
+    check(DeletionAuditLog.pendingIntent(at: intentURL)?.records.count == 3,
+          "…and survives the crash it exists for")
+
+    // Reconciliation: A is really gone, B still exists (so it was NEVER
+    // deleted — the system confirmation was cancelled), C is already logged.
+    let recovered = DeletionAuditLog.recoverableRecords(
+        from: intent, stillExisting: ["B"], alreadyLogged: ["C"])
+    check(recovered.map(\.assetIdentifier) == ["A"],
+          "only genuinely-missing, not-yet-logged photos are booked into the history")
+    check(!recovered.contains { $0.assetIdentifier == "B" },
+          "a photo that still exists is NEVER booked — history must not over-report")
+    // NEGATIVE CONTROL: drop the `stillExisting` filter and the B check fails —
+    // the history would then claim a deletion that never happened.
+
+    DeletionAuditLog.clearIntent(at: intentURL)
+    check(DeletionAuditLog.pendingIntent(at: intentURL) == nil,
+          "journal cleared once the history carries it")
+
+    let logURL = dir.appendingPathComponent("deletions.jsonl")
+    DeletionAuditLog.append(DeletionSession(timestamp: "2026-09-15T09:00:00Z",
+                                            records: [rec("Z")]), to: logURL)
+    check(DeletionAuditLog.loggedAssetIdentifiers(
+            from: DeletionAuditLog.loadSessions(from: logURL)) == ["Z"],
+          "the dedupe key reads back from the real log file")
 }
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")

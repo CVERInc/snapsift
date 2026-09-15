@@ -37,7 +37,12 @@ leaves your Mac.
   app only ever pre-marks a photo for deletion when it is a **byte-verified
   exact duplicate** (identical original files). Everything else is yours to
   decide, and the built-in deletion history records which was which.
-- **Favorites are never deleted; videos are off by default.**
+- **Protected photos are never pre-marked, and protection is re-checked
+  against the live library right before anything is deleted.** Protected means
+  favorites, edited photos, documents/scans — and anything snapsift could not
+  determine (an unreadable edit state is treated as "edited", never as "not
+  edited"). You can still force-delete a protected photo yourself; nothing else
+  can. Videos are off by default.
 
 Build it (no Xcode needed):
 
@@ -56,9 +61,15 @@ First-launch notes:
   Photos library — required to enumerate, sort into albums, and delete into
   Recently Deleted.
 - **Full Disk Access** (optional): lets snapsift read Apple's own quality
-  scores and real file sizes from `Photos.sqlite` (read-only). Without it
-  everything still works, but keeper ranking loses the quality signal and no
-  reclaimable-space estimate is shown — the status bar will tell you.
+  scores, real file sizes and the edited flag from `Photos.sqlite` (read-only).
+  Without it everything still works: keeper ranking loses the quality signal,
+  no reclaimable-space estimate is shown, and the edited flag is read one photo
+  at a time through PhotoKit instead. Any photo whose edit state cannot be
+  established that way is **protected** and a banner says how many — snapsift
+  never assumes "not edited". The status bar will tell you when the estimate is
+  missing, and it also tells you if it cannot confirm which Photos library this
+  Mac is using (a copied library left in `~/Pictures` reads plausibly and
+  answers everything months out of date, so snapsift refuses to trust it).
 
 ## How it works (the engine)
 
@@ -68,8 +79,8 @@ Python 3 and macOS; the two optional passes use Pillow.
 | Step | Tool | What it does |
 |---|---|---|
 | 1 | `scan.py` | Reads `Photos.sqlite` directly (read-only, immutable). Walks every non-trashed **photo** (videos skipped by default) in date order and clusters them by `(width, height)` + sub-3s time gap + ±10% file size, capped at a 30s total span. Carries each frame's favorite flag and Apple's own quality scores. Emits `groups.json`. |
-| 2 | `pick.py` | For each cluster, picks one keeper: **favorites are never deleted**, then Apple's quality score, then UTI priority (HEIC > JPG > PNG), then larger file. Emits `plan.json` and `delete-uuids.txt`. |
-| 3 | `delete.applescript` | Reads `delete-uuids.txt` and tells `Photos.app` to delete the marked items in batches of 100. They go to "Recently Deleted" → recoverable for 30 days. |
+| 2 | `pick.py` | For each cluster, picks one keeper: **favorites and edited photos are never deleted**, then Apple's quality score, then UTI priority (HEIC > JPG > PNG), then larger file. **Refuses to run** on a `groups.json` that predates the `edited` flag (re-run `scan.py`, or accept favorites-only protection with `--allow-legacy-groups`). Emits `plan.json` and `delete-uuids.txt`. |
+| 3 | `delete.applescript` | Reads `delete-uuids.txt` and tells `Photos.app` to delete the marked items in batches of 100. Re-reads each item's **favorite** flag from the live library first and skips favorites. They go to "Recently Deleted" → recoverable for 30 days. |
 | L3 | `hash.py` *(opt.)* | **Cross-time** near-duplicates: dHashes each photo's thumbnail and groups the matches via a BK-tree, so the same shot saved on different days collapses together. Emits a `groups.json`-shaped file that feeds straight back into `pick.py`. Needs `pip install "Pillow>=9"`. |
 | UI | `review.py` *(opt.)* | A local web page to eyeball every cluster before deleting: keeper highlighted, click to re-pick, ★ favorites locked, then **Export** the reviewed delete list. Reads any `groups.json` (burst *or* perceptual). stdlib server; Pillow only sharpens the thumbnails. |
 
@@ -96,10 +107,33 @@ Real-world hit rate on a 120K-photo library:
 
 ## Safety
 
+**This section is about the CLI pipeline** (`scan.py` → `pick.py` →
+`delete.applescript`). The macOS app enforces more than the CLI can — where
+they differ it is said so below.
+
 - `Photos.sqlite` is opened with `?mode=ro&immutable=1`, so we never touch
   Apple's data file even while Photos.app is running.
 - **Favorites are never deleted.** A favorited frame always survives — and
-  if a whole cluster is favorited, nothing in it is deleted.
+  if a whole cluster is favorited, nothing in it is deleted. This one is
+  re-checked LIVE: `delete.applescript` re-reads every item's `favorite`
+  property from Photos immediately before deleting it, so favoriting a photo
+  after the scan protects it too.
+- **Edited photos are never deleted — as of the scan.** `scan.py` records each
+  photo's adjustment state and `pick.py` never puts an edited photo in the
+  delete list. The limit, stated plainly: Photos' AppleScript dictionary
+  exposes no edited/adjustment property, so `delete.applescript` **cannot**
+  re-check it. A photo edited AFTER the scan that produced `delete-uuids.txt`
+  will still be moved to Recently Deleted (recoverable 30 days). Re-run
+  `scan.py` and `pick.py` if the library has been worked on since. **The macOS
+  app does not have this gap** — it re-reads the edited flag from the live
+  library right before it deletes anything, and holds back anything it cannot
+  read.
+- **A `groups.json` without `edited` flags is refused**, not quietly downgraded:
+  `pick.py` exits non-zero and tells you to re-run `scan.py`. `--allow-legacy-groups`
+  opts in to favorites-only protection and says so loudly, twice.
+- **Documents/scans** are only protected for input produced by the macOS app —
+  `scan.py` cannot detect them (no pixel access). The CLI path does not protect
+  documents.
 - **Videos are skipped by default** (two short clips shot back-to-back are
   rarely true duplicates). Opt in with `scan.py --include-video`.
 - **Runaway clusters are capped** by `--max-span` (default 30s) so a slow

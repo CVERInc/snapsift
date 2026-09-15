@@ -54,8 +54,12 @@ def _run_module(module_name: str, argv: list[str]) -> int:
     saved = sys.argv
     sys.argv = [f"snapsift {module_name}"] + argv
     try:
-        mod.main()
-        return 0
+        # PROPAGATE the tool's own exit code. Discarding it made `snapsift pick`
+        # report success for a run that refused to write a delete list — the
+        # dispatcher turning a fail-closed guard back into a fail-open one for
+        # anyone scripting the pipeline.
+        rc = mod.main()
+        return rc if isinstance(rc, int) else 0
     except SystemExit as e:                       # argparse --help / errors
         return int(e.code) if isinstance(e.code, int) else (0 if e.code is None else 1)
     finally:

@@ -30,6 +30,10 @@ Keeper heuristic (in order, highest first):
      quality version" (more bits = less compression).
   7. If still tied, keep the earliest one (the original take).
 
+`pick.py` REFUSES to run on a groups.json without `edited` flags (older
+scan.py output) rather than silently degrading to favorites-only protection —
+pass --allow-legacy-groups to accept that degradation explicitly.
+
 We never need pixel access here. scan.py provides `favorite`, `edited` and the
 aesthetic score straight from Photos.sqlite; `is_document`, `sharpness` and
 `original_camera` are Vision/pixel-derived and only present when the input
@@ -132,19 +136,52 @@ def main():
                     help="Plain newline-delimited UUIDs to feed delete.applescript")
     ap.add_argument("--max-groups", type=int, default=None,
                     help="Only emit first N clusters (handy for cautious first-pass)")
+    ap.add_argument("--allow-legacy-groups", action="store_true",
+                    help="Proceed on a groups.json that carries no 'edited' flags. "
+                         "Protection then degrades to FAVORITES ONLY: an edited "
+                         "photo can be written to delete-uuids.txt. Re-running "
+                         "scan.py is almost always the right answer instead.")
     args = ap.parse_args()
 
     data = json.loads(args.input.read_text())
 
-    # Fail-loudly guard: a groups.json written by an older scan.py carries no
-    # `edited` flags at all, which silently downgrades protection to
-    # favorites-only (an edited frame would land in delete-uuids.txt). Warn so
-    # the user re-scans instead of trusting a weaker guarantee than documented.
-    sample = next((p for g in data["groups"] for p in g["photos"]), None)
-    if sample is not None and "edited" not in sample:
-        print("⚠️  This groups.json has no 'edited' flags (written by an older "
-              "scan.py?) — only favorites are protected. Re-run scan.py so "
-              "edited photos are never marked for deletion.", file=sys.stderr)
+    # FAIL CLOSED on a groups.json with no `edited` flags.
+    #
+    # A groups.json written by an older scan.py carries no `edited` key, and
+    # `is_protected` then reads a missing key as False — so every edited photo
+    # in it lands in delete-uuids.txt and delete.applescript moves it to
+    # Recently Deleted. The five-step pipeline in the README explicitly invites
+    # running the steps on different days, so a months-old groups.json is a
+    # NORMAL input, not an exotic one.
+    #
+    # This used to be one line on stderr, scrolling past above two ✅ lines.
+    # A warning that has to be noticed to protect anything protects nothing:
+    # the guarantee ("an edited frame is never deleted") is either enforced or
+    # it isn't. Missing data ⇒ refuse, and let the user opt in explicitly if
+    # they really mean favorites-only.
+    #
+    # Checked across EVERY photo, not a single sample: a hand-merged or
+    # concatenated groups.json can carry the flag in its first clusters and not
+    # in its last, which is precisely the file a first-photo check waves through.
+    missing = sum(1 for g in data["groups"] for p in g["photos"] if "edited" not in p)
+    if missing:
+        if not args.allow_legacy_groups:
+            print(f"❌ {args.input}: {missing:,} photos carry no 'edited' flag "
+                  "(written by an older scan.py?).\n"
+                  "   Refusing to write a delete list: without that flag an edited "
+                  "photo would be treated as unprotected and deleted.\n"
+                  "   Fix: re-run scan.py to regenerate groups.json.\n"
+                  "   Or, if you accept FAVORITES-ONLY protection, re-run with "
+                  "--allow-legacy-groups.", file=sys.stderr)
+            return 2
+        print("=" * 72, file=sys.stderr)
+        print("⚠️  --allow-legacy-groups: PROTECTION IS DEGRADED TO FAVORITES ONLY.",
+              file=sys.stderr)
+        print(f"   {missing:,} photos in {args.input} carry no 'edited' flag, so an "
+              "edited photo\n   CAN be written to the delete list. Documents are not "
+              "protected either\n   (that flag only exists in app-produced input).",
+              file=sys.stderr)
+        print("=" * 72, file=sys.stderr)
 
     plan_groups = []
     delete_uuids: list[str] = []
@@ -202,7 +239,14 @@ def main():
     print(f"Delete format mix:")
     for fmt, n in deleted_format.most_common():
         print(f"  {fmt:30s} {n:>6,}")
+    if missing:
+        # Last word, not first: the reader has to scroll past the delete count
+        # to leave, so the caveat sits where they actually end up.
+        print()
+        print(f"⚠️  favorites-only protection was in force for this plan "
+              f"({missing:,} photos had no 'edited' flag).", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

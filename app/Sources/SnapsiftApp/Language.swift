@@ -1,4 +1,5 @@
 import Foundation
+import SnapsiftCore
 
 /// Languages snapsift speaks. Adding a case forces every message in ``L10n`` to
 /// be translated (the switches there are exhaustive), so the UI can never ship
@@ -34,8 +35,20 @@ enum Language: String, CaseIterable, Identifiable, Sendable {
         return nil
     }
 
-    /// Resolve the active language from the system locale, defaulting to English.
-    static func detect(localeIdentifier: String = Locale.current.identifier) -> Language {
-        parse(localeIdentifier) ?? .en
+    /// Resolve the active language from the user's PREFERRED LANGUAGES, in
+    /// their order, defaulting to English.
+    ///
+    /// Not `Locale.current`: on macOS that follows the FORMAT REGION, not the
+    /// language. A Japanese-speaking user with region United States opened an
+    /// English app; a Taiwanese user working in Japan opened a Japanese one —
+    /// the first thing a paid app shows, in the wrong language, with the fix
+    /// hidden behind a globe menu they must first be able to read.
+    /// `Locale.preferredLanguages` is System Settings' own ordered list, so the
+    /// second preference wins when the first isn't one of our three.
+    static func detect(preferredLanguages: [String] = Locale.preferredLanguages) -> Language {
+        guard let tag = preferredLanguageTag(from: preferredLanguages,
+                                             supported: { parse($0) != nil })
+        else { return .en }
+        return parse(tag) ?? .en
     }
 }

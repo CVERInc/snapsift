@@ -22,21 +22,76 @@ enum QualitySidecar {
     }
 
     #if os(macOS)
-    static let defaultLibraryPath =
+    /// Where a Photos library lives if the user never moved it. This is a GUESS,
+    /// never an identity: a library "copied" (not moved) to an external disk and
+    /// then set as the system library leaves a full, stale duplicate right here —
+    /// same asset UUIDs, same schema, months out of date. Reading it answers
+    /// every question plausibly and every question wrong, and the one that
+    /// matters is `edited`. Always go through `locate()`.
+    static let fallbackLibraryPath =
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Pictures/Photos Library.photoslibrary").path
     #else
     // The Photos.sqlite sidecar is a macOS-only capability (Full Disk Access
     // into the user's library bundle). The iOS sandbox can never read it —
     // the app runs on the existing `qualityAvailable = false` degradation.
-    static let defaultLibraryPath = ""
+    static let fallbackLibraryPath = ""
     #endif
+
+    /// The library path Photos itself records, resolved from its own preference
+    /// bookmark (`IPXDefaultLibraryURLBookmark` in com.apple.Photos). nil when it
+    /// cannot be read — which the caller must treat as "identity unknown", not
+    /// as "the default path is fine".
+    ///
+    /// Read-only and side-effect-free on purpose: `.withoutUI` so a stale
+    /// bookmark can never put a dialog in front of the user, `.withoutMounting`
+    /// so probing an unplugged external library never spins up a mount. (An
+    /// instrument that changes what it measures is not an instrument.)
+    static func photosLibraryPath() -> String? {
+        #if os(macOS)
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let candidates = [
+            home.appendingPathComponent(
+                "Library/Containers/com.apple.Photos/Data/Library/Preferences/com.apple.Photos.plist"),
+            home.appendingPathComponent("Library/Preferences/com.apple.Photos.plist"),
+        ]
+        for url in candidates {
+            guard let plist = NSDictionary(contentsOf: url),
+                  let bookmark = plist["IPXDefaultLibraryURLBookmark"] as? Data else { continue }
+            var stale = false
+            guard let resolved = try? URL(resolvingBookmarkData: bookmark,
+                                          options: [.withoutUI, .withoutMounting],
+                                          relativeTo: nil,
+                                          bookmarkDataIsStale: &stale) else { continue }
+            return resolved.path
+        }
+        return nil
+        #else
+        return nil
+        #endif
+    }
+
+    /// Which database to read, and what we know about its identity.
+    /// `photosLibraryPath == nil` ⇒ unverified: the caller must not trust
+    /// `edited` from this file (see `evaluateLibraryIdentity`).
+    struct Location {
+        let path: String
+        let photosLibraryPath: String?
+    }
+
+    static func locate() -> Location {
+        let declared = photosLibraryPath()
+        // Prefer the library Photos names, even when it is somewhere unexpected:
+        // the external-disk user was reading a stale ~/Pictures copy AND being
+        // told to grant Full Disk Access they had already granted.
+        return Location(path: declared ?? fallbackLibraryPath, photosLibraryPath: declared)
+    }
 
     /// Load the enrichment map. Heavy (one row per asset) — call off the main
     /// actor. `shouldAbort` is polled periodically so a cancelled scan can bail
     /// out of the row loop (the detached task this runs in does not inherit the
     /// scan task's cancellation).
-    static func load(libraryPath: String = defaultLibraryPath,
+    static func load(libraryPath: String = locate().path,
                      shouldAbort: @Sendable () -> Bool = { false }) -> [String: Enrichment] {
         guard !libraryPath.isEmpty else { return [:] }
         let dbPath = "\(libraryPath)/database/Photos.sqlite"
@@ -115,7 +170,7 @@ enum QualitySidecar {
     /// query failed mid-way) so the caller can fall back to PhotoKit; a
     /// successful read maps ZUUID → edited for every requested row that exists.
     static func editedFlags(zuuids: [String],
-                            libraryPath: String = defaultLibraryPath) -> [String: Bool]? {
+                            libraryPath: String = locate().path) -> [String: Bool]? {
         guard !libraryPath.isEmpty else { return nil }
         guard !zuuids.isEmpty else { return [:] }
         let dbPath = "\(libraryPath)/database/Photos.sqlite"
@@ -158,5 +213,94 @@ enum QualitySidecar {
             }
         }
         return out
+    }
+
+    // MARK: - User metadata (exact-duplicate "carries unique metadata" probe)
+
+    /// Whether each asset carries a user-entered caption / title / description.
+    ///
+    /// Two byte-identical files are interchangeable as pixels but not as library
+    /// entries — one of them may be the copy the user wrote a caption on. The
+    /// sheet shows two indistinguishable thumbnails, so the user cannot catch
+    /// this; the pre-mark must.
+    ///
+    /// Returns nil when the columns this reads are not in THIS library's schema
+    /// (Photos renames tables between releases) or the file is unreadable. nil
+    /// means UNDETERMINED, which the Core rule treats as "carries unique
+    /// metadata" — the frame is then not pre-marked. Degrading to "no caption"
+    /// would be the one unsafe answer, so it is not an option here.
+    static func userMetadata(zuuids: [String],
+                             libraryPath: String = locate().path) -> [String: Bool]? {
+        guard !libraryPath.isEmpty else { return nil }
+        guard !zuuids.isEmpty else { return [:] }
+        let dbPath = "\(libraryPath)/database/Photos.sqlite"
+        guard FileManager.default.fileExists(atPath: dbPath) else { return nil }
+
+        var db: OpaquePointer?
+        guard sqlite3_open_v2("file:\(dbPath)?mode=ro", &db,
+                              SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
+            sqlite3_close(db); return nil
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 2000)
+
+        // Schema discovery FIRST: never assume a column name we have not seen in
+        // this file. A missing one returns nil (undetermined) rather than a
+        // query that silently reports "no caption anywhere".
+        guard hasColumn(db, table: "ZADDITIONALASSETATTRIBUTES", column: "ZTITLE"),
+              hasColumn(db, table: "ZADDITIONALASSETATTRIBUTES", column: "ZASSETDESCRIPTION"),
+              hasColumn(db, table: "ZASSETDESCRIPTION", column: "ZLONGDESCRIPTION")
+        else { return nil }
+
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        var out: [String: Bool] = [:]
+        var start = 0
+        while start < zuuids.count {
+            let chunk = Array(zuuids[start..<min(start + 500, zuuids.count)])
+            start += 500
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let sql = """
+                SELECT z.ZUUID,
+                       COALESCE(LENGTH(TRIM(a.ZTITLE)), 0),
+                       COALESCE(LENGTH(TRIM(d.ZLONGDESCRIPTION)), 0)
+                FROM ZASSET z
+                LEFT JOIN ZADDITIONALASSETATTRIBUTES a ON a.ZASSET = z.Z_PK
+                LEFT JOIN ZASSETDESCRIPTION d ON d.Z_PK = a.ZASSETDESCRIPTION
+                WHERE z.ZUUID IN (\(placeholders))
+                """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            for (i, id) in chunk.enumerated() {
+                sqlite3_bind_text(stmt, Int32(i + 1), id, -1, transient)
+            }
+            while true {
+                let rc = sqlite3_step(stmt)
+                if rc == SQLITE_ROW {
+                    guard let cstr = sqlite3_column_text(stmt, 0) else { continue }
+                    let titled = sqlite3_column_int64(stmt, 1) > 0
+                    let described = sqlite3_column_int64(stmt, 2) > 0
+                    out[String(cString: cstr)] = titled || described
+                } else if rc == SQLITE_DONE {
+                    break
+                } else {
+                    return nil
+                }
+            }
+        }
+        return out
+    }
+
+    /// True when `table.column` exists in this database. `pragma table_info`
+    /// returns no rows for a table that isn't there, so one helper covers both.
+    private static func hasColumn(_ db: OpaquePointer?, table: String, column: String) -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(table))", -1, &stmt, nil) == SQLITE_OK
+        else { return false }
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 1), String(cString: c) == column { return true }
+        }
+        return false
     }
 }

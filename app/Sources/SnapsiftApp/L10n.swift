@@ -455,6 +455,15 @@ struct L10n: Sendable {
         }
     }
 
+    /// Tooltip for the per-frame "edit state unknown" chip.
+    func tipEditedUndetermined() -> String {
+        switch language {
+        case .en:   return "Couldn't read whether this photo has been edited, so it's protected — snapsift never assumes \"not edited\". Grant Full Disk Access, or rescan, to check it."
+        case .ja:   return "この写真が編集済みかどうかを読み取れなかったため、保護しています — snapsift は「未編集」と決めつけません。フルディスクアクセスを許可するか、再スキャンしてください。"
+        case .zhTW: return "讀不到這張照片是否被編輯過，因此予以保護 —— snapsift 不會逕自假設「沒編輯」。請給予「完整磁碟取用權限」或重新掃描以確認。"
+        }
+    }
+
     // FIX C: include-protected override strings.
 
     /// Button label for the per-group "include protected" toggle (N = protected frame count).
@@ -868,14 +877,15 @@ struct L10n: Sendable {
         case .zhTW: return "掃描後被加入最愛或編輯的 \(n) 張已保留"
         }
     }
-    /// Shown after a commit when frames were held back because their edited
-    /// state could not be read (sidecar/sync-lane unavailable). The marks stay;
-    /// the user can simply commit again later.
+    /// Shown after a commit when frames were dropped because their edited state
+    /// could not be read (sidecar unreadable / unverified library / sync-lane
+    /// breaker). They are UN-MARKED and now carry the "edit state unknown" chip,
+    /// so the message must not promise a mark that is no longer there.
     func commitUndeterminedSkipped(_ n: Int) -> String {
         switch language {
-        case .en: return "held \(n) — couldn't verify edits, still marked; try again later"
-        case .ja: return "\(n)枚は編集状態を確認できず保留 — マークは残っています。後でもう一度お試しください"
-        case .zhTW: return "有 \(n) 張因無法確認編輯狀態而暫緩 —— 標記仍保留，稍後可再試"
+        case .en: return "kept \(n) — couldn't read whether they were edited, so they're protected and unmarked; rescan to check"
+        case .ja: return "\(n)枚は編集されたかどうかを読み取れなかったため保護し、マークを解除しました — 再スキャンで確認できます"
+        case .zhTW: return "有 \(n) 張因為讀不到是否被編輯過而受保護，標記已取消 —— 重新掃描即可確認"
         }
     }
     /// Shown after a commit when burst representatives were skipped to avoid
@@ -1467,7 +1477,14 @@ struct L10n: Sendable {
     /// seam closed: RotationSaveError's own errorDescription is English-only, so
     /// map the case here instead of surfacing err.localizedDescription raw.
     func saveRotationErrorBody(_ error: Error) -> String {
-        switch error as? RotationSaveError {
+        // guard-let, not `switch optional`: a plain enum switch is exhaustive on
+        // every toolchain (the `true`/`false`/`nil` form over an Optional is not,
+        // and cost the CI build a compile error), and the compiler still forces a
+        // translation for any case added later — the point of this file.
+        guard let rotationError = error as? RotationSaveError else {
+            return error.localizedDescription
+        }
+        switch rotationError {
         case .noEditingInput:
             switch language {
             case .en:   return "Couldn't get editing access to this photo. Try again, or check that snapsift has Full Photos access."
@@ -1492,8 +1509,12 @@ struct L10n: Sendable {
             case .ja:   return "写真が回転を保存できませんでした：\(underlying.localizedDescription)"
             case .zhTW: return "「照片」無法儲存旋轉：\(underlying.localizedDescription)"
             }
-        case nil:
-            return error.localizedDescription
+        case .frameAlreadyEdited:
+            switch language {
+            case .en:   return "This photo already has your own edits. Saving a rotation would flatten them into a new version and \"Revert to Original\" would lose your crop, so snapsift won't do it. Rotate it in Photos instead — the display rotation here stays."
+            case .ja:   return "この写真にはすでにご自身の編集があります。回転を保存すると編集が統合され、「オリジナルに戻す」でトリミングまで失われるため、snapsift は保存しません。写真アプリで回転してください — ここでの表示回転はそのまま残ります。"
+            case .zhTW: return "這張照片已經有你自己的編輯。儲存旋轉會把那些編輯壓平成新版本，「回復到原始項目」連裁切也會一起失去，所以 snapsift 不會這麼做。請改在「照片」裡旋轉 —— 這裡的顯示旋轉會保留。"
+            }
         }
     }
     /// Dismiss button for the save-rotation error alert.
@@ -1794,6 +1815,112 @@ struct L10n: Sendable {
         case .en: return "Entire group removed — no photo kept"
         case .ja: return "グループ全体を削除 — 残る写真はありません"
         case .zhTW: return "整組刪除：沒有任何一張會留下"
+        }
+    }
+
+    // MARK: - Protection-degradation surfaces (never silent)
+
+    /// Persistent bar after a commit withdrew whole groups because the photo
+    /// they promised to keep no longer exists.
+    func commitKeeperMissing(_ n: Int) -> String {
+        switch language {
+        case .en: return "held \(n) group\(n == 1 ? "" : "s") — the photo they would keep is gone from your library; rescan to re-pick a keeper"
+        case .ja: return "\(n)グループを保留 — 残すはずの写真がライブラリにありません。再スキャンしてキーパーを選び直してください"
+        case .zhTW: return "有 \(n) 組暫緩 —— 原本要留下的那張已不在圖庫中，請重新掃描以重選要保留的照片"
+        }
+    }
+
+    /// The commit was blocked by another library write in flight.
+    func commitBusy() -> String {
+        switch language {
+        case .en: return "Nothing was deleted — another library write is still running. Wait for it to finish and try again."
+        case .ja: return "削除は行われていません — 別のライブラリ書き込みが実行中です。完了してからもう一度お試しください。"
+        case .zhTW: return "沒有刪除任何東西 —— 另一項圖庫寫入還在進行。請等它結束後再試一次。"
+        }
+    }
+
+    /// Standing notice: some frames' edit state could not be read, so they are
+    /// protected rather than assumed unedited.
+    func protectionDegraded(_ n: Int) -> String {
+        switch language {
+        case .en: return "\(n) frame\(n == 1 ? "'s" : "s'") edit state couldn't be read — protected until it can be verified"
+        case .ja: return "\(n)枚の編集状態を読み取れませんでした — 確認できるまで保護されます"
+        case .zhTW: return "有 \(n) 張的編輯狀態讀不到 —— 在能確認之前一律受保護"
+        }
+    }
+
+    /// Standing notice: the sidecar we can read is not provably the library
+    /// Photos is serving, so edit protection falls back / degrades.
+    func libraryUnverified() -> String {
+        switch language {
+        case .en: return "Can't confirm which Photos library this Mac is using, so edits can't be verified from it — snapsift protects anything it can't check and won't pre-mark."
+        case .ja: return "この Mac が使用している写真ライブラリを特定できないため、編集状態をそこから確認できません — snapsift は確認できないものをすべて保護し、事前マークも行いません。"
+        case .zhTW: return "無法確認這台 Mac 正在使用哪一座「照片」圖庫，因此無法從中確認編輯狀態 —— snapsift 會保護所有無法檢查的照片，也不會預先標記。"
+        }
+    }
+
+    /// Exact duplicates NOT pre-marked because the copy carries album
+    /// membership / a caption the keeper doesn't (or that couldn't be read).
+    func uniqueMetadataWithheld(_ n: Int) -> String {
+        switch language {
+        case .en: return "\(n) exact duplicate\(n == 1 ? "" : "s") left unmarked — that copy carries albums or a caption the keeper doesn't"
+        case .ja: return "\(n)枚の完全重複はマークしていません — そのコピーはキーパーにないアルバムや説明を持っています"
+        case .zhTW: return "有 \(n) 張完全重複沒有預先標記 —— 那一份帶有保留照片所沒有的相簿或說明"
+        }
+    }
+
+    /// Per-frame badge in the pre-commit sheet.
+    func preCommitUniqueMetadata() -> String {
+        switch language {
+        case .en: return "carries albums or a caption the kept photo doesn't"
+        case .ja: return "残す写真にないアルバム／説明を持っています"
+        case .zhTW: return "帶有保留照片所沒有的相簿或說明"
+        }
+    }
+
+    /// Deletion history repaired from an interrupted commit's journal.
+    func journalRecovered(_ n: Int) -> String {
+        switch language {
+        case .en: return "Added \(n) deletion\(n == 1 ? "" : "s") from an interrupted session to your history — they are in Recently Deleted."
+        case .ja: return "中断されたセッションの削除\(n)件を履歴に追加しました — 「最近削除した項目」にあります。"
+        case .zhTW: return "已把上次中斷的工作階段中的 \(n) 筆刪除補進歷史紀錄 —— 它們在「最近刪除」裡。"
+        }
+    }
+
+    /// Marks lost on restore because the photo no longer exists.
+    func vanishedMarks(_ n: Int) -> String {
+        switch language {
+        case .en: return "\(n) marked photo\(n == 1 ? "" : "s") no longer exist\(n == 1 ? "s" : "") — removed outside snapsift since the scan"
+        case .ja: return "マークしていた\(n)枚がもう存在しません — スキャン後に snapsift 以外で削除されています"
+        case .zhTW: return "有 \(n) 張標記過的照片已不存在 —— 掃描後被 snapsift 以外的方式刪掉了"
+        }
+    }
+
+    /// A bulk "delete every frame" left some frames out because they could not
+    /// be classified — the button promised protected photos stay safe.
+    func bulkRejectWithheld(_ n: Int) -> String {
+        switch language {
+        case .en: return "\(n) frame\(n == 1 ? "" : "s") couldn't be classified and stayed unmarked"
+        case .ja: return "\(n)枚は分類できなかったため、マークしていません"
+        case .zhTW: return "有 \(n) 張無法判定，沒有列入標記"
+        }
+    }
+
+    /// Header warning in the pre-commit sheet: N groups are shown but withheld.
+    func preCommitWithdrawnWarning(_ n: Int) -> String {
+        switch language {
+        case .en: return "\(n) group\(n == 1 ? " is" : "s are") not being deleted: the photo they would keep no longer exists in your library."
+        case .ja: return "\(n)グループは削除しません：残すはずの写真がライブラリにもう存在しません。"
+        case .zhTW: return "有 \(n) 組不會刪除：原本要留下的那張照片已不在你的圖庫中。"
+        }
+    }
+
+    /// Per-row label for a withdrawn group.
+    func preCommitWithdrawnRow() -> String {
+        switch language {
+        case .en: return "Skipped — the photo to keep is gone; nothing here is deleted"
+        case .ja: return "スキップ — 残すはずの写真がありません。このグループは削除しません"
+        case .zhTW: return "略過 —— 要保留的那張已不存在，這組不會刪除任何東西"
         }
     }
 

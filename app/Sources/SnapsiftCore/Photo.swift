@@ -68,12 +68,23 @@ public struct Photo: Sendable, Equatable, Identifiable, Codable {
     /// auto-seeded into the rejected set.
     public let documentEvalDegraded: Bool
 
+    /// True when the frame's EDIT state could not be determined at all: the
+    /// quality sidecar is absent or belongs to a library we could not confirm is
+    /// the one PhotoKit serves, AND the per-asset PhotoKit fallback also failed
+    /// (breaker tripped / timed out). `edited` is then a guess, not a fact, so
+    /// the frame must be treated exactly like a protected one — unknown ⇒
+    /// protected. Distinct from `edited == true`, which is a KNOWN protection
+    /// the user can still override via the informed-consent path; an
+    /// undetermined frame has nothing to consent to, so it is never deletable.
+    public let editedUndetermined: Bool
+
     public init(uuid: String, filename: String, takenAt: Double,
                 width: Int, height: Int, size: Int, uti: String,
                 kind: Int = 0, favorite: Bool = false, quality: Double = 0,
                 edited: Bool = false, isDocument: Bool = false,
                 sharpness: Double = 0, originalCamera: Bool = false,
-                documentEvalDegraded: Bool = false) {
+                documentEvalDegraded: Bool = false,
+                editedUndetermined: Bool = false) {
         self.uuid = uuid
         self.filename = filename
         self.takenAt = takenAt
@@ -89,6 +100,42 @@ public struct Photo: Sendable, Equatable, Identifiable, Codable {
         self.sharpness = sharpness
         self.originalCamera = originalCamera
         self.documentEvalDegraded = documentEvalDegraded
+        self.editedUndetermined = editedUndetermined
+    }
+
+    // MARK: - Backward-compatible decoding
+    //
+    // `last-scan.json` is the SOLE store of the user's review decisions, so a
+    // snapshot written by an older build (no `editedUndetermined` key, and for
+    // very old files none of the slice-1 flags) must still decode. A synthesized
+    // Decodable would fail the whole file and the restore would surface as
+    // "unreadable" — i.e. every mark silently gone. Missing flags decode to
+    // `false`, which is what those builds meant by omitting them.
+
+    enum CodingKeys: String, CodingKey {
+        case uuid, filename, takenAt, width, height, size, uti, kind, favorite
+        case quality, edited, isDocument, sharpness, originalCamera
+        case documentEvalDegraded, editedUndetermined
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        uuid = try c.decode(String.self, forKey: .uuid)
+        filename = try c.decode(String.self, forKey: .filename)
+        takenAt = try c.decode(Double.self, forKey: .takenAt)
+        width = try c.decode(Int.self, forKey: .width)
+        height = try c.decode(Int.self, forKey: .height)
+        size = try c.decode(Int.self, forKey: .size)
+        uti = try c.decode(String.self, forKey: .uti)
+        kind = try c.decodeIfPresent(Int.self, forKey: .kind) ?? 0
+        favorite = try c.decodeIfPresent(Bool.self, forKey: .favorite) ?? false
+        quality = try c.decodeIfPresent(Double.self, forKey: .quality) ?? 0
+        edited = try c.decodeIfPresent(Bool.self, forKey: .edited) ?? false
+        isDocument = try c.decodeIfPresent(Bool.self, forKey: .isDocument) ?? false
+        sharpness = try c.decodeIfPresent(Double.self, forKey: .sharpness) ?? 0
+        originalCamera = try c.decodeIfPresent(Bool.self, forKey: .originalCamera) ?? false
+        documentEvalDegraded = try c.decodeIfPresent(Bool.self, forKey: .documentEvalDegraded) ?? false
+        editedUndetermined = try c.decodeIfPresent(Bool.self, forKey: .editedUndetermined) ?? false
     }
 
     /// A frame a human likely wants to keep regardless of keeper choice: a
@@ -97,19 +144,36 @@ public struct Photo: Sendable, Equatable, Identifiable, Codable {
     /// (Core + the SwiftUI `ReviewGroup`) routes through.
     public var isProtected: Bool { favorite || edited || isDocument }
 
+    /// True when a protection INPUT could not be determined: the edit state is
+    /// unreadable (`editedUndetermined`) or the document eval ran blind
+    /// (`documentEvalDegraded`, iCloud-evicted / timed out). Doctrine: unknown ⇒
+    /// protected. Such a frame is never auto-seeded, never enters a delete set,
+    /// and — unlike a KNOWN protection — cannot be force-included, because there
+    /// is no fact for the user to consent to overriding.
+    public var isUnverifiable: Bool { editedUndetermined || documentEvalDegraded }
+
+    /// The single positive predicate the whole delete pipeline routes through:
+    /// a frame may be deleted only when it is neither protected nor
+    /// unverifiable. `deletions()`, the App's bulk-reject seeding and the
+    /// commit-time sweep all key off this, so adding a new protection input
+    /// means adding it here once, not in five call sites.
+    public var isDeletable: Bool { !isProtected && !isUnverifiable }
+
     /// A copy with one or more protection / eval flags overridden, every other
     /// field preserved. Used when a flag is RE-EVALUATED after the scan: a
     /// rotation save makes a frame `edited`, a live commit-time re-check upgrades
     /// `favorite`/`edited`, an exact-pass hi-q pass confirms `isDocument`. Keeps
     /// those in-place rebuilds honest and free of field-drift.
     public func with(favorite: Bool? = nil, edited: Bool? = nil,
-                     isDocument: Bool? = nil, documentEvalDegraded: Bool? = nil) -> Photo {
+                     isDocument: Bool? = nil, documentEvalDegraded: Bool? = nil,
+                     editedUndetermined: Bool? = nil) -> Photo {
         Photo(uuid: uuid, filename: filename, takenAt: takenAt,
               width: width, height: height, size: size, uti: uti, kind: kind,
               favorite: favorite ?? self.favorite, quality: quality,
               edited: edited ?? self.edited, isDocument: isDocument ?? self.isDocument,
               sharpness: sharpness, originalCamera: originalCamera,
-              documentEvalDegraded: documentEvalDegraded ?? self.documentEvalDegraded)
+              documentEvalDegraded: documentEvalDegraded ?? self.documentEvalDegraded,
+              editedUndetermined: editedUndetermined ?? self.editedUndetermined)
     }
 }
 

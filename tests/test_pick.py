@@ -188,3 +188,86 @@ def test_keeper_half_boundary_quality_is_deterministic():
     a = ph("a", uti="public.heic", size=1_000_000, taken_at=0.0, quality=0.25)
     b = ph("b", uti="public.heic", size=2_000_000, taken_at=1.0, quality=0.22)
     assert keeper([a, b])["uuid"] == "a"
+
+
+# ── fail-closed on a groups.json with no `edited` flags ──────────────────────
+# A groups.json written by an older scan.py has no `edited` key, and
+# `is_protected` reads a missing key as False — so every edited photo in it
+# would land in delete-uuids.txt. The README's own five-step flow invites
+# running the steps on different days, so a stale groups.json is a NORMAL
+# input. The guard used to be one line on stderr, printed ABOVE two ✅ lines.
+# A warning you have to notice to be protected by protects nobody.
+
+def _groups_file(tmp_path, photos, *, drop_edited=False):
+    import json
+    for p in photos:
+        if drop_edited:
+            p.pop("edited", None)
+    path = tmp_path / "groups.json"
+    path.write_text(json.dumps({"groups": [
+        {"size": len(photos), "span_sec": 1, "photos": photos}]}))
+    return path
+
+
+def _run_pick(monkeypatch, tmp_path, gpath, *extra):
+    import pick as pick_mod
+    plan = tmp_path / "plan.json"
+    uuids = tmp_path / "del.txt"
+    monkeypatch.setattr("sys.argv", ["pick.py", "--input", str(gpath),
+                                     "--output", str(plan),
+                                     "--uuid-out", str(uuids), *extra])
+    rc = pick_mod.main()
+    return rc, plan, uuids
+
+
+def test_pick_refuses_groups_without_edited_flag(monkeypatch, tmp_path, capsys):
+    gpath = _groups_file(tmp_path, [ph("a"), ph("b")], drop_edited=True)
+    rc, plan, uuids = _run_pick(monkeypatch, tmp_path, gpath)
+    assert rc != 0                       # non-zero exit, not a warning
+    assert not uuids.exists()            # NOTHING was written to delete
+    assert not plan.exists()
+    assert "Refusing" in capsys.readouterr().err
+
+
+def test_pick_refuses_when_only_some_photos_lack_the_flag(monkeypatch, tmp_path, capsys):
+    # A hand-merged / concatenated groups.json can carry the flag in its first
+    # cluster and not in its last. A first-photo sample check waves exactly this
+    # file through; the guard counts every photo.
+    good = ph("a")
+    bad = ph("b")
+    bad.pop("edited")
+    gpath = _groups_file(tmp_path, [good, bad])
+    rc, _, uuids = _run_pick(monkeypatch, tmp_path, gpath)
+    assert rc != 0
+    assert not uuids.exists()
+
+
+def test_allow_legacy_groups_opts_in_and_says_so_loudly(monkeypatch, tmp_path, capsys):
+    gpath = _groups_file(tmp_path, [ph("a", uti="public.heic", size=9_000_000),
+                                    ph("b")], drop_edited=True)
+    rc, plan, uuids = _run_pick(monkeypatch, tmp_path, gpath, "--allow-legacy-groups")
+    assert rc == 0
+    assert uuids.read_text().split() == ["b"]
+    err = capsys.readouterr().err
+    assert "FAVORITES ONLY" in err       # the degradation is named, in capitals
+    assert "favorites-only protection was in force" in err   # …and repeated at the end
+
+
+def test_current_format_groups_need_no_flag(monkeypatch, tmp_path):
+    # The guard must not fire on well-formed input — a fail-closed rule that
+    # fires on everything is just an outage.
+    gpath = _groups_file(tmp_path, [ph("a", uti="public.heic", size=9_000_000), ph("b")])
+    rc, _, uuids = _run_pick(monkeypatch, tmp_path, gpath)
+    assert rc == 0
+    assert uuids.read_text().split() == ["b"]
+
+
+def test_edited_photo_in_current_format_is_never_in_the_delete_file(monkeypatch, tmp_path):
+    # End-to-end through main(), not through the mirror `deletes()` helper: this
+    # is the assertion that fails if pick.main() stops calling is_protected.
+    gpath = _groups_file(tmp_path, [ph("a", uti="public.heic", size=9_000_000),
+                                    ph("b", edited=True),
+                                    ph("c")])
+    rc, _, uuids = _run_pick(monkeypatch, tmp_path, gpath)
+    assert rc == 0
+    assert uuids.read_text().split() == ["c"]   # "b" (edited) is NOT there

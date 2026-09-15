@@ -10,6 +10,21 @@
 -- each one up via `media item id "UUID"`, and submits them in batches so a
 -- single bad UUID doesn't kill the whole run. Failures are logged but
 -- skipped.
+--
+-- LIVE PROTECTION RE-CHECK (and its limit — read this before trusting it):
+-- `delete-uuids.txt` is a snapshot of what was true when pick.py ran, which may
+-- have been days ago. Favoriting a photo afterwards is exactly the action a
+-- person takes when they decide they want to keep it, so every item's
+-- `favorite` property is re-read from the LIVE library here and favorites are
+-- skipped. That is the CLI equivalent of the app's commit-time sweep.
+--
+-- What this CANNOT re-check: `edited`. Photos' AppleScript dictionary exposes
+-- no adjustment/edited property on a media item, so the protection for edited
+-- photos on this path is only as fresh as the groups.json that produced this
+-- list. Edit a photo after scanning and this script will still delete it (into
+-- Recently Deleted, recoverable 30 days). The macOS app re-checks `edited`
+-- against the live library and does not have this gap; the README's Safety
+-- section says so too.
 
 on run argv
     if (count of argv) is 0 then
@@ -37,6 +52,7 @@ on run argv
     set batchSize to 100
     set deleted to 0
     set missed to 0
+    set skippedFavorites to 0
     set i to 1
 
     tell application "Photos"
@@ -49,7 +65,14 @@ on run argv
             repeat with j from i to endIdx
                 set uuid to item j of uuids
                 try
-                    set end of batch to (media item id uuid)
+                    set mediaItem to (media item id uuid)
+                    -- Live re-check: a photo favorited since pick.py ran is
+                    -- protected NOW. Never deleted, counted, and reported.
+                    if favorite of mediaItem then
+                        set skippedFavorites to skippedFavorites + 1
+                    else
+                        set end of batch to mediaItem
+                    end if
                 on error
                     set missed to missed + 1
                 end try
@@ -64,11 +87,14 @@ on run argv
                 end try
             end if
 
-            log "Progress: " & deleted & " deleted, " & missed & " missed (cursor " & endIdx & "/" & totalCount & ")"
+            log "Progress: " & deleted & " deleted, " & skippedFavorites & " favorites skipped, " & missed & " missed (cursor " & endIdx & "/" & totalCount & ")"
             set i to endIdx + 1
         end repeat
     end tell
 
-    log "Done. Deleted: " & deleted & ". Missed: " & missed
-    return "Deleted " & deleted & " / Missed " & missed
+    log "Done. Deleted: " & deleted & ". Favorites skipped: " & skippedFavorites & ". Missed: " & missed
+    if skippedFavorites > 0 then
+        log "NOTE: " & skippedFavorites & " item(s) were favorited after the scan and were NOT deleted."
+    end if
+    return "Deleted " & deleted & " / Favorites skipped " & skippedFavorites & " / Missed " & missed
 end run

@@ -133,6 +133,77 @@ public struct DeletionAuditLog: Sendable {
         }
     }
 
+    // MARK: - Deletion-intent journal (crash window)
+
+    /// `…/snapsift/pending-delete.json`
+    ///
+    /// The accountability window nothing covered: `performChanges` succeeds,
+    /// then the process dies (memory pressure, an impatient ⌘Q on what looks
+    /// like a hang) BEFORE `append` runs. Recently Deleted then holds a thousand
+    /// photos the Deletion History has never heard of, the next launch drops the
+    /// marks as "no longer resolvable", and the only way for the user to notice
+    /// is to count their library by hand.
+    ///
+    /// So the intended session is journalled BEFORE the destructive call and
+    /// cleared after the log write. A journal found at the next launch is
+    /// reconciled (see `recoverableRecords`) instead of trusted: the intent
+    /// proves what we were ABOUT to do, never what happened.
+    public static var intentURL: URL {
+        directory.appendingPathComponent("pending-delete.json")
+    }
+
+    /// Write the intent journal. Returns false on I/O failure; the caller
+    /// decides (we still commit — a missing journal costs accountability, a
+    /// refused delete costs the user their session).
+    @discardableResult
+    public static func writeIntent(_ session: DeletionSession, to url: URL = intentURL) -> Bool {
+        do {
+            let fm = FileManager.default
+            let dir = url.deletingLastPathComponent()
+            if !fm.fileExists(atPath: dir.path) {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            try JSONEncoder().encode(session).write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    public static func clearIntent(at url: URL = intentURL) {
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// The journal left behind by an interrupted commit, if any.
+    public static func pendingIntent(at url: URL = intentURL) -> DeletionSession? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(DeletionSession.self, from: data)
+    }
+
+    /// Which journalled records belong in the history after a crash.
+    ///
+    /// The journal says what we were about to delete — it is evidence, not
+    /// proof, and the two ways to be wrong are not symmetric. Under-reporting
+    /// hides real deletions; OVER-reporting invents them, which is worse on a
+    /// surface whose whole job is "which photo was kept instead of this one".
+    /// So a record is only booked when the asset is genuinely gone from the
+    /// library (`stillExisting` comes from a live PhotoKit fetch at launch:
+    /// a cancelled system confirmation leaves every asset in place → nothing is
+    /// booked) and the log does not already carry it.
+    public static func recoverableRecords(from intent: DeletionSession,
+                                          stillExisting: Set<String>,
+                                          alreadyLogged: Set<String>) -> [DeletionRecord] {
+        intent.records.filter {
+            !stillExisting.contains($0.assetIdentifier)
+                && !alreadyLogged.contains($0.assetIdentifier)
+        }
+    }
+
+    /// Asset ids already present in the log — the dedupe key for reconciliation.
+    public static func loggedAssetIdentifiers(from sessions: [DeletionSession]) -> Set<String> {
+        Set(sessions.flatMap { $0.records.map(\.assetIdentifier) })
+    }
+
     // MARK: - Read
 
     /// Load all sessions from the log, newest-first. Returns empty array if the

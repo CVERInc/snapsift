@@ -123,7 +123,12 @@ public func keeper(_ group: [Photo]) -> Photo {
 /// single-frame group keeps its one frame.
 public func deletions(_ group: [Photo]) -> [Photo] {
     guard let keep = group.max(by: { rankKey($0) < rankKey($1) }) else { return [] }
-    return group.filter { $0.uuid != keep.uuid && !$0.isProtected }
+    // `isDeletable` == !protected && !unverifiable. The second half matters as
+    // much as the first: a frame whose edit state could not be read, or whose
+    // document eval ran on an unavailable original, is UNKNOWN — and unknown is
+    // protected. Writing `!$0.isProtected` here again would silently re-open
+    // that door for every caller of this function.
+    return group.filter { $0.uuid != keep.uuid && $0.isDeletable }
 }
 
 // MARK: - Keeper "Why" transparency
@@ -188,14 +193,13 @@ public func keeperReason(photos: [Photo], keeperID: String) -> KeeperReason {
 public func noSurvivorGroupCount(
     _ groups: [(photos: [Photo], rejected: Set<String>, includeProtected: Bool)]
 ) -> Int {
+    // ONE definition of "survives", shared with the pre-commit sheet's keeper
+    // row and the App's `ReviewGroup` (see `survivors` in DeleteDecision.swift).
+    // Two copies of this rule is how the confirmation surface ended up printing
+    // "no photo left" for a group the model counted as having a survivor.
     groups.filter { g in
-        // A frame "survives" if it is NOT effectively deleted.
-        let survivors = g.photos.filter { p in
-            guard g.rejected.contains(p.uuid) else { return true }  // not rejected → survives
-            if p.isProtected && !g.includeProtected { return true }  // protected & not overridden → survives
-            return false  // would be deleted
-        }
-        return survivors.isEmpty
+        survivors(photos: g.photos, rejected: g.rejected,
+                  includeProtected: g.includeProtected).isEmpty
     }.count
 }
 

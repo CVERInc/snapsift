@@ -52,17 +52,29 @@ struct ReviewGroup: Identifiable {
     var keepAll: Bool { rejected.isEmpty }
     /// True when every non-protected frame (that isn't the keeper) is rejected.
     var deleteAll: Bool {
-        let nonKeeperNonProtected = photos.filter { $0.uuid != keeperID && !$0.isProtected }
-        guard !nonKeeperNonProtected.isEmpty else { return false }
-        return nonKeeperNonProtected.allSatisfy { rejected.contains($0.uuid) }
+        // Same candidate set the `d` action seeds (Core `bulkRejectCandidates`):
+        // keeper out, protected out, UNVERIFIABLE out. Asking whether frames the
+        // bulk action is not allowed to mark are marked made `deleteAll` false
+        // forever on any group holding an iCloud-evicted frame.
+        let candidates = bulkRejectCandidates(photos: photos, keeperID: keeperID)
+        guard !candidates.isEmpty else { return false }
+        return candidates.isSubset(of: rejected)
     }
 
-    func isKeeper(_ p: Photo) -> Bool { p.uuid == keeperID && !rejected.contains(p.uuid) }
+    /// The keeper AS IT WILL SURVIVE — the same definition the pre-commit sheet
+    /// and `noSurvivorGroupCount` use (Core `survivingKeeper`). A keeper that is
+    /// marked but protected-and-not-overridden still survives, so it is still
+    /// the keeper; the two surfaces used to disagree about exactly that case and
+    /// the sheet printed "no photo left" for a group the model counted as safe.
+    func isKeeper(_ p: Photo) -> Bool {
+        survivingKeeper(photos: photos, keeperID: keeperID,
+                        rejected: rejected, includeProtected: includeProtected)?.uuid == p.uuid
+    }
+    /// Would this frame actually be removed? Delegates to the Core rule so the
+    /// protection guarantee has exactly one implementation — and one that the
+    /// test suite executes directly (see SnapsiftCore/DeleteDecision.swift).
     func isDelete(_ p: Photo) -> Bool {
-        guard rejected.contains(p.uuid) else { return false }
-        // Protected frames only deletable when explicitly opted in.
-        if p.isProtected && !includeProtected { return false }
-        return true
+        isEffectiveDeletion(p, rejected: rejected, includeProtected: includeProtected)
     }
 
     var spanSec: Double { (photos.last?.takenAt ?? 0) - (photos.first?.takenAt ?? 0) }
@@ -75,6 +87,13 @@ struct ReviewGroup: Identifiable {
     var protectedCount: Int { photos.filter(\.isProtected).count }
     /// True when there are real frames that would be deleted.
     var effectivelyArmed: Bool { !deletionIDs.isEmpty }
+}
+
+/// Why a commit did nothing. "Blocked" and "nothing to delete" must not share
+/// an exit code: the user confirmed a destructive action and is owed an answer.
+enum CommitError: Error {
+    /// Another library write (album sort, scan, face refine) is in flight.
+    case busy
 }
 
 /// A semantic bucket from the "Similar sets" pass: all photos Vision tagged with
@@ -102,6 +121,31 @@ final class LibraryModel: ObservableObject {
     @Published var includeVideo = false
     /// True once Apple's quality scores have been read from the library sidecar.
     @Published var qualityAvailable = false
+    /// Whether the sidecar we read is provably the library PhotoKit serves.
+    /// Anything but `.verified` means `edited` from that file is NOT trusted:
+    /// cluster members fall back to the per-asset PhotoKit lookup, and whatever
+    /// that cannot answer becomes `editedUndetermined` (⇒ protected) with a
+    /// banner. Never silent — a degraded protection state the user can't see is
+    /// indistinguishable from no protection at all.
+    @Published var libraryIdentity: LibraryIdentity = .unverified(.pathUnknown)
+    /// The sidecar may be trusted for PROTECTION facts, not merely for ranking.
+    var sidecarTrusted: Bool { qualityAvailable && libraryIdentity.isVerified }
+    /// Frames in the current review set whose edit state could not be read.
+    /// Drives the degraded-protection banner.
+    var undeterminedEditCount: Int {
+        groups.reduce(0) { $0 + $1.photos.filter(\.editedUndetermined).count }
+    }
+    /// Exact-duplicate frames withheld from pre-marking because they carry (or
+    /// might carry) album membership / a caption the keeper lacks.
+    @Published var uniqueMetadataWithheld = 0
+    /// Frames known to carry album membership / a caption the keeper lacks, so
+    /// the pre-commit sheet can badge them even when the USER marked them by
+    /// hand after the auto-seed declined to.
+    @Published var uniqueMetadataIDs: Set<String> = []
+    /// Deletions recovered from an interrupted commit's journal at launch.
+    @Published var journalRecoveredCount: Int?
+    /// Marks lost on restore because the photo itself is gone from the library.
+    @Published var vanishedMarkCount: Int?
     /// Where the next scan reads its working set from. Default = whole library.
     @Published var scanSource: ScanSource = .wholeLibrary
     /// User albums fetched once after authorization (title + estimated count).
@@ -292,6 +336,8 @@ final class LibraryModel: ObservableObject {
     }
 
     private var enrichment: [String: QualitySidecar.Enrichment]?
+    /// The database `enrichment` was actually read from (see `loadEnrichmentIfNeeded`).
+    private var sidecarPath = ""
     private var faceScores: [String: Double] = [:]
 
     // Clustering knobs (match the Python defaults).
@@ -382,6 +428,19 @@ final class LibraryModel: ObservableObject {
             saveRotationError = RotationSaveError.noEditingInput
             return
         }
+        // REFUSED on an already-edited frame. PhotoKit hands us the RENDERED
+        // version of an adjusted asset (we don't set canHandleAdjustmentData),
+        // so saving would bake the user's existing crop/filter into a fresh JPEG
+        // and replace their adjustment chain with ours — "Revert to Original"
+        // would then throw away that crop too. The confirmation text promises
+        // the opposite ("the original is preserved — you can Revert at any
+        // time"), and this doctrine's own words are that edited frames are
+        // sacred. This is the app's only path that REWRITES a photo, so it is
+        // the one place that rule has to be enforced rather than described.
+        if groups.contains(where: { g in g.photos.contains { $0.uuid == frameID && $0.edited } }) {
+            saveRotationError = RotationSaveError.frameAlreadyEdited
+            return
+        }
         let wasCurrent = ScanSnapshotStore.changeTokenIsCurrent(scanChangeToken)
         do {
             try await saveRotation(asset: asset, quarterTurns: net)
@@ -402,7 +461,7 @@ final class LibraryModel: ObservableObject {
             // Our own write advanced the library token; move the reference so a
             // relaunch doesn't discard every exact pre-mark over our rotation,
             // and persist the corrected `edited` flag with the new token.
-            restampTokenAfterOwnWrite(wasCurrent: wasCurrent)
+            restampTokenAfterOwnWrite(wasCurrent: wasCurrent, ourIDs: [frameID])
             saveSnapshotNow()
         } catch {
             saveRotationError = error
@@ -473,6 +532,8 @@ final class LibraryModel: ObservableObject {
         facesApplied = false
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
+        uniqueMetadataWithheld = 0
+        uniqueMetadataIDs = []
 
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)
@@ -494,15 +555,7 @@ final class LibraryModel: ObservableObject {
         // re-probed on every scan — otherwise granting FDA mid-session would
         // change nothing until relaunch, with no hint why quality is still off.
         // The re-probe costs one failed sqlite open per scan for a no-FDA user.
-        if enrichment?.isEmpty != false {
-            progress = t.progReadingQuality()
-            progressFraction = nil   // length unknown — indeterminate
-            let flag = abortFlag
-            enrichment = await Task.detached(priority: .userInitiated) {
-                QualitySidecar.load(shouldAbort: { flag.isSet })
-            }.value
-            qualityAvailable = !(enrichment?.isEmpty ?? true)
-        }
+        await loadEnrichmentIfNeeded(t, newestFirst: assets)
         if bailIfCancelled(t) { return }
         let enr = enrichment ?? [:]
         // Chunked with yields: a 120K-asset map monopolises the main actor for
@@ -658,12 +711,18 @@ final class LibraryModel: ObservableObject {
                     $0.type == .pairedVideo || $0.type == .fullSizePairedVideo
                 }
             }
+            // `default`, not `case nil`: Swift 5.10 (the CI toolchain) does not
+            // accept true/false/nil over `Bool?` as exhaustive, and an
+            // exhaustiveness error must never be answered by guessing which case
+            // is missing. The default arm is the UNDETERMINED one and it
+            // EXCLUDES the video — cannot verify ⇒ cannot delete, the same
+            // direction every other unknown takes in this file.
             switch paired {
-            case true:
+            case .some(true):
                 excluded.insert(v.localIdentifier)
-            case false:
+            case .some(false):
                 break
-            case nil:
+            default:
                 excluded.insert(v.localIdentifier)
                 undetermined += 1
             }
@@ -684,6 +743,61 @@ final class LibraryModel: ObservableObject {
     /// photolibraryd restarted mid-call. Without Full Disk Access the sidecar
     /// is empty and `edited` starts false; enrichFlags upgrades cluster
     /// members via the wedge-proof PhotoKit fallback.
+    /// How many of the newest assets are sampled to prove the sidecar is LIVE
+    /// (see `loadEnrichmentIfNeeded`). Small — the question is binary.
+    private static let identitySampleSize = 12
+
+    /// Read the quality sidecar when we don't already have a usable one, and —
+    /// the part that decides whether anything may be deleted — establish whether
+    /// the file we just read is the library PhotoKit is serving.
+    ///
+    /// Two ways to be reading the wrong bytes, both silent before this:
+    ///   • WRONG FILE. A library COPIED (not moved) to an external disk and then
+    ///     made the system library leaves a complete stale duplicate at
+    ///     ~/Pictures. Same asset UUIDs, same schema. Every lookup succeeds and
+    ///     every answer is months old — including `edited`, the one flag standing
+    ///     between an edited photo and Recently Deleted. We now read the path
+    ///     Photos itself records, and treat "couldn't establish it" as a
+    ///     mismatch rather than as permission to trust the default path.
+    ///   • RIGHT FILE, FROZEN. A restored snapshot at the right path. Probed by
+    ///     asking whether the newest assets PhotoKit can see exist in the
+    ///     database at all — through the WAL-aware read, because the bulk `load`
+    ///     opens `immutable=1` and by design never sees the last few minutes.
+    ///
+    /// `newestFirst` must be the scan's asset list; all three call sites fetch
+    /// sorted by creationDate ASCENDING, so the newest are at the tail.
+    private func loadEnrichmentIfNeeded(_ t: L10n, newestFirst assets: [PHAsset]) async {
+        guard enrichment?.isEmpty != false else { return }
+        progress = t.progReadingQuality()
+        progressFraction = nil   // length unknown — indeterminate
+        let flag = abortFlag
+        let loc = QualitySidecar.locate()
+        sidecarPath = loc.path
+        enrichment = await Task.detached(priority: .userInitiated) {
+            QualitySidecar.load(libraryPath: loc.path, shouldAbort: { flag.isSet })
+        }.value
+        qualityAvailable = !(enrichment?.isEmpty ?? true)
+        guard qualityAvailable else {
+            // Nothing was read, so there is nothing to trust; the existing Full
+            // Disk Access hint already explains this case.
+            libraryIdentity = .unverified(.pathUnknown)
+            return
+        }
+        let sample = assets.suffix(200)
+            .sorted { ($0.creationDate ?? .distantPast) > ($1.creationDate ?? .distantPast) }
+            .prefix(Self.identitySampleSize)
+            .map { QualitySidecar.zuuid(fromLocalIdentifier: $0.localIdentifier) }
+        let path = loc.path
+        let known = await Task.detached(priority: .userInitiated) {
+            QualitySidecar.editedFlags(zuuids: sample, libraryPath: path)
+        }.value
+        libraryIdentity = evaluateLibraryIdentity(
+            sidecarPath: loc.path,
+            photosLibraryPath: loc.photosLibraryPath,
+            sampledNewest: sample.count,
+            foundInSidecar: known?.count ?? 0)
+    }
+
     private func makePhoto(from asset: PHAsset, enr: [String: QualitySidecar.Enrichment]) -> Photo {
         let id = asset.localIdentifier
         let e = enr[QualitySidecar.zuuid(fromLocalIdentifier: id)]
@@ -695,8 +809,13 @@ final class LibraryModel: ObservableObject {
                      size: e?.size ?? 0, uti: uti,
                      kind: asset.mediaType == .video ? 1 : 0,
                      favorite: asset.isFavorite, quality: e?.quality ?? 0,
-                     edited: e?.edited ?? false,   // sidecar; no-FDA fallback in enrichFlags
-                     originalCamera: PhotoFlags.originalCamera(asset))
+                     // `edited` is only a FACT when the sidecar is provably the
+                     // live library; otherwise it starts UNDETERMINED (⇒
+                     // protected) and enrichFlags upgrades cluster members via
+                     // the wedge-proof per-asset PhotoKit fallback.
+                     edited: sidecarTrusted ? (e?.edited ?? false) : false,
+                     originalCamera: PhotoFlags.originalCamera(asset),
+                     editedUndetermined: !sidecarTrusted)
     }
 
     /// Fill the per-frame flags that are too expensive for the whole library —
@@ -730,7 +849,10 @@ final class LibraryModel: ObservableObject {
         var edits: [String: Bool] = [:]
         var done = 0
         let lookup = assetsByID
-        let needEditedFallback = !qualityAvailable
+        // Fall back to the per-asset PhotoKit lookup whenever the sidecar can't
+        // be trusted for protection — no Full Disk Access, OR a database we
+        // could not prove is the library PhotoKit serves.
+        let needEditedFallback = !sidecarTrusted
         await withTaskGroup(of: (String, Bool, Bool, Double, Bool?).self) { group in
             var next = 0
             let limit = 8
@@ -774,7 +896,11 @@ final class LibraryModel: ObservableObject {
                       isDocument: docs[p.uuid] ?? p.isDocument,
                       sharpness: sharps[p.uuid] ?? p.sharpness,
                       originalCamera: p.originalCamera,
-                      documentEvalDegraded: docsDegraded[p.uuid] ?? p.documentEvalDegraded)
+                      documentEvalDegraded: docsDegraded[p.uuid] ?? p.documentEvalDegraded,
+                      // The fallback only reports what it could DETERMINE, so a
+                      // missing entry is not "not edited" — it is "we don't
+                      // know", which is a protection, not a permission.
+                      editedUndetermined: needEditedFallback ? (edits[p.uuid] == nil) : false)
             }
         }
     }
@@ -805,6 +931,8 @@ final class LibraryModel: ObservableObject {
         facesApplied = false
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
+        uniqueMetadataWithheld = 0
+        uniqueMetadataIDs = []
 
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)
@@ -819,15 +947,7 @@ final class LibraryModel: ObservableObject {
         for a in assets { map[a.localIdentifier] = a }
         assetsByID = map
 
-        if enrichment == nil {
-            progress = t.progReadingQuality()
-            progressFraction = nil
-            let flag = abortFlag
-            enrichment = await Task.detached(priority: .userInitiated) {
-                QualitySidecar.load(shouldAbort: { flag.isSet })
-            }.value
-            qualityAvailable = !(enrichment?.isEmpty ?? true)
-        }
+        await loadEnrichmentIfNeeded(t, newestFirst: assets)
         if bailIfCancelled(t) { return }
         let enr = enrichment ?? [:]
 
@@ -907,6 +1027,8 @@ final class LibraryModel: ObservableObject {
         facesApplied = false
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
+        uniqueMetadataWithheld = 0
+        uniqueMetadataIDs = []
 
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)
@@ -921,14 +1043,7 @@ final class LibraryModel: ObservableObject {
         for a in assets { map[a.localIdentifier] = a }
         assetsByID = map
 
-        if enrichment == nil {
-            progressFraction = nil
-            let flag = abortFlag
-            enrichment = await Task.detached(priority: .userInitiated) {
-                QualitySidecar.load(shouldAbort: { flag.isSet })
-            }.value
-            qualityAvailable = !(enrichment?.isEmpty ?? true)
-        }
+        await loadEnrichmentIfNeeded(t, newestFirst: assets)
         if bailIfCancelled(t) { return }
         let enr = enrichment ?? [:]
 
@@ -1041,12 +1156,11 @@ final class LibraryModel: ObservableObject {
     func toggleKeepAll(group groupID: ReviewGroup.ID) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
         if groups[i].rejected.isEmpty {
-            // Already keeping all — re-seed as if confident (reject non-keeper non-protected).
+            // Already keeping all — re-seed. Core `bulkRejectCandidates` is the
+            // one composition rule: keeper out, protected out, UNVERIFIABLE out.
             let photos = groups[i].photos
             let keep = photos.first { $0.uuid == groups[i].keeperID } ?? photos[0]
-            groups[i].rejected = Set(photos.compactMap { p in
-                (p.uuid != keep.uuid && !p.isProtected) ? p.uuid : nil
-            })
+            groups[i].rejected = bulkRejectCandidates(photos: photos, keeperID: keep.uuid)
         } else {
             groups[i].rejected = []
             groups[i].includeProtected = false
@@ -1055,16 +1169,26 @@ final class LibraryModel: ObservableObject {
         scheduleSnapshotSave()
     }
 
-    /// Reject whole group: seed rejected = all non-keeper non-protected frames. `d` key.
-    func rejectAll(group groupID: ReviewGroup.ID) {
-        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+    /// Reject whole group: seed rejected = every frame the bulk rule allows.
+    /// `d` key. Returns the number of frames it had to LEAVE OUT because they
+    /// are unverifiable, so the caller can say so instead of quietly marking
+    /// fewer photos than the button promised.
+    ///
+    /// The button's own words are "Delete every frame in this group (protected
+    /// photos stay safe)". Before this, `d` filtered on `!isProtected` only — so
+    /// on an Optimize-Mac-Storage library the frames whose originals aren't
+    /// local (document eval never ran, `documentEvalDegraded`) went straight
+    /// into the delete bucket, unclassified, with the label promising the
+    /// opposite. Core `bulkRejectCandidates` is now the single rule.
+    @discardableResult
+    func rejectAll(group groupID: ReviewGroup.ID) -> Int {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return 0 }
         let photos = groups[i].photos
         let keep = photos.first { $0.uuid == groups[i].keeperID } ?? photos[0]
-        groups[i].rejected = Set(photos.compactMap { p in
-            (p.uuid != keep.uuid && !p.isProtected) ? p.uuid : nil
-        })
+        groups[i].rejected = bulkRejectCandidates(photos: photos, keeperID: keep.uuid)
         groups[i].autoSeeded = []   // user overrode — rejections are theirs now
         scheduleSnapshotSave()
+        return bulkRejectWithheld(photos: photos, keeperID: keep.uuid).count
     }
 
     /// Toggle reject-all: if not all non-protected are rejected, reject them;
@@ -1136,12 +1260,16 @@ final class LibraryModel: ObservableObject {
     func setIncludeProtected(group groupID: ReviewGroup.ID, value: Bool) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
         groups[i].includeProtected = value
-        let protectedIDs = Set(groups[i].photos.filter(\.isProtected).map(\.uuid))
+        let protectedIDs = Set(groups[i].photos.filter { $0.isProtected && !$0.isUnverifiable }.map(\.uuid))
         if value {
             // The opt-in must actually mark the frames: rejectAll/toggle paths
             // always exclude protected frames, so without this insertion the
             // amber "Including protected (N)" state was a lie — deletionIDs
             // stayed unchanged and the N frames were silently kept.
+            // KNOWN protections only. An unverifiable frame has no fact to
+            // consent to overriding, so the informed-consent path cannot reach
+            // it (Core `isEffectiveDeletion` would refuse it anyway — this keeps
+            // the marks honest instead of showing marks that never commit).
             groups[i].rejected.formUnion(protectedIDs.subtracting([groups[i].keeperID]))
         } else {
             // Removing override: un-reject all protected frames.
@@ -1384,8 +1512,30 @@ final class LibraryModel: ObservableObject {
             }
             let keeperID = built[i].keeperID
             var seeds: Set<String> = []
+            // Byte-identical is an answer about PIXELS. It is not an answer
+            // about the LIBRARY ENTRY: the copy we would suggest removing may be
+            // the one the user captioned and filed into three albums, and the
+            // two thumbnails in the sheet are literally the same image, so they
+            // cannot catch it. Compare what each copy carries first; anything
+            // the probe cannot determine counts as "carries" (Core
+            // `carriesUniqueMetadata`) and the frame is simply not pre-marked —
+            // the group keeps its exact badge and stays the user's to decide.
+            let metadata = await libraryMetadata(for: built[i].photos.map(\.uuid))
+            let keeperMeta = metadata[keeperID] ?? LibraryMetadata()
             for (j, p) in built[i].photos.enumerated() {
-                guard p.uuid != keeperID, !p.isProtected, !p.documentEvalDegraded else { continue }
+                guard p.uuid != keeperID, p.isDeletable else { continue }
+                if carriesUniqueMetadata(candidate: metadata[p.uuid] ?? LibraryMetadata(),
+                                         keeper: keeperMeta) {
+                    uniqueMetadataWithheld += 1
+                    // Only badge what we could actually READ: an undetermined
+                    // probe justifies withholding the pre-mark, but claiming
+                    // "carries a caption" about a frame we couldn't read would
+                    // be inventing a fact on the confirmation surface.
+                    if (metadata[p.uuid] ?? LibraryMetadata()).isFullyDetermined {
+                        uniqueMetadataIDs.insert(p.uuid)
+                    }
+                    continue
+                }
                 if let asset = assetsByID[p.uuid] {
                     switch await PhotoFlags.isDocumentHiQ(asset, manager: imageManager) {
                     case .some(true):
@@ -1406,6 +1556,113 @@ final class LibraryModel: ObservableObject {
             built[i].autoSeeded = seeds
         }
         return built
+    }
+
+    /// Album membership + caption presence for a set of frames.
+    ///
+    /// Album membership comes from public PhotoKit (`fetchAssetCollections
+    /// (containing:)`), the caption/title from the sidecar — and only when that
+    /// sidecar is the verified live library, since a stale copy would answer
+    /// "no caption" for a caption written last week. Whatever can't be read
+    /// stays `nil` = UNDETERMINED; `carriesUniqueMetadata` reads nil as
+    /// "carries", so an unreadable probe withholds suggestions instead of
+    /// issuing unsafe ones.
+    ///
+    /// KNOWN GAP, stated rather than papered over: Photos exposes no public API
+    /// for KEYWORDS, and this repo has never verified their table layout against
+    /// a real library, so keywords are not compared. A keyword-only difference
+    /// between two byte-identical copies is therefore still invisible here.
+    private func libraryMetadata(for uuids: [String]) async -> [String: LibraryMetadata] {
+        guard !uuids.isEmpty else { return [:] }
+        var albums: [String: Int] = [:]
+        for id in uuids {
+            guard let asset = assetsByID[id] else { continue }
+            // Through the lane: this is a synchronous PhotoKit call and a wedged
+            // photolibraryd must strand one sacrificial thread, never the pool.
+            // nil (timeout / breaker) stays nil — undetermined, not zero.
+            if let n: Int = await PhotoKitSyncLane.call({
+                PHAssetCollection.fetchAssetCollectionsContaining(asset, with: .album,
+                                                                  options: nil).count
+            }) {
+                albums[id] = n
+            }
+        }
+        var described: [String: Bool]? = nil
+        if libraryIdentity.isVerified {
+            let zs = uuids.map { QualitySidecar.zuuid(fromLocalIdentifier: $0) }
+            let path = sidecarPath
+            if let raw = await Task.detached(priority: .userInitiated, operation: {
+                QualitySidecar.userMetadata(zuuids: zs, libraryPath: path)
+            }).value {
+                var byLocal: [String: Bool] = [:]
+                for id in uuids {
+                    byLocal[id] = raw[QualitySidecar.zuuid(fromLocalIdentifier: id)] ?? false
+                }
+                described = byLocal
+            }
+        }
+        var out: [String: LibraryMetadata] = [:]
+        for id in uuids {
+            out[id] = LibraryMetadata(albumCount: albums[id], hasDescription: described?[id])
+        }
+        return out
+    }
+
+    /// Groups whose surviving keeper no longer resolves in the LIVE library.
+    /// Used by the pre-commit sheet so the confirmation surface can say why a
+    /// group is being skipped, before the user commits — `commitSweepDecision`
+    /// enforces the same rule again at the last moment, because the sheet can
+    /// sit open for a long time.
+    func missingKeeperGroupIDs() async -> Set<ReviewGroup.ID> {
+        var keeperByGroup: [ReviewGroup.ID: String] = [:]
+        for g in groups where !g.deletionIDs.isEmpty {
+            if let k = survivingKeeper(photos: g.photos, keeperID: g.keeperID,
+                                       rejected: g.rejected,
+                                       includeProtected: g.includeProtected) {
+                keeperByGroup[g.id] = k.uuid
+            }
+        }
+        guard !keeperByGroup.isEmpty else { return [] }
+        let ids = Array(Set(keeperByGroup.values))
+        let opts = PHFetchOptions()
+        opts.includeAllBurstAssets = true
+        let found: Set<String> = await Task.detached(priority: .userInitiated) {
+            var live: Set<String> = []
+            PHAsset.fetchAssets(withLocalIdentifiers: ids, options: opts)
+                .enumerateObjects { a, _, _ in live.insert(a.localIdentifier) }
+            return live
+        }.value
+        return Set(keeperByGroup.filter { !found.contains($0.value) }.keys)
+    }
+
+    // MARK: - Deletion-intent journal
+
+    /// Reconcile a journal left behind by an interrupted commit. Call once at
+    /// launch. Anything it books is verified against the live library first: a
+    /// journalled asset that still EXISTS was never deleted (the system
+    /// confirmation was cancelled, or the process died before performChanges),
+    /// and inventing history is worse than missing it. Publishes a count so the
+    /// view can say so — a history that silently repaired itself is still a
+    /// history the user had no reason to trust.
+    func reconcileDeletionJournal() {
+        guard let intent = DeletionAuditLog.pendingIntent() else { return }
+        let ids = intent.records.map(\.assetIdentifier)
+        var stillExisting: Set<String> = []
+        if !ids.isEmpty {
+            let opts = PHFetchOptions()
+            opts.includeAllBurstAssets = true
+            PHAsset.fetchAssets(withLocalIdentifiers: ids, options: opts)
+                .enumerateObjects { a, _, _ in stillExisting.insert(a.localIdentifier) }
+        }
+        let logged = DeletionAuditLog.loggedAssetIdentifiers(from: DeletionAuditLog.loadSessions())
+        let records = DeletionAuditLog.recoverableRecords(from: intent,
+                                                          stillExisting: stillExisting,
+                                                          alreadyLogged: logged)
+        if !records.isEmpty {
+            let recovered = DeletionSession(timestamp: intent.timestamp, records: records)
+            if DeletionAuditLog.append(recovered) { journalRecoveredCount = records.count }
+        }
+        DeletionAuditLog.clearIntent()
     }
 
     // MARK: - Scan snapshot (cross-launch persistence)
@@ -1442,8 +1699,37 @@ final class LibraryModel: ObservableObject {
     /// state — otherwise a relaunch would treat our own write as a verdict-
     /// invalidating external mutation and needlessly drop every exact pre-mark.
     /// If it was already stale, we leave it stale (an external edit still stands).
-    private func restampTokenAfterOwnWrite(wasCurrent: Bool) {
-        if wasCurrent { scanChangeToken = ScanSnapshotStore.currentChangeTokenData() }
+    private func restampTokenAfterOwnWrite(wasCurrent: Bool, ourIDs: Set<String>) {
+        guard wasCurrent, let before = scanChangeToken else { return }
+        // ONLY when our write was the only thing that happened. An album write
+        // over 121K assets runs for tens of seconds; an edit syncing in from an
+        // iPhone during that window used to be stamped over as "ours", and the
+        // next launch then skipped the very re-check that exists to catch it.
+        guard !externalChangesHappened(since: before, ourIDs: ourIDs) else { return }
+        scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
+    }
+
+    /// Did anything OTHER than our own write touch the library since `token`?
+    /// Any doubt answers YES: a token we can't decode, an API that refuses the
+    /// query, a too-old token — all mean "don't move the staleness anchor",
+    /// which costs a rescan prompt and never costs a missed protection.
+    private func externalChangesHappened(since tokenData: Data, ourIDs: Set<String>) -> Bool {
+        guard let token = try? NSKeyedUnarchiver.unarchivedObject(
+                ofClass: PHPersistentChangeToken.self, from: tokenData) else { return true }
+        var inserted: Set<String> = [], updated: Set<String> = [], deleted: Set<String> = []
+        do {
+            let changes = try PHPhotoLibrary.shared().fetchPersistentChanges(since: token)
+            for change in changes {
+                guard let details = try? change.changeDetails(for: .asset) else { continue }
+                inserted.formUnion(details.insertedLocalIdentifiers)
+                updated.formUnion(details.updatedLocalIdentifiers)
+                deleted.formUnion(details.deletedLocalIdentifiers)
+            }
+        } catch {
+            return true
+        }
+        return !ownWriteOnly(inserted: inserted, updated: updated,
+                             deleted: deleted, ourIDs: ourIDs)
     }
 
     /// Persist the current review state immediately (after deletes, album
@@ -1473,8 +1759,15 @@ final class LibraryModel: ObservableObject {
         snapshotSaveTask?.cancel()
         lastSnapshotWrite = Date()
         let snap = makeSnapshot()
+        // The inner Task must close over an immutable LOCAL, not over the outer
+        // closure's captured `self`: referencing the capture directly from the
+        // concurrently-executing Task is "reference to captured var 'self' in
+        // concurrently-executing code" under Swift 5.10 (the CI toolchain), and
+        // moving `[weak self]` onto the Task instead just trades that for an
+        // implicit strong capture in the outer closure. One `let` settles both.
         ScanSnapshotStore.saveAsync(snap) { [weak self] ok in
-            Task { @MainActor in self?.noteSnapshotWrite(succeeded: ok) }
+            let model = self
+            Task { @MainActor in model?.noteSnapshotWrite(succeeded: ok) }
         }
     }
 
@@ -1549,9 +1842,14 @@ final class LibraryModel: ObservableObject {
             ($0.uuid, QualitySidecar.zuuid(fromLocalIdentifier: $0.uuid))
         })
         let zuuids = Array(Set(zuuidByLocal.values))
-        let sidecar = await Task.detached(priority: .userInitiated) {
-            QualitySidecar.editedFlags(zuuids: zuuids)
-        }.value
+        // Same gate as the scan: a sidecar we could not prove belongs to the
+        // library PhotoKit serves is not evidence about THIS photo's edits.
+        let path = sidecarPath
+        let sidecar: [String: Bool]? = libraryIdentity.isVerified
+            ? await Task.detached(priority: .userInitiated) {
+                QualitySidecar.editedFlags(zuuids: zuuids, libraryPath: path)
+              }.value
+            : nil
         if let sidecar {
             var out: [String: Bool] = [:]
             for (local, z) in zuuidByLocal {
@@ -1644,7 +1942,14 @@ final class LibraryModel: ObservableObject {
         // Count app-seeded suggestions dropped by the stale demotion so the UI can
         // stand up a persistent notice (a launch banner alone would fade unseen).
         var staleClearedSeeds = 0
+        // Marks whose PHOTO no longer exists. They were silently compacted away
+        // before: a user who marked 300 frames yesterday and lost 40 of them to
+        // an external delete saw "restored N groups" and no hint that part of
+        // their review work is gone. Counted here, surfaced by the view.
+        var vanishedMarks = 0
         for gs in snap.groups {
+            let liveIDs = Set(gs.photos.map(\.uuid).filter { map[$0] != nil })
+            vanishedMarks += Set(gs.rejected).subtracting(liveIDs).count
             let photos: [Photo] = gs.photos.compactMap { p in
                 guard let asset = map[p.uuid] else { return nil }
                 let favNow = asset.isFavorite
@@ -1690,6 +1995,7 @@ final class LibraryModel: ObservableObject {
         // suggestion above — surface how many so the user isn't left wondering
         // where yesterday's pre-marks went (nil = nothing dropped).
         staleRestoreClearedCount = (!tokenCurrent && staleClearedSeeds > 0) ? staleClearedSeeds : nil
+        vanishedMarkCount = vanishedMarks > 0 ? vanishedMarks : nil
         // Carry the ORIGINAL reference token forward so post-restore decision
         // saves preserve the scan's staleness anchor (not "now").
         scanChangeToken = snap.changeToken
@@ -1750,7 +2056,8 @@ final class LibraryModel: ObservableObject {
         // DOES advance the library change token. Move the reference forward (and
         // persist) so this recommended review step doesn't silently strand every
         // byte-verified exact pre-mark behind a "library changed" stale restore.
-        restampTokenAfterOwnWrite(wasCurrent: wasCurrent)
+        restampTokenAfterOwnWrite(wasCurrent: wasCurrent,
+                                  ourIDs: Set(groups.flatMap { $0.photos.map(\.uuid) }))
         saveSnapshotNow()
         return t.albumsWritten(bursts: result.bursts, blurry: result.blurry,
                                docs: result.documents, exact: result.exactDupes)
@@ -1773,7 +2080,8 @@ final class LibraryModel: ObservableObject {
         staleWarning: ((Int, Int) async -> Bool)? = nil,
         onProtectedDropped: ((Int) -> Void)? = nil,
         onBurstSkipped: ((Int) -> Void)? = nil,
-        onUndeterminedSkipped: ((Int) -> Void)? = nil
+        onUndeterminedSkipped: ((Int) -> Void)? = nil,
+        onKeeperMissing: ((Int) -> Void)? = nil
     ) async throws -> Int {
         // Never commit while a scan or face-refine is rebuilding group state:
         // a delete would race the pipeline over `groups` and persist a
@@ -1782,113 +2090,142 @@ final class LibraryModel: ObservableObject {
         // audit log and delete against indices the first is rewriting.
         // isWritingAlbums: symmetric with writeAlbums' own !isDeleting guard —
         // the two commits both mutate the library and must never interleave.
-        guard !isScanning, !refiningFaces, !isDeleting, !isWritingAlbums else { return 0 }
+        //
+        // THROWS rather than returning 0: "blocked, nothing happened" and
+        // "nothing was marked" used to share one exit code, so confirming a
+        // delete during an album write showed no banner, no alert and every mark
+        // still in place — indistinguishable from a successful delete of zero.
+        guard !isScanning, !refiningFaces, !isDeleting, !isWritingAlbums else {
+            throw CommitError.busy
+        }
         isDeleting = true
         defer { isDeleting = false }
-        var ids = groups.flatMap(\.deletionIDs)
-        guard !ids.isEmpty else { return 0 }
 
-        // Resolve the deletion candidates from a LIVE fetch, never the scan-time
-        // `assetsByID` snapshot. Two reasons: (1) an asset deleted OUTSIDE snapsift
-        // (Photos.app on this Mac, another iCloud device) after the scan still
-        // resolves in the stale map and would sail past the FIX 3 guard into
-        // performChanges — a live fetch lets that guard catch in-session drift too;
+        let states = groups.indices.map { i in
+            CommitGroupState(index: i, photos: groups[i].photos, keeperID: groups[i].keeperID,
+                             rejected: groups[i].rejected,
+                             includeProtected: groups[i].includeProtected)
+        }
+        let candidateIDs = states.flatMap { st in
+            st.photos.filter {
+                isEffectiveDeletion($0, rejected: st.rejected, includeProtected: st.includeProtected)
+            }.map(\.uuid)
+        }
+        guard !candidateIDs.isEmpty else { return 0 }
+
+        // Resolve from a LIVE fetch, never the scan-time `assetsByID` snapshot.
+        // Three reasons: (1) an asset deleted OUTSIDE snapsift (Photos.app on
+        // this Mac, another iCloud device) after the scan still resolves in the
+        // stale map and would sail past the FIX 3 guard into performChanges;
         // (2) the protection sweep below must read the CURRENT favorite/edited
-        // state, which a stale PHAsset can't provide.
+        // state, which a stale PHAsset can't provide; (3) — and this is why the
+        // fetch covers KEEPERS too, not just deletion candidates — the photo a
+        // group promises to KEEP can have been deleted in that same window. It
+        // is in fact the likeliest one to be: "two identical shots, I'll bin
+        // one" on an iPhone hits the frame snapsift nominated as keeper half the
+        // time. Committing that group anyway removes the last surviving copy
+        // while the sheet says KEEP and the audit log records a keeper that no
+        // longer exists. `commitSweepDecision` withdraws such a group whole.
         // Must match the scan/restore fetch: without includeAllBurstAssets the
         // burst sub-frames don't resolve by identifier and would be misread as
         // externally deleted (same gotcha restoreSnapshot documents).
+        let keeperIDs = states.compactMap { st -> String? in
+            guard st.photos.contains(where: {
+                isEffectiveDeletion($0, rejected: st.rejected, includeProtected: st.includeProtected)
+            }) else { return nil }
+            return survivingKeeper(photos: st.photos, keeperID: st.keeperID,
+                                   rejected: st.rejected,
+                                   includeProtected: st.includeProtected)?.uuid
+        }
+        let fetchIDs = Array(Set(candidateIDs).union(keeperIDs))
         let liveOpts = PHFetchOptions()
         liveOpts.includeAllBurstAssets = true
-        let liveFetch = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: liveOpts)
+        let liveFetch = PHAsset.fetchAssets(withLocalIdentifiers: fetchIDs, options: liveOpts)
         var live: [String: PHAsset] = [:]
         live.reserveCapacity(liveFetch.count)
         liveFetch.enumerateObjects { a, _, _ in live[a.localIdentifier] = a }
 
-        // Commit-time protection sweep: a frame favorited or edited SINCE the scan
-        // is protected NOW — the same doctrine `restoreSnapshot` applies across
-        // launches, enforced here for the live in-session window (hours long on a
-        // big library, exactly when a user flips to Photos.app and stars/edits).
-        // Drop any newly-protected frame from its group's delete bucket unless the
-        // user force-opted-in for that group (`includeProtected` is per-group
-        // informed consent). `favorite` is a free prefetched property; `edited`
-        // is one batched WAL-aware sidecar query (see currentEditedFlags — never
+        // Commit-time protection sweep: a frame favorited or edited SINCE the
+        // scan is protected NOW — the same doctrine `restoreSnapshot` applies
+        // across launches, enforced here for the live in-session window (hours
+        // long on a big library, exactly when a user flips to Photos.app and
+        // stars/edits). `favorite` is a free prefetched property; `edited` is
+        // one batched WAL-aware sidecar query (see currentEditedFlags — never
         // the raw sync PhotoKit call, which can wedge forever). `isDocument`
-        // (Vision/pixels) stays rescan-only. A newly-protected frame must never be
-        // deleted without the ⇧X path, nor booked .exactDuplicate/.userRejected.
-        // Swept in EVERY group, including includeProtected ones: that per-group
-        // consent covered the frames the user SAW as protected in the sheet —
-        // a frame that became protected only after the scan was never part of
-        // it, so it gets the same last-gate re-check as everywhere else. Only
-        // scan-time-protected frames (already consented) are exempt.
-        let sweepTargets: [(gi: Int, uuid: String, asset: PHAsset)] =
-            groups.indices.flatMap { i -> [(Int, String, PHAsset)] in
-                return groups[i].rejected.compactMap { uuid in
-                    guard let asset = live[uuid],
-                          let p = groups[i].photos.first(where: { $0.uuid == uuid }),
-                          !p.isProtected else { return nil }
-                    return (i, uuid, asset)
-                }
+        // (Vision/pixels) stays rescan-only. Swept in EVERY group, including
+        // includeProtected ones: that per-group consent covered the frames the
+        // user SAW as protected in the sheet — a frame that became protected
+        // only after the scan was never part of it.
+        let sweepTargets: [(uuid: String, asset: PHAsset)] = states.flatMap { st in
+            st.photos.compactMap { p -> (uuid: String, asset: PHAsset)? in
+                guard isEffectiveDeletion(p, rejected: st.rejected,
+                                          includeProtected: st.includeProtected),
+                      !p.isProtected, let asset = live[p.uuid] else { return nil }
+                return (p.uuid, asset)
             }
-        if !sweepTargets.isEmpty {
-            let editedNow = await currentEditedFlags(for: sweepTargets.map { ($0.uuid, $0.asset) })
-            // `editedNow` holds only the frames that could be DETERMINED. For a
-            // no-FDA user whose sync-lane breaker has tripped, nothing can be:
-            // the stored value is itself an unverified guess there, so an
-            // undetermined frame must resolve to the protective direction and
-            // be held out of THIS commit — never coerced to "not edited" at
-            // the last gate before performChanges (same rule as the paired-video
-            // check: cannot verify → cannot delete). Held out, NOT un-marked:
-            // the user's mark in `rejected` is their review work product, and
-            // "we couldn't read the edited flag right now" is a transient
-            // condition, not new protection — a later commit (breaker reset,
-            // FDA granted) re-checks instead of silently discarding the mark.
-            let flags: [(gi: Int, uuid: String, fav: Bool, edited: Bool, undetermined: Bool)] = sweepTargets.map {
-                ($0.gi, $0.uuid, $0.asset.isFavorite, editedNow[$0.uuid] ?? false, editedNow[$0.uuid] == nil)
+        }
+        let editedNow = sweepTargets.isEmpty ? [:] : await currentEditedFlags(for: sweepTargets)
+        var favoriteNow: [String: Bool] = [:]
+        for (uuid, asset) in sweepTargets { favoriteNow[uuid] = asset.isFavorite }
+
+        let decision = commitSweepDecision(
+            groups: states,
+            live: LiveCommitFacts(resolved: Set(live.keys),
+                                  favoriteNow: favoriteNow,
+                                  editedNow: editedNow))
+
+        // Apply the verdict to the model.
+        var flagsChanged = false
+        for frame in decision.swept {
+            guard let j = groups[frame.groupIndex].photos
+                .firstIndex(where: { $0.uuid == frame.uuid }) else { continue }
+            switch frame.reason {
+            case .newlyProtected:
+                // Real new protection — upgrade the stored flags so the UI and
+                // every later guard agree, and clear the mark for good.
+                groups[frame.groupIndex].photos[j] = groups[frame.groupIndex].photos[j]
+                    .with(favorite: frame.favorite, edited: frame.edited)
+                groups[frame.groupIndex].rejected.remove(frame.uuid)
+                groups[frame.groupIndex].autoSeeded.remove(frame.uuid)
+                flagsChanged = true
+            case .undetermined:
+                // Cannot verify ⇒ cannot delete. UN-MARK it (b09780f's rule) and
+                // record the uncertainty on the frame, so the gallery shows a
+                // degraded-protection chip instead of leaving a mark sitting
+                // there that no commit will ever honour and no surface explains.
+                groups[frame.groupIndex].photos[j] = groups[frame.groupIndex].photos[j]
+                    .with(editedUndetermined: true)
+                groups[frame.groupIndex].rejected.remove(frame.uuid)
+                groups[frame.groupIndex].autoSeeded.remove(frame.uuid)
+                flagsChanged = true
+            case .vanished:
+                break   // the mark stays; the stale-asset warning below owns this
             }
-            var dropped = 0
-            var undeterminedHeld: Set<String> = []
-            for (gi, uuid, fav, edited, undetermined) in flags where fav || edited || undetermined {
-                if fav || edited {
-                    guard let j = groups[gi].photos.firstIndex(where: { $0.uuid == uuid }) else { continue }
-                    // Real new protection — upgrade the stored flags so the UI
-                    // and every later guard agree, and clear the mark for good.
-                    groups[gi].photos[j] = groups[gi].photos[j].with(favorite: fav, edited: edited)
-                    groups[gi].rejected.remove(uuid)
-                    groups[gi].autoSeeded.remove(uuid)
-                    dropped += 1
-                } else {
-                    // Undetermined only: keep the mark, skip the frame this commit.
-                    undeterminedHeld.insert(uuid)
-                }
-            }
-            if dropped > 0 {
-                onProtectedDropped?(dropped)
-                ids = groups.flatMap(\.deletionIDs)   // shrink the commit set
-            }
-            if !undeterminedHeld.isEmpty {
-                onUndeterminedSkipped?(undeterminedHeld.count)
-                ids.removeAll { undeterminedHeld.contains($0) }
-            }
-            if dropped > 0 || !undeterminedHeld.isEmpty {
-                guard !ids.isEmpty else {
-                    // Persist only when flags were actually upgraded; a purely
-                    // held-back commit mutated nothing worth writing.
-                    if dropped > 0 { saveSnapshotNow() }
-                    return 0
-                }
-            }
+        }
+        if decision.newlyProtectedCount > 0 { onProtectedDropped?(decision.newlyProtectedCount) }
+        if decision.undeterminedCount > 0 { onUndeterminedSkipped?(decision.undeterminedCount) }
+        if !decision.withdrawnGroupIndexes.isEmpty {
+            onKeeperMissing?(decision.withdrawnGroupIndexes.count)
+        }
+
+        let ids = decision.deleteIDs
+        guard !ids.isEmpty else {
+            if flagsChanged { saveSnapshotNow() }
+            return 0
         }
 
         var assets = ids.compactMap { live[$0] }
-        guard !assets.isEmpty else { return 0 }
+        guard !assets.isEmpty else {
+            if flagsChanged { saveSnapshotNow() }
+            return 0
+        }
 
-        // FIX 3: detect stale IDs (an asset removed outside snapsift since the
-        // scan won't resolve in the live fetch).
-        if assets.count != ids.count {
-            let staleCount = ids.count - assets.count
+        // FIX 3: some marked assets no longer exist (removed outside snapsift
+        // since the scan). They are already out of `ids` — the sweep counted
+        // them — but the user still gets to decide whether to proceed.
+        if decision.vanishedCount > 0 {
             if let warn = staleWarning {
-                let proceed = await warn(staleCount, assets.count)
+                let proceed = await warn(decision.vanishedCount, assets.count)
                 guard proceed else { return 0 }
             }
             // No warning handler supplied: proceed silently with found assets
@@ -1962,8 +2299,27 @@ final class LibraryModel: ObservableObject {
         // decide whether to advance it afterward (see restampTokenAfterOwnWrite).
         let tokenWasCurrent = ScanSnapshotStore.changeTokenIsCurrent(scanChangeToken)
 
-        try await PHPhotoLibrary.shared().performChanges {
-            PHAssetChangeRequest.deleteAssets(assets as NSArray)
+        // INTENT JOURNAL — written before the destructive call, cleared after
+        // the history write. The window it covers: performChanges succeeds, then
+        // the process dies (memory pressure on a thousand-photo commit, or an
+        // impatient ⌘Q on what looks like a hang) before the audit append runs.
+        // Recently Deleted then holds photos the Deletion History has never
+        // heard of, and the next launch drops their marks as "no longer
+        // resolvable" — the user's only way to notice is to count by hand.
+        // `reconcileDeletionJournal` picks this up at the next launch and
+        // VERIFIES each record against the live library before booking it.
+        let session = DeletionSession(timestamp: timestamp, records: auditRecords)
+        if !auditRecords.isEmpty { DeletionAuditLog.writeIntent(session) }
+
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets(assets as NSArray)
+            }
+        } catch {
+            // Nothing was deleted (performChanges is atomic), so the intent is
+            // a lie the next launch must not find.
+            DeletionAuditLog.clearIntent()
+            throw error
         }
 
         // Append audit log (best-effort, never aborts the deletion). A write
@@ -1971,9 +2327,11 @@ final class LibraryModel: ObservableObject {
         // record is missing — flag it so the completion banner says so honestly.
         lastDeleteAuditFailed = false
         if !auditRecords.isEmpty {
-            let session = DeletionSession(timestamp: timestamp, records: auditRecords)
             lastDeleteAuditFailed = !DeletionAuditLog.append(session)
         }
+        // Only once the history carries it (or we know it never will) is the
+        // journal's job done.
+        DeletionAuditLog.clearIntent()
 
         // Drop deleted frames; a group that loses all but its keeper is resolved.
         // Crucially, carry the user's review decisions forward: a "keep all" or
@@ -2034,7 +2392,7 @@ final class LibraryModel: ObservableObject {
         // Our own delete advanced the library token; move the staleness anchor
         // forward (only when it was current going in) so a relaunch doesn't treat
         // this commit as an external mutation and discard surviving exact marks.
-        restampTokenAfterOwnWrite(wasCurrent: tokenWasCurrent)
+        restampTokenAfterOwnWrite(wasCurrent: tokenWasCurrent, ourIDs: Set(removed))
 
         // Keep the cross-launch snapshot in lockstep — a relaunch must never
         // resurrect frames that were just deleted.

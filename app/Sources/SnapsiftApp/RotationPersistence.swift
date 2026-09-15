@@ -69,6 +69,10 @@ enum RotationSaveError: LocalizedError {
     case noSourceImage
     case renderFailed
     case photoKitWriteFailed(Error)
+    /// The frame already carries the user's own adjustments. Saving would flatten
+    /// them (see `saveRotation`'s note on `canHandleAdjustmentData`), so this path
+    /// refuses rather than quietly rewriting someone's edit.
+    case frameAlreadyEdited
 
     var errorDescription: String? {
         switch self {
@@ -80,6 +84,8 @@ enum RotationSaveError: LocalizedError {
             return "Couldn't render the rotated image."
         case .photoKitWriteFailed(let underlying):
             return "Photos couldn't save the rotation: \(underlying.localizedDescription)"
+        case .frameAlreadyEdited:
+            return "This photo already has edits. Saving a rotation would flatten them into a new version, so snapsift won't — rotate it in Photos instead."
         }
     }
 }
@@ -107,6 +113,15 @@ func saveRotation(asset: PHAsset, quarterTurns: Int) async throws {
     guard net != 0 else { return }  // 0 or 360° → nothing to save
 
     // Step 1: Request content-editing input with network access.
+    //
+    // `canHandleAdjustmentData` is deliberately NOT set: we cannot re-apply
+    // someone else's crop/filter, so for an already-adjusted asset PhotoKit
+    // hands back the RENDERED result and our output would REPLACE their
+    // adjustment chain — "Revert to Original" would then also discard their
+    // crop. Rather than describe that in a dialog, the caller refuses the
+    // action on edited frames (`RotationSaveError.frameAlreadyEdited`); this
+    // function therefore only ever sees pristine assets, for which the
+    // "reversible, the original is preserved" promise is exactly true.
     let options = PHContentEditingInputRequestOptions()
     options.isNetworkAccessAllowed = true  // fetch iCloud-evicted originals
 

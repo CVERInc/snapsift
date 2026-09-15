@@ -15,6 +15,26 @@ struct PreCommitGroup: Identifiable {
     let keeperReason: KeeperReason
     let toRemove: [Photo]
     let includeProtected: Bool
+    /// The photo this group promised to KEEP no longer exists (deleted from
+    /// another device / Photos.app since the scan). Nothing here is committed:
+    /// deleting the rest would leave zero copies of an image the sheet is
+    /// simultaneously claiming to keep. Shown, struck through, with the reason.
+    let keeperMissing: Bool
+    /// Frames being removed that carry album membership or a caption the keeper
+    /// does not — byte-identical as pixels, not as library entries.
+    let uniqueMetadataIDs: Set<String>
+
+    init(id: ReviewGroup.ID, keeper: Photo?, keeperReason: KeeperReason,
+         toRemove: [Photo], includeProtected: Bool,
+         keeperMissing: Bool = false, uniqueMetadataIDs: Set<String> = []) {
+        self.id = id
+        self.keeper = keeper
+        self.keeperReason = keeperReason
+        self.toRemove = toRemove
+        self.includeProtected = includeProtected
+        self.keeperMissing = keeperMissing
+        self.uniqueMetadataIDs = uniqueMetadataIDs
+    }
 }
 
 // MARK: - Pre-commit review sheet
@@ -35,6 +55,7 @@ struct PreCommitReviewSheet: View {
     let reclaimableBytes: Int
     let totalProtected: Int   // total protected frames across all groups being deleted
     let noSurvivorCount: Int  // groups where every frame goes to Recently Deleted
+    let withdrawnCount: Int   // groups withheld because their keeper is gone
     let model: LibraryModel
     let t: L10n
     let onConfirm: () -> Void
@@ -76,6 +97,25 @@ struct PreCommitReviewSheet: View {
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.reefRed.opacity(0.08))
+
+                Divider().background(Color.reefBorder)
+            }
+
+            // MARK: Withdrawn groups (keeper gone since the scan)
+            if withdrawnCount > 0 {
+                HStack(spacing: 8) {
+                    Image(systemName: "questionmark.folder")
+                        .foregroundStyle(Color.reefAmber)
+                    Text(t.preCommitWithdrawnWarning(withdrawnCount))
+                        .font(.callout.bold())
+                        .foregroundStyle(Color.reefAmber)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.reefAmber.opacity(0.08))
 
                 Divider().background(Color.reefBorder)
             }
@@ -161,7 +201,17 @@ private struct GroupPreCommitRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Keeper row — or the loud no-survivor banner when there is none.
-            if let keeper = group.keeper {
+            if group.keeperMissing {
+                HStack(spacing: 6) {
+                    Image(systemName: "questionmark.folder")
+                        .foregroundStyle(Color.reefAmber)
+                    Text(t.preCommitWithdrawnRow())
+                        .font(.caption.bold())
+                        .foregroundStyle(Color.reefAmber)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+            } else if let keeper = group.keeper {
                 HStack(spacing: 10) {
                     // Keeper thumbnail (not dimmed)
                     AssetThumbnail(asset: model.asset(for: keeper.uuid),
@@ -245,6 +295,15 @@ private struct GroupPreCommitRow: View {
                                         Image(systemName: "lock.fill")
                                             .font(.footnote.weight(.bold))
                                             .foregroundStyle(Color.reefAmber)
+                                    } else if group.uniqueMetadataIDs.contains(p.uuid) {
+                                        // Same pixels, different library entry:
+                                        // this copy carries albums or a caption
+                                        // the keeper doesn't. The two thumbnails
+                                        // are identical, so the badge is the
+                                        // only way the user can tell.
+                                        Image(systemName: "tag.fill")
+                                            .font(.footnote.weight(.bold))
+                                            .foregroundStyle(Color.reefAmber)
                                     }
                                 }
                                 .frame(width: 52, height: 52)
@@ -252,13 +311,17 @@ private struct GroupPreCommitRow: View {
                                 // VoiceOver user must hear WHICH photo, not
                                 // "image": speak the filename per tile.
                                 .accessibilityElement(children: .ignore)
-                                .accessibilityLabel(p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
+                                .accessibilityLabel(
+                                    (p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
+                                    + (group.uniqueMetadataIDs.contains(p.uuid)
+                                       ? " — " + t.preCommitUniqueMetadata() : ""))
                             }
                         }
                     }
                 }
             }
         }
+        .opacity(group.keeperMissing ? 0.55 : 1)
         .padding(10)
         .background(Color.reefDeep, in: RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
         .overlay(
