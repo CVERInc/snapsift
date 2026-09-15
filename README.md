@@ -131,6 +131,19 @@ they differ it is said so below.
 - **A `groups.json` without `edited` flags is refused**, not quietly downgraded:
   `pick.py` exits non-zero and tells you to re-run `scan.py`. `--allow-legacy-groups`
   opts in to favorites-only protection and says so loudly, twice.
+- **Unclassifiable photos are never deleted — macOS app only.** When the app
+  cannot determine whether a frame is edited (no Full Disk Access, or the
+  library the quality sidecar reads couldn't be confirmed as the one Photos is
+  actually using), or a document-eval ran on an image that wasn't on-device
+  (iCloud-evicted), that frame is **never a delete candidate** — not
+  auto-suggested, not markable by hand, and not admissible even through the
+  "include protected" override, because there is no fact to consent to
+  overriding. Ruling (chodaict, 2026-09-16): these photos are collected into a
+  Photos album — **"Snapsift · Needs a look"** — non-destructively (membership
+  only; nothing is moved or removed from anywhere else), so a human decides in
+  Photos.app instead of the tool guessing. The same album also collects videos
+  whose Live Photo pairing could not be confirmed. This is stricter than "not
+  pre-marked": it replaces that earlier compromise.
 - **Documents/scans** are only protected for input produced by the macOS app —
   `scan.py` cannot detect them (no pixel access). The CLI path does not protect
   documents.

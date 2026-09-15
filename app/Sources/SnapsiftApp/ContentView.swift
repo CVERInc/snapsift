@@ -804,29 +804,29 @@ struct ContentView: View {
     }
 
     /// Shared reject-key logic for grid and loupe.
-    /// Plain X/⌫: toggle reject. Protected → show inline hint instead.
-    /// ⇧X: force-reject a protected frame → show confirmation alert.
+    /// Plain X/⌫: toggle reject. Protected/unverifiable → show inline hint.
+    /// ⇧X: force-reject a KNOWN protection → show confirmation alert.
+    /// An UNVERIFIABLE frame has no ⇧X override (there is no fact to consent
+    /// to overriding — `Photo.isUnverifiable`), so ⇧X on one falls through to
+    /// the same blocked-toggle branch plain X uses, and shows the same hint.
     private func handleRejectKey(_ g: ReviewGroup, modifiers: EventModifiers) {
         guard let f = focusedFrame else { return }
+        guard let p = g.photos.first(where: { $0.uuid == f }) else { return }
         let isShift = modifiers.contains(.shift)
-        if isShift {
-            // ⇧X path: force-reject (may target a protected frame).
-            if let p = g.photos.first(where: { $0.uuid == f }), p.isProtected {
-                // Already force-rejected → ⇧X toggles it back out. Un-marking
-                // is the safe direction, so no confirmation (the destructive
-                // dialog re-confirming a mark it's about to keep was a dead end).
-                if g.rejected.contains(f) {
-                    model.toggleReject(group: g.id, frameID: f)
-                    return
-                }
-                forceRejectTarget = (groupID: g.id, frameID: f)
-                showForceRejectAlert = true
-            } else {
-                // Not protected — behaves same as plain X.
+        if isShift && p.isProtected {
+            // ⇧X path: force-reject a protected frame.
+            // Already force-rejected → ⇧X toggles it back out. Un-marking
+            // is the safe direction, so no confirmation (the destructive
+            // dialog re-confirming a mark it's about to keep was a dead end).
+            if g.rejected.contains(f) {
                 model.toggleReject(group: g.id, frameID: f)
+                return
             }
+            forceRejectTarget = (groupID: g.id, frameID: f)
+            showForceRejectAlert = true
         } else {
-            // Plain X: toggle reject, but block on protected frames.
+            // Plain X, or ⇧X on anything that isn't a KNOWN protection —
+            // toggle reject, block (with hint) on protected/unverifiable.
             let toggled = model.toggleReject(group: g.id, frameID: f)
             if !toggled {
                 // Show inline hint.
@@ -1266,6 +1266,13 @@ struct ContentView: View {
         if undetermined > 0 { out.append(t.protectionDegraded(undetermined)) }
         if model.uniqueMetadataWithheld > 0 {
             out.append(t.uniqueMetadataWithheld(model.uniqueMetadataWithheld))
+        }
+        // Every frame/video snapsift could not classify at all — never a
+        // delete candidate; points at the one place the human can act on it.
+        // `model.hasScanned` guard: same reasoning as libraryUnverified above.
+        if model.hasScanned && model.unclassifiableCount > 0 {
+            out.append(t.unverifiableInAlbum(model.unclassifiableCount,
+                                             album: AlbumWriter.albumNeedsLook(t)))
         }
         return out
     }
@@ -1994,7 +2001,9 @@ struct GroupReview: View {
         }
         .overlay(alignment: .bottom) {
             if protectedHintFrame == p.uuid {
-                Text(t.protectedHint())
+                // Unverifiable has no ⇧X override — a distinct hint that
+                // doesn't advertise one, and points at the Needs-a-look album.
+                Text(p.isUnverifiable ? t.unverifiableHint() : t.protectedHint())
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, CVERSpacing.sm).padding(.vertical, 5)
@@ -2272,7 +2281,8 @@ struct LoupeOverlay: View {
         // silently.
         .overlay(alignment: .bottom) {
             if protectedHintVisible {
-                Text(t.protectedHintTouch())
+                Text((currentPhoto?.isUnverifiable ?? false)
+                     ? t.unverifiableHintTouch() : t.protectedHintTouch())
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14).padding(.vertical, CVERSpacing.sm)

@@ -1679,6 +1679,62 @@ do {
     // "undetermined ⇒ carries" checks fail.
 }
 
+print("Unclassifiable photos are never delete candidates, even with the per-group override (needs-a-look ruling, 2026-09-16)")
+do {
+    let keep = ph(1, 0, quality: 0.9)
+    let evicted = ph(2, 1, docDegraded: true)       // document eval ran blind
+    let unreadable = ph(3, 2, editedUnknown: true)  // edit state unreadable
+    let photos = [keep, evicted, unreadable]
+
+    // The per-group "include protected" opt-in (⇧X / mouse toggle) is the
+    // ONLY path that can pull a KNOWN protection into the delete set. It must
+    // not be able to pull an UNVERIFIABLE frame in too — there is no fact for
+    // the user to consent to overriding.
+    check(!isEffectiveDeletion(evicted, rejected: ["U2"], includeProtected: true),
+          "documentEvalDegraded frame: includeProtected cannot admit it")
+    check(!isEffectiveDeletion(unreadable, rejected: ["U3"], includeProtected: true),
+          "editedUndetermined frame: includeProtected cannot admit it")
+    // Even with EVERY frame marked and the override on, deletions() only
+    // returns the ordinary deletable ones.
+    check(Set(deletions(photos).map(\.uuid)) == [],
+          "a keeper-only group with no plain frames deletes nothing, regardless of the two unverifiable frames")
+    let withPlain = photos + [ph(4, 3)]
+    check(Set(deletions(withPlain).map(\.uuid)) == ["U4"],
+          "…and adding one plain frame changes exactly that — never the unverifiable two")
+    // NEGATIVE CONTROL: remove the `if p.isUnverifiable { return false }`
+    // guard from `isEffectiveDeletion` (DeleteDecision.swift) — both
+    // `includeProtected` checks above go red, and `deletions(photos)` starts
+    // returning U2/U3 as soon as anything marks them.
+}
+
+print("Snapsift-owned albums excluded from the unique-metadata comparison (needs-a-look ruling, 2026-09-16)")
+do {
+    let snapsiftTitles: Set<String> = [
+        "Snapsift · Burst Candidates", "Snapsift · Blurry", "Snapsift · Documents & IDs",
+        "Snapsift · Exact Duplicates", "Snapsift · Needs a look",
+    ]
+    check(userAlbumCount(titles: [], snapsiftTitles: snapsiftTitles) == 0,
+          "no albums at all")
+    check(userAlbumCount(titles: ["Snapsift · Needs a look"], snapsiftTitles: snapsiftTitles) == 0,
+          "a candidate that is ONLY in snapsift's own album looks like it carries nothing — " +
+          "the tool's own housekeeping is not user data")
+    check(userAlbumCount(titles: ["Snapsift · Burst Candidates", "Family Trip"],
+                         snapsiftTitles: snapsiftTitles) == 1,
+          "mixed: only the REAL user album counts")
+    check(userAlbumCount(titles: ["Family Trip", "Best of 2026"], snapsiftTitles: snapsiftTitles) == 2,
+          "two real user albums both count")
+    // The self-bite this exists to prevent: a photo snapsift itself filed
+    // into "Needs a look" on a PREVIOUS run must not look, on the NEXT scan,
+    // like it carries unique library membership the keeper lacks.
+    let candidateAlbums = userAlbumCount(titles: ["Snapsift · Needs a look"], snapsiftTitles: snapsiftTitles)
+    check(!carriesUniqueMetadata(candidate: LibraryMetadata(albumCount: candidateAlbums, hasDescription: false),
+                                 keeper: LibraryMetadata(albumCount: 0, hasDescription: false)),
+          "…so the exact-dup suggestion still fires normally instead of silently going stale")
+    // NEGATIVE CONTROL: change `userAlbumCount` to `titles.count` (dropping the
+    // `!snapsiftTitles.contains($0)` filter) — the first two checks above go
+    // red (0 → 1), and the carriesUniqueMetadata check flips to `true`.
+}
+
 print("Library identity: is the sidecar the library PhotoKit serves? (P2-1)")
 do {
     let real = "/Volumes/Photos SSD/Photos Library.photoslibrary"

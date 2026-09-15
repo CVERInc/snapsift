@@ -135,6 +135,30 @@ final class LibraryModel: ObservableObject {
     var undeterminedEditCount: Int {
         groups.reduce(0) { $0 + $1.photos.filter(\.editedUndetermined).count }
     }
+    /// Frames in the current review set whose protection could not be
+    /// determined AT ALL (Core `Photo.isUnverifiable`: `documentEvalDegraded`
+    /// OR `editedUndetermined`). Never a delete candidate under any
+    /// circumstance, including the per-group `includeProtected` override —
+    /// see `DeleteDecision.isEffectiveDeletion`. Drives the standing
+    /// "collected into the Needs-a-look album" notice.
+    var unverifiableCount: Int {
+        groups.reduce(0) { $0 + $1.photos.filter(\.isUnverifiable).count }
+    }
+    /// Videos excluded from the scan entirely because we could not confirm
+    /// whether they are a Live Photo's paired `.mov` companion (see
+    /// `excludeLivePhotoPairedVideos`). They never become a `Photo` and so
+    /// never enter `groups`/`unverifiableCount` — but they are exactly the
+    /// ruling's "couldn't classify" case, so they are tracked here and fed
+    /// into the SAME "Needs a look" album by `writeAlbums`.
+    ///
+    /// SESSION-ONLY, unlike `groups`: not part of `ScanSnapshot`, so a relaunch
+    /// between "scan" and "Sort into Albums" loses this particular set — the
+    /// same lifecycle `assetsByID` already has for excluded assets. A rescan
+    /// regenerates it.
+    private(set) var pairedVideoUndeterminedAssets: [PHAsset] = []
+    /// `unverifiableCount` plus the paired-video-undetermined videos above —
+    /// the total the "Needs a look" album collects on the next album write.
+    var unclassifiableCount: Int { unverifiableCount + pairedVideoUndeterminedAssets.count }
     /// Exact-duplicate frames withheld from pre-marking because they carry (or
     /// might carry) album membership / a caption the keeper lacks.
     @Published var uniqueMetadataWithheld = 0
@@ -534,16 +558,18 @@ final class LibraryModel: ObservableObject {
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
         uniqueMetadataWithheld = 0
         uniqueMetadataIDs = []
+        pairedVideoUndeterminedAssets = []
 
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)
         result.enumerateObjects { asset, _, _ in assets.append(asset) }
         // FIX 1 — Live Photo paired-video guard (off the main actor; see
         // excludeLivePhotoPairedVideos). Only relevant when videos are included.
-        var pairedVideoUndetermined = 0
+        var pairedVideoUndetermined: [PHAsset] = []
         if includeVideo {
             (assets, pairedVideoUndetermined) = await excludeLivePhotoPairedVideos(assets)
         }
+        pairedVideoUndeterminedAssets = pairedVideoUndetermined
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
@@ -651,8 +677,8 @@ final class LibraryModel: ObservableObject {
         // staleness reference here (see `scanChangeToken`).
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
         var doneNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
-        if pairedVideoUndetermined > 0 {
-            doneNotice += " " + t.scanPairedVideosSkipped(pairedVideoUndetermined)
+        if pairedVideoUndetermined.count > 0 {
+            doneNotice += " " + t.scanPairedVideosSkipped(pairedVideoUndetermined.count)
         }
         scanNotice = doneNotice
         await releaseScanCaches()
@@ -696,14 +722,16 @@ final class LibraryModel: ObservableObject {
     /// EXCLUDED from the scan. Under-scanning only hides suggestions; guessing
     /// "not paired" could put a Live Photo's motion half into a deletable set,
     /// where deleting it destroys the pair unrecoverably. `undetermined`
-    /// counts those exclusions so the scan-complete banner can say so instead
-    /// of silently narrowing scope.
+    /// returns those excluded assets (not just a count) so the caller can
+    /// both report how many (scan-complete banner) AND fold them into the
+    /// "Needs a look" album — they never become a `Photo`, so that is the
+    /// only place they can be surfaced for a human to decide.
     private func excludeLivePhotoPairedVideos(_ assets: [PHAsset]) async
-        -> (kept: [PHAsset], undetermined: Int) {
+        -> (kept: [PHAsset], undetermined: [PHAsset]) {
         let videos = assets.filter { $0.mediaType == .video }
-        guard !videos.isEmpty else { return (assets, 0) }
+        guard !videos.isEmpty else { return (assets, []) }
         var excluded: Set<String> = []
-        var undetermined = 0
+        var undetermined: [PHAsset] = []
         for v in videos {
             if abortFlag.isSet { break }   // scan is cancelling; result unused
             let paired: Bool? = await PhotoKitSyncLane.call {
@@ -724,10 +752,10 @@ final class LibraryModel: ObservableObject {
                 break
             default:
                 excluded.insert(v.localIdentifier)
-                undetermined += 1
+                undetermined.append(v)
             }
         }
-        guard !excluded.isEmpty else { return (assets, 0) }
+        guard !excluded.isEmpty else { return (assets, []) }
         return (assets.filter { !excluded.contains($0.localIdentifier) }, undetermined)
     }
 
@@ -933,15 +961,17 @@ final class LibraryModel: ObservableObject {
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
         uniqueMetadataWithheld = 0
         uniqueMetadataIDs = []
+        pairedVideoUndeterminedAssets = []
 
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)
         result.enumerateObjects { a, _, _ in assets.append(a) }
         // FIX 1 — Live Photo paired-video guard (off the main actor; see scan()).
-        var pairedVideoUndetermined = 0
+        var pairedVideoUndetermined: [PHAsset] = []
         if includeVideo {
             (assets, pairedVideoUndetermined) = await excludeLivePhotoPairedVideos(assets)
         }
+        pairedVideoUndeterminedAssets = pairedVideoUndetermined
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
@@ -987,8 +1017,8 @@ final class LibraryModel: ObservableObject {
         hasScanned = true
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
         var doneNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
-        if pairedVideoUndetermined > 0 {
-            doneNotice += " " + t.scanPairedVideosSkipped(pairedVideoUndetermined)
+        if pairedVideoUndetermined.count > 0 {
+            doneNotice += " " + t.scanPairedVideosSkipped(pairedVideoUndetermined.count)
         }
         scanNotice = doneNotice
         await releaseScanCaches()
@@ -1029,15 +1059,17 @@ final class LibraryModel: ObservableObject {
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
         uniqueMetadataWithheld = 0
         uniqueMetadataIDs = []
+        pairedVideoUndeterminedAssets = []
 
         var assets: [PHAsset] = []
         assets.reserveCapacity(result.count)
         result.enumerateObjects { a, _, _ in assets.append(a) }
         // FIX 1 — Live Photo paired-video guard (off the main actor; see scan()).
-        var pairedVideoUndetermined = 0
+        var pairedVideoUndetermined: [PHAsset] = []
         if includeVideo {
             (assets, pairedVideoUndetermined) = await excludeLivePhotoPairedVideos(assets)
         }
+        pairedVideoUndeterminedAssets = pairedVideoUndetermined
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
@@ -1110,8 +1142,8 @@ final class LibraryModel: ObservableObject {
         hasScanned = true
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
         var catNotice = categories.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(categories.count)
-        if pairedVideoUndetermined > 0 {
-            catNotice += " " + t.scanPairedVideosSkipped(pairedVideoUndetermined)
+        if pairedVideoUndetermined.count > 0 {
+            catNotice += " " + t.scanPairedVideosSkipped(pairedVideoUndetermined.count)
         }
         scanNotice = catNotice
         await releaseScanCaches()
@@ -1207,10 +1239,15 @@ final class LibraryModel: ObservableObject {
 
     /// Toggle reject on a single frame. `X` / `⌫` key.
     /// Protected frames: MARKING is a NO-OP (returns false, caller shows hint) —
-    /// only the ⇧X/`forceReject` informed-consent path may mark them. UN-marking
-    /// is the safe direction and is always allowed, protected or not; a
+    /// only the ⇧X/`forceReject` informed-consent path may mark them.
+    /// UNVERIFIABLE frames: MARKING is a NO-OP too, but there is no override —
+    /// `isEffectiveDeletion` would refuse them even if `rejected` held their
+    /// uuid, so letting the insert silently succeed here would arm a mark that
+    /// can never fire and no surface explains. UN-marking is the safe
+    /// direction and is always allowed regardless of why a frame is blocked; a
     /// force-included frame must never be trapped in the delete bucket.
-    /// Returns true if the toggle happened, false if blocked (protected frame).
+    /// Returns true if the toggle happened, false if blocked (protected or
+    /// unverifiable frame).
     @discardableResult
     func toggleReject(group groupID: ReviewGroup.ID, frameID: String) -> Bool {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return false }
@@ -1224,7 +1261,7 @@ final class LibraryModel: ObservableObject {
                 groups[i].includeProtected = false
             }
         } else {
-            if p.isProtected { return false }   // blocked — caller shows hint
+            if p.isProtected || p.isUnverifiable { return false }   // blocked — caller shows hint
             groups[i].rejected.insert(frameID)
             // If rejecting the current keeper, promote to next best.
             if frameID == groups[i].keeperID {
@@ -1241,8 +1278,17 @@ final class LibraryModel: ObservableObject {
     /// Force-reject a protected frame — the ⇧X informed-consent path.
     /// Caller MUST show confirmation dialog before calling this.
     /// Sets includeProtected=true for this group (flags the group needs confirm on commit).
+    ///
+    /// Defense in depth, matching `AlbumWriter`'s own "belt AND suspenders"
+    /// stance: the caller (`ContentView.handleRejectKey`) never routes an
+    /// unverifiable frame here (there is no fact to consent to overriding —
+    /// see `Photo.isUnverifiable`), and `isEffectiveDeletion` would refuse it
+    /// even if it arrived. This guard means a future caller cannot bypass
+    /// either check by calling `forceReject` directly.
     func forceReject(group groupID: ReviewGroup.ID, frameID: String) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        guard let p = groups[i].photos.first(where: { $0.uuid == frameID }) else { return }
+        guard !p.isUnverifiable else { return }
         groups[i].rejected.insert(frameID)
         groups[i].includeProtected = true   // flag: this group now has protected rejections
         // If rejecting the keeper, re-derive keeper from remaining non-rejected frames.
@@ -1572,8 +1618,17 @@ final class LibraryModel: ObservableObject {
     /// for KEYWORDS, and this repo has never verified their table layout against
     /// a real library, so keywords are not compared. A keyword-only difference
     /// between two byte-identical copies is therefore still invisible here.
+    ///
+    /// SELF-CONSISTENCY: snapsift's OWN organizational albums ("Snapsift ·
+    /// Burst Candidates", "Snapsift · Needs a look", …) must never count as
+    /// evidence a copy is unique — otherwise a PREVIOUS "Sort into Albums" run
+    /// makes the tool's own housekeeping look like user data, and the exact
+    /// pre-mark this function feeds silently stops firing on library churn the
+    /// user never asked for. `userAlbumCount` (Core) excludes every title
+    /// `AlbumWriter` can create, in any language.
     private func libraryMetadata(for uuids: [String]) async -> [String: LibraryMetadata] {
         guard !uuids.isEmpty else { return [:] }
+        let snapsiftTitles = AlbumWriter.allSnapsiftTitles
         var albums: [String: Int] = [:]
         for id in uuids {
             guard let asset = assetsByID[id] else { continue }
@@ -1581,8 +1636,14 @@ final class LibraryModel: ObservableObject {
             // photolibraryd must strand one sacrificial thread, never the pool.
             // nil (timeout / breaker) stays nil — undetermined, not zero.
             if let n: Int = await PhotoKitSyncLane.call({
-                PHAssetCollection.fetchAssetCollectionsContaining(asset, with: .album,
-                                                                  options: nil).count
+                let cols = PHAssetCollection.fetchAssetCollectionsContaining(
+                    asset, with: .album, options: nil)
+                var titles: [String] = []
+                titles.reserveCapacity(cols.count)
+                cols.enumerateObjects { col, _, _ in
+                    titles.append(col.localizedTitle ?? "")
+                }
+                return userAlbumCount(titles: titles, snapsiftTitles: snapsiftTitles)
             }) {
                 albums[id] = n
             }
@@ -2030,7 +2091,11 @@ final class LibraryModel: ObservableObject {
     /// Part A: bursts, blurry, and documents albums are always review-only.
     ///         Protected frames never appear in any delete-oriented bucket.
     /// Part B: the exact-duplicates album is the ONLY one where non-keeper,
-    ///         non-protected frames earn a "suggest delete" badge in the UI.
+    ///         deletable frames earn a "suggest delete" badge in the UI.
+    /// Part C: the Needs-a-look album collects every unverifiable frame AND
+    ///         every paired-video-undetermined asset — never a delete
+    ///         suggestion, purely "a human should look at this in Photos.app"
+    ///         (ruling, chodaict, 2026-09-16).
     ///
     /// Returns a human-readable banner summarising what was written (or
     /// "nothing new" if all assets were already in the albums).
@@ -2038,8 +2103,11 @@ final class LibraryModel: ObservableObject {
     func writeAlbums(_ t: L10n) async throws -> String {
         // Return a fully formed banner ("Sorted into albums · nothing new to add")
         // rather than the bare fragment, which reads as an uncapitalized floater.
-        guard !isWritingAlbums, !isDeleting, !groups.isEmpty else {
-            return t.albumsWritten(bursts: 0, blurry: 0, docs: 0, exact: 0)
+        // `groups` can be empty while paired-video-undetermined assets are NOT
+        // (a scan that found nothing else still owes those videos a home).
+        guard !isWritingAlbums, !isDeleting,
+              !groups.isEmpty || !pairedVideoUndeterminedAssets.isEmpty else {
+            return t.albumsWritten(bursts: 0, blurry: 0, docs: 0, exact: 0, needsLook: 0)
         }
         isWritingAlbums = true
         progress = t.progWritingAlbums()
@@ -2050,17 +2118,22 @@ final class LibraryModel: ObservableObject {
             groups: groups,
             exactGroups: exactDupeGroupIDs,
             assetsByID: assetsByID,
+            extraNeedsLookAssets: pairedVideoUndeterminedAssets,
             t: t
         )
         // A membership-only album write mutates no verdict-relevant state, but it
         // DOES advance the library change token. Move the reference forward (and
         // persist) so this recommended review step doesn't silently strand every
         // byte-verified exact pre-mark behind a "library changed" stale restore.
-        restampTokenAfterOwnWrite(wasCurrent: wasCurrent,
-                                  ourIDs: Set(groups.flatMap { $0.photos.map(\.uuid) }))
+        // Includes the paired-video-undetermined ids: those got an album write
+        // too, so they must count as OUR write for the same reason.
+        let ourIDs = Set(groups.flatMap { $0.photos.map(\.uuid) })
+            .union(pairedVideoUndeterminedAssets.map(\.localIdentifier))
+        restampTokenAfterOwnWrite(wasCurrent: wasCurrent, ourIDs: ourIDs)
         saveSnapshotNow()
         return t.albumsWritten(bursts: result.bursts, blurry: result.blurry,
-                               docs: result.documents, exact: result.exactDupes)
+                               docs: result.documents, exact: result.exactDupes,
+                               needsLook: result.needsLook)
     }
 
     /// Delete every reviewed non-keeper, non-favorite frame via PhotoKit. macOS

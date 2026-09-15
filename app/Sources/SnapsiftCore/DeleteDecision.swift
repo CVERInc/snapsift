@@ -82,6 +82,14 @@ public func bulkRejectCandidates(photos: [Photo], keeperID: String) -> Set<Strin
 /// Frames a bulk action had to LEAVE OUT because they are unverifiable, so the
 /// UI can say "N frames couldn't be classified and were not marked" instead of
 /// quietly marking fewer photos than the button promised.
+///
+/// DISPLAY-ONLY, not a pending queue: this is not "withheld, but could still
+/// be marked" — an unverifiable frame can NEVER be marked (`isEffectiveDeletion`
+/// refuses it unconditionally, `includeProtected` included). The count exists
+/// so the UI can name what happened; the frames it counts are the ones the App
+/// layer collects into the "Needs a look" Photos album (see `AlbumWriter`) for
+/// the human to decide there, per the 2026-09-16 ruling: unclassifiable ⇒
+/// never a delete candidate, always surfaced.
 public func bulkRejectWithheld(photos: [Photo], keeperID: String) -> Set<String> {
     Set(photos.filter { $0.uuid != keeperID && $0.isUnverifiable && !$0.isProtected }.map(\.uuid))
 }
@@ -277,6 +285,30 @@ public func carriesUniqueMetadata(candidate: LibraryMetadata,
     if cAlbums > kAlbums { return true }
     if cDesc && !kDesc { return true }
     return false
+}
+
+// MARK: - Snapsift's own organizational albums (never count as "user data")
+
+/// Count only the ALBUMS THE USER actually filed this photo into — excluding
+/// any of snapsift's own organizational albums (bursts / blurry / documents /
+/// exact-duplicates / needs-a-look, in every language, current or legacy).
+///
+/// `carriesUniqueMetadata` treats album membership as evidence a copy is worth
+/// keeping. Without this exclusion, snapsift's OWN "Sort into Albums" pass
+/// would poison that signal: whichever byte-identical copy a PREVIOUS run
+/// happened to file into "Snapsift · Burst Candidates" (or, after the album
+/// this ships, "Snapsift · Needs a look") would outrank its literal duplicate
+/// on membership the tool itself invented, not one the human set — the exact
+/// self-bite the ruling this file exists for is meant to prevent.
+///
+/// Title-only, not identifier-based: `PHAssetCollection` exposes no custom
+/// identifier through the public API, so this is a string match against
+/// `snapsiftTitles`. KNOWN LIMITATION, stated rather than hidden: a user
+/// album that happens to share one of these exact titles would also be
+/// excluded. Accepted because the titles are namespaced with "Snapsift · "
+/// specifically to make that collision unlikely.
+public func userAlbumCount(titles: [String], snapsiftTitles: Set<String>) -> Int {
+    titles.filter { !snapsiftTitles.contains($0) }.count
 }
 
 // MARK: - Library identity (is the sidecar the library PhotoKit serves?)

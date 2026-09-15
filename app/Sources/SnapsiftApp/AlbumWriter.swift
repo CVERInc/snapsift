@@ -10,6 +10,11 @@ struct AlbumWriteResult {
     var blurry: Int = 0
     var documents: Int = 0
     var exactDupes: Int = 0
+    /// Frames whose protection could not be determined at all (`Photo
+    /// .isUnverifiable`), plus videos excluded from the scan because their
+    /// Live Photo pairing was undetermined. Never a delete bucket — the human
+    /// decides in Photos.app (ruling, chodaict, 2026-09-16).
+    var needsLook: Int = 0
 }
 
 // MARK: - AlbumWriter
@@ -52,6 +57,13 @@ enum AlbumWriter {
     /// the ONLY album whose non-keeper, non-protected members the UI may badge
     /// as "可安心清 / safe to remove".
     static func albumExact(_ t: L10n) -> String   { prefix + t.albumNameExact() }
+    /// Localized album title for frames snapsift could NOT classify at all —
+    /// edit state unreadable, document eval ran blind, or (for a video) Live
+    /// Photo pairing undetermined. NEVER a delete bucket, and unlike the other
+    /// four buckets it is not even a REVIEW-for-deletion bucket: per doctrine
+    /// (ruling, chodaict, 2026-09-16) these frames are never candidates —
+    /// they are collected here strictly so the human can decide in Photos.app.
+    static func albumNeedsLook(_ t: L10n) -> String { prefix + t.albumNameNeedsLook() }
 
     /// Every language's title for a bucket. Album resolution matches ANY of these
     /// so flipping the UI language between sorts resolves the album the user
@@ -60,6 +72,19 @@ enum AlbumWriter {
     /// language's title (passed separately as `name`).
     static func allTitles(_ suffix: (L10n) -> String) -> [String] {
         Language.allCases.map { prefix + suffix(L10n($0)) }
+    }
+
+    /// Every title ANY snapsift build has ever created or could create, across
+    /// every bucket and every language — used to exclude the tool's OWN
+    /// organizational albums from signals that must reflect only the USER's
+    /// library state (see `DeleteDecision.userAlbumCount`, used by
+    /// `LibraryModel.libraryMetadata(for:)`).
+    static var allSnapsiftTitles: Set<String> {
+        Set(allTitles { $0.albumNameBursts() }
+            + allTitles { $0.albumNameBlurry() }
+            + allTitles { $0.albumNameDocs() }
+            + allTitles { $0.albumNameExact() }
+            + allTitles { $0.albumNameNeedsLook() })
     }
 
     // MARK: - Write
@@ -81,12 +106,16 @@ enum AlbumWriter {
     /// `exactGroups` — subset of groups that passed ExactDuplicatePredicate.
     ///                 Pass `[]` when the current scan hasn't run the predicate.
     /// `assetsByID`  — live PHAsset lookup (same map LibraryModel keeps).
+    /// `extraNeedsLookAssets` — assets that never became a `Photo` at all (Live
+    ///                 Photo paired-video undetermined) but are just as
+    ///                 unclassifiable; folded into the same needs-look album.
     /// `t`           — localization tokens.
     @discardableResult
     static func write(
         groups: [ReviewGroup],
         exactGroups: Set<ReviewGroup.ID>,
         assetsByID: [String: PHAsset],
+        extraNeedsLookAssets: [PHAsset] = [],
         t: L10n
     ) async throws -> AlbumWriteResult {
         var result = AlbumWriteResult()
@@ -97,11 +126,23 @@ enum AlbumWriter {
         let blurryIDs   = blurryCandidates(groups: groups, exactGroups: exactGroups)
         let docsIDs     = documentCandidates(groups: groups)
         let exactIDs    = exactCandidates(groups: groups, exactGroups: exactGroups)
+        let needsLookIDs = needsLookCandidates(groups: groups)
 
         let burstsAssets  = burstsIDs.compactMap  { assetsByID[$0] }
         let blurryAssets  = blurryIDs.compactMap  { assetsByID[$0] }
         let docsAssets    = docsIDs.compactMap    { assetsByID[$0] }
         let exactAssets   = exactIDs.compactMap   { assetsByID[$0] }
+        // De-dup by localIdentifier: a Photo-level unverifiable frame and an
+        // extra (asset-only) frame can never collide in practice, but two
+        // scans' worth of extras could if a caller ever passed the same asset
+        // twice — membership add is idempotent per-call too, so this is belt
+        // and suspenders, not load-bearing.
+        var needsLookAssets = needsLookIDs.compactMap { assetsByID[$0] }
+        var seenNeedsLook = Set(needsLookAssets.map(\.localIdentifier))
+        for a in extraNeedsLookAssets where !seenNeedsLook.contains(a.localIdentifier) {
+            needsLookAssets.append(a)
+            seenNeedsLook.insert(a.localIdentifier)
+        }
 
         // Each performChanges block is atomic per album — one block per album
         // keeps the operations small and lets PhotoKit interleave UI updates.
@@ -124,6 +165,11 @@ enum AlbumWriter {
             result.exactDupes = try await addAssets(exactAssets,
                                                     toAlbumNamed: albumExact(t),
                                                     candidateTitles: allTitles { $0.albumNameExact() })
+        }
+        if !needsLookAssets.isEmpty {
+            result.needsLook = try await addAssets(needsLookAssets,
+                                                    toAlbumNamed: albumNeedsLook(t),
+                                                    candidateTitles: allTitles { $0.albumNameNeedsLook() })
         }
         return result
     }
@@ -180,11 +226,16 @@ enum AlbumWriter {
             .map(\.uuid)
     }
 
-    /// Non-keeper, non-protected frames from exact-duplicate groups only.
-    /// This is the ONLY set that earns a delete suggestion in the UI.
-    /// Honors the group's ACTUAL keeperID (user promotion / face refine) —
-    /// re-deriving via Core's keeper() here could route the user's chosen
-    /// keeper into the suggest-delete album while sparing the ranked frame.
+    /// Non-keeper, deletable frames from exact-duplicate groups only. This is
+    /// the ONLY set that earns a delete suggestion in the UI, so it must use
+    /// the SAME predicate the delete pipeline uses (`Photo.isDeletable` =
+    /// not protected AND not unverifiable) — filtering `!isProtected` alone
+    /// let a documentEvalDegraded / editedUndetermined frame into the album
+    /// Photos.app shows as "safe to remove", even though snapsift's own
+    /// delete pipeline would never touch it. Honors the group's ACTUAL
+    /// keeperID (user promotion / face refine) — re-deriving via Core's
+    /// keeper() here could route the user's chosen keeper into the
+    /// suggest-delete album while sparing the ranked frame.
     private static func exactCandidates(
         groups: [ReviewGroup],
         exactGroups: Set<ReviewGroup.ID>
@@ -193,9 +244,27 @@ enum AlbumWriter {
             .filter { exactGroups.contains($0.id) }
             .flatMap { g in
                 g.photos
-                    .filter { $0.uuid != g.keeperID && !$0.isProtected }
+                    .filter { $0.uuid != g.keeperID && $0.isDeletable }
                     .map(\.uuid)
             }
+    }
+
+    /// Every frame whose protection could not be determined AT ALL —
+    /// `Photo.isUnverifiable` (document eval ran blind, or edit state
+    /// unreadable). Independent of every other bucket and of keeper/reject
+    /// state: the point is not "this frame lost a delete vote", it is
+    /// "snapsift could not read this frame", so it is included regardless of
+    /// whether it happens to be a group's keeper. This bucket is ADDITIVE —
+    /// an unverifiable non-keeper frame may also land in `burstCandidates` /
+    /// `blurryCandidates` (organizational, never a delete suggestion, so no
+    /// safety concern in the overlap) — and it is the ONLY bucket that
+    /// exists purely to route the frame to a human, not to suggest anything
+    /// about it: `exactCandidates` never contains it (excluded upstream by
+    /// `isDeletable` before the exact-dup pass ever seeds), and
+    /// `documentCandidates` only catches a CONFIRMED document, not a
+    /// degraded eval.
+    private static func needsLookCandidates(groups: [ReviewGroup]) -> [String] {
+        groups.flatMap(\.photos).filter(\.isUnverifiable).map(\.uuid)
     }
 
     // MARK: - PhotoKit helpers (idempotent add)

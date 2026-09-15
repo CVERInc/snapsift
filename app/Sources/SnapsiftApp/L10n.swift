@@ -559,6 +559,27 @@ struct L10n: Sendable {
         }
     }
 
+    /// Inline hint shown when the user presses X (or ⇧X) on an UNVERIFIABLE
+    /// frame — distinct from `protectedHint()`: there is no ⇧X override here,
+    /// because there is no fact to consent to overriding (`Photo
+    /// .isUnverifiable`). Points at the one place the human CAN act on it.
+    func unverifiableHint() -> String {
+        switch language {
+        case .en: return "Can't classify this one — sort into albums to review it in “Needs a look”"
+        case .ja: return "分類できません — 「アルバムに仕分け」すると「要確認」で確認できます"
+        case .zhTW: return "無法判定 —— 用「整理進相簿」收進「請你看看」再決定"
+        }
+    }
+
+    /// Touch (iOS) variant of the unverifiable block.
+    func unverifiableHintTouch() -> String {
+        switch language {
+        case .en: return "Can't classify this one — see it in “Needs a look”"
+        case .ja: return "分類できません — 「要確認」で確認してください"
+        case .zhTW: return "無法判定 —— 到「請你看看」相簿確認"
+        }
+    }
+
     /// Alert body for the ⇧X force-reject confirmation (single frame).
     func forceRejectAlertBody() -> String {
         switch language {
@@ -992,6 +1013,19 @@ struct L10n: Sendable {
         }
     }
 
+    /// Frames snapsift could NOT classify at all — edit state unreadable,
+    /// document eval ran blind, or (for a video) Live Photo pairing
+    /// undetermined. NEVER a delete bucket and never even a review-for-
+    /// deletion bucket: these frames are collected here strictly so a human
+    /// can decide in Photos.app (ruling, chodaict, 2026-09-16).
+    func albumNameNeedsLook() -> String {
+        switch language {
+        case .en:   return "Needs a look"
+        case .ja:   return "要確認"
+        case .zhTW: return "請你看看"
+        }
+    }
+
     // ── Toolbar button + progress ────────────────────────────────────────────
 
     func sortIntoAlbums() -> String {
@@ -1015,13 +1049,14 @@ struct L10n: Sendable {
         case .zhTW: return "寫入相簿中…"
         }
     }
-    func albumsWritten(bursts: Int, blurry: Int, docs: Int, exact: Int) -> String {
+    func albumsWritten(bursts: Int, blurry: Int, docs: Int, exact: Int, needsLook: Int) -> String {
         // Compact summary: "Sorted into albums · 12 bursts, 3 blurry, 1 exact dup"
         var parts: [String] = []
         if bursts > 0 { parts.append(albumsWrittenBursts(bursts)) }
         if blurry > 0 { parts.append(albumsWrittenBlurry(blurry)) }
         if docs   > 0 { parts.append(albumsWrittenDocs(docs)) }
         if exact  > 0 { parts.append(albumsWrittenExact(exact)) }
+        if needsLook > 0 { parts.append(albumsWrittenNeedsLook(needsLook)) }
         // English joins with a comma; CJK uses the ideographic comma 「、」.
         let sep: String
         switch language {
@@ -1054,6 +1089,13 @@ struct L10n: Sendable {
         case .en:   return "\(n) doc\(n == 1 ? "" : "s")"
         case .ja:   return "書類 \(n)枚"
         case .zhTW: return "文件 \(n) 張"
+        }
+    }
+    private func albumsWrittenNeedsLook(_ n: Int) -> String {
+        switch language {
+        case .en:   return "\(n) need\(n == 1 ? "s" : "") a look"
+        case .ja:   return "要確認 \(n)枚"
+        case .zhTW: return "請你看看 \(n) 張"
         }
     }
     private func albumsWrittenExact(_ n: Int) -> String {
@@ -1875,6 +1917,19 @@ struct L10n: Sendable {
         case .en: return "\(n) exact duplicate\(n == 1 ? "" : "s") left unmarked — that copy carries albums or a caption the keeper doesn't"
         case .ja: return "\(n)枚の完全重複はマークしていません — そのコピーはキーパーにないアルバムや説明を持っています"
         case .zhTW: return "有 \(n) 張完全重複沒有預先標記 —— 那一份帶有保留照片所沒有的相簿或說明"
+        }
+    }
+
+    /// Standing notice: N frames/videos this review set could not classify at
+    /// all (edit state unreadable, document eval ran blind, or a video's Live
+    /// Photo pairing undetermined). Never delete candidates. Takes the ACTUAL
+    /// localized album title as a parameter so the notice can never drift out
+    /// of sync with `AlbumWriter`'s naming.
+    func unverifiableInAlbum(_ n: Int, album: String) -> String {
+        switch language {
+        case .en: return "\(n) photo\(n == 1 ? "" : "s") couldn't be classified. Sort into albums to collect \(n == 1 ? "it" : "them") in “\(album)” — you decide there."
+        case .ja: return "\(n)枚を分類できませんでした。「アルバムに仕分け」で「\(album)」に集めます — そこで判断してください。"
+        case .zhTW: return "有 \(n) 張無法判定。用「整理進相簿」收進「\(album)」，交給你決定。"
         }
     }
 
