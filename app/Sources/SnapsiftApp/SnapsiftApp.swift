@@ -40,7 +40,10 @@ final class SnapsiftUpdaterState: ObservableObject {
         observation = updater.observe(\.canCheckForUpdates, options: [.initial, .new]) {
             [weak self] u, _ in
             let value = u.canCheckForUpdates
-            Task { @MainActor in self?.canCheckForUpdates = value }
+            // Swift 5.10 (CI, macos-14) rejects a captured `self` inside the
+            // Task; bind it to a `let` first, as saveSnapshotIgnoringScanState does.
+            let state = self
+            Task { @MainActor in state?.canCheckForUpdates = value }
         }
     }
 }
