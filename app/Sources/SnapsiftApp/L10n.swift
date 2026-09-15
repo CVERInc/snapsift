@@ -130,6 +130,38 @@ struct L10n: Sendable {
         }
     }
     /// VoiceOver label / tooltip for the globe language switcher (icon-only).
+    /// Accessibility label for the scope bar's media-type segmented picker.
+    func scopeMediaLabel() -> String {
+        switch language {
+        case .en: return "Media types to scan"
+        case .ja: return "スキャン対象のメディア"
+        case .zhTW: return "掃描的媒體類型"
+        }
+    }
+    /// Menu-bar menu title holding every primary action.
+    func menuActions() -> String {
+        switch language {
+        case .en: return "Actions"
+        case .ja: return "操作"
+        case .zhTW: return "動作"
+        }
+    }
+    /// Menu item: commit the marked deletions (count-less, unlike the toolbar).
+    func menuDeleteMarked() -> String {
+        switch language {
+        case .en: return "Delete Marked Photos…"
+        case .ja: return "マークした写真を削除…"
+        case .zhTW: return "刪除已標記的照片…"
+        }
+    }
+    /// Settings (⌘,) language picker label.
+    func settingsLanguage() -> String {
+        switch language {
+        case .en: return "Language"
+        case .ja: return "言語"
+        case .zhTW: return "語言"
+        }
+    }
     func languageMenuLabel() -> String {
         switch language {
         case .en: return "Language"
@@ -522,7 +554,7 @@ struct L10n: Sendable {
 
     func frames(_ n: Int) -> String {
         switch language {
-        case .en: return "\(n) frames"
+        case .en: return "\(n) frame\(n == 1 ? "" : "s")"
         case .ja: return "\(n)枚"
         case .zhTW: return "\(n) 張"
         }
@@ -755,6 +787,24 @@ struct L10n: Sendable {
         case .zhTW: return (pct > 0 && pct < 1) ? "從 iCloud 取回原檔… \(p)%" : "載入中…"
         }
     }
+    /// Big-preview terminal failure — the original couldn't be fetched (offline,
+    /// iCloud error, damaged asset). Never leave the inspection step of a
+    /// deletion tool on a forever-spinner.
+    func previewFailed() -> String {
+        switch language {
+        case .en: return "Couldn't fetch the original from iCloud"
+        case .ja: return "iCloud から原本を取得できませんでした"
+        case .zhTW: return "無法從 iCloud 取回原檔"
+        }
+    }
+    /// Retry button for the big-preview failure state.
+    func previewRetry() -> String {
+        switch language {
+        case .en: return "Try again"
+        case .ja: return "再試行"
+        case .zhTW: return "再試一次"
+        }
+    }
     func deleteAll() -> String {
         switch language {
         case .en: return "Delete all"
@@ -816,6 +866,16 @@ struct L10n: Sendable {
         case .en: return "kept \(n) favorited or edited since the scan"
         case .ja: return "スキャン後にお気に入り／編集された\(n)枚は残しました"
         case .zhTW: return "掃描後被加入最愛或編輯的 \(n) 張已保留"
+        }
+    }
+    /// Shown after a commit when frames were held back because their edited
+    /// state could not be read (sidecar/sync-lane unavailable). The marks stay;
+    /// the user can simply commit again later.
+    func commitUndeterminedSkipped(_ n: Int) -> String {
+        switch language {
+        case .en: return "held \(n) — couldn't verify edits, still marked; try again later"
+        case .ja: return "\(n)枚は編集状態を確認できず保留 — マークは残っています。後でもう一度お試しください"
+        case .zhTW: return "有 \(n) 張因無法確認編輯狀態而暫緩 —— 標記仍保留，稍後可再試"
         }
     }
     /// Shown after a commit when burst representatives were skipped to avoid
@@ -1721,7 +1781,7 @@ struct L10n: Sendable {
     /// overlay names how many photos and sets the expectation up front.
     func deletingOverlay(_ count: Int) -> String {
         switch language {
-        case .en: return "Deleting \(count) photos… this can take a while for large batches. Confirm in the system dialog if asked."
+        case .en: return "Deleting \(count) photo\(count == 1 ? "" : "s")… this can take a while for large batches. Confirm in the system dialog if asked."
         case .ja: return "\(count) 枚を削除中… 枚数が多いと少し時間がかかります。システムの確認が出たら応答してください。"
         case .zhTW: return "正在刪除 \(count) 張照片…數量多時可能需要一點時間。如出現系統確認框請回應。"
         }

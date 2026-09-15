@@ -18,7 +18,8 @@ Strategy:
      --size-tolerance AND keep the whole cluster inside --max-span seconds.
   4. Emit groups.json with one record per cluster, containing every
      candidate's uuid, filename, dimensions, size, timestamp, favorite
-     flag, and Apple's own computed quality score.
+     flag, edited flag (the user applied adjustments — pick.py never
+     deletes those), and Apple's own computed quality score.
 
 The output is intentionally conservative — we only emit groups where every
 member satisfies the rule. Bigger savings are possible with looser rules
@@ -80,6 +81,7 @@ class Photo:
     uti:       str      # ZUNIFORMTYPEIDENTIFIER
     kind:      int      # ZKIND: 0 = image, 1 = video
     favorite:  bool     # ZFAVORITE — never deleted by pick.py
+    edited:    bool     # ZADJUSTMENTSSTATE != 0 — never deleted by pick.py
     quality:   float    # composite of Apple's computed aesthetic scores
 
     @property
@@ -112,6 +114,7 @@ def iter_assets(conn: sqlite3.Connection, include_video: bool = False):
             COALESCE(z.ZUNIFORMTYPEIDENTIFIER, ''),
             z.ZKIND,
             z.ZFAVORITE,
+            COALESCE(z.ZADJUSTMENTSSTATE, 0),
             z.ZHIGHLIGHTVISIBILITYSCORE,
             c.ZSHARPLYFOCUSEDSUBJECTSCORE,
             c.ZWELLCHOSENSUBJECTSCORE,
@@ -134,8 +137,8 @@ def iter_assets(conn: sqlite3.Connection, include_video: bool = False):
     """)
     for row in cur:
         (pk, uuid, filename, taken_at, width, height, size, uti, kind,
-         favorite, highlight, sharp, chosen, framed, timed, interesting,
-         comp, light, failure, noise) = row
+         favorite, adjustments, highlight, sharp, chosen, framed, timed,
+         interesting, comp, light, failure, noise) = row
         quality = quality_score({
             "highlight_visibility":  highlight,
             "sharply_focused":       sharp,
@@ -148,8 +151,11 @@ def iter_assets(conn: sqlite3.Connection, include_video: bool = False):
             "failure":               failure,
             "noise":                 noise,
         })
+        # ZADJUSTMENTSSTATE: 0 = pristine, non-zero = user-applied adjustments
+        # (same reading the app's QualitySidecar uses). An edited frame is
+        # protected by pick.py — the user spent time on it.
         yield Photo(pk, uuid, filename, taken_at, width, height, size, uti,
-                    kind, bool(favorite), quality)
+                    kind, bool(favorite), bool(adjustments), quality)
 
 
 def cluster(photos, gap_sec: float, size_tol: float, max_span: float = 0.0):

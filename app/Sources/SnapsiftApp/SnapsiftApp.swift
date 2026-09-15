@@ -16,6 +16,12 @@ struct SnapsiftApp: App {
                 .cverTheme(ReefTheme())
         }
         .windowResizability(.contentSize)   // macOS-only modifier
+        .commands { SnapsiftMenuCommands() }
+        Settings {
+            SnapsiftSettingsView()
+                .cverTheme(ReefTheme())
+                .preferredColorScheme(.dark)
+        }
         #else
         WindowGroup("snapsift") {
             ContentView()

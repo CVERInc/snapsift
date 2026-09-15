@@ -63,6 +63,9 @@ struct ContentView: View {
     // has un-committed decisions the requested kind parks here while a
     // confirmation dialog asks first.
     @State private var confirmScanKind: LibraryModel.ScanKind?
+    // Post-commit held-back report (protected/burst/undetermined/audit) — a
+    // persistent bar, not a 3.2s toast: it explains marks that just "vanished".
+    @State private var commitNotice: String?
 
     private var language: Language { Language(rawValue: langRaw) ?? .en }
     private var t: L10n { L10n(language) }
@@ -82,13 +85,18 @@ struct ContentView: View {
             case .limited:
                 limitedGate
             case .denied, .restricted:
-                gate(message: t.gateDeniedBody(), button: nil)
+                // Deep-link straight to the Photos privacy pane — the most
+                // common bad first-run path must not dead-end on prose telling
+                // the user to navigate System Settings by hand.
+                gate(message: t.gateDeniedBody(), button: t.gateLimitedButton()) {
+                    openPhotosPrivacySettings()
+                }
             default:
                 gate(message: t.privacyPitch(), button: t.gateRequestButton())
             }
         }
         .desktopMinimumFrame()   // macOS-only 820×560 floor; iPhone sizes itself
-        .background(Color.reefGround)
+        .background(ReefBackdrop())
         .preferredColorScheme(.dark)
         .tint(.reefTeal)
         // Pass 2b: save-rotation confirmation alert.
@@ -130,7 +138,7 @@ struct ContentView: View {
 
     private func gate(message: String, button: String?) -> some View {
         VStack(spacing: 18) {
-            Text("snapsift").font(.system(size: 30, weight: .bold)).foregroundStyle(Color.reefMint)
+            Text("snapsift").font(.largeTitle.weight(.bold)).foregroundStyle(Color.reefMint)
             Text(message)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(Color.reefTextDim)
@@ -145,8 +153,11 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
             }
         }
+        .padding(CVERSpacing.xxl)
+        .liquidGlassCard(cornerRadius: CVERRadius.panel)
+        .shadow(color: .black.opacity(0.25), radius: 12, y: 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.reefGround)
+        .background(ReefBackdrop())
         // The permission screen has no main toolbar, so carry the language menu
         // here too — otherwise a non-default-language user is stuck on the gate.
         .toolbar { ToolbarItem { languageMenu } }
@@ -189,7 +200,7 @@ struct ContentView: View {
     /// gate() variant that also accepts an action closure for the button.
     private func gate(message: String, button: String?, action: @escaping () -> Void) -> some View {
         VStack(spacing: 18) {
-            Text("snapsift").font(.system(size: 30, weight: .bold)).foregroundStyle(Color.reefMint)
+            Text("snapsift").font(.largeTitle.weight(.bold)).foregroundStyle(Color.reefMint)
             Text(message)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(Color.reefTextDim)
@@ -199,8 +210,11 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
             }
         }
+        .padding(CVERSpacing.xxl)
+        .liquidGlassCard(cornerRadius: CVERRadius.panel)
+        .shadow(color: .black.opacity(0.25), radius: 12, y: 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.reefGround)
+        .background(ReefBackdrop())
         .toolbar { ToolbarItem { languageMenu } }
     }
 
@@ -235,6 +249,7 @@ struct ContentView: View {
                     .frame(minWidth: detailMinWidth, maxWidth: .infinity)
                     .safeAreaInset(edge: .top) { scopeBar }
                     .safeAreaInset(edge: .top) { staleRestoreBar }
+                    .safeAreaInset(edge: .top) { commitNoticeBar }
                 if showHelp {
                     Divider()
                     helpPanel
@@ -244,6 +259,9 @@ struct ContentView: View {
             }
         }
         .toolbar { toolbar }
+        // Menu-bar bridge: publishes the primary actions + their enablement to
+        // SnapsiftMenuCommands. The ⌘-shortcuts live on the menu items only.
+        .focusedSceneValue(\.snapsiftActions, menuBridge)
         .safeAreaInset(edge: .bottom) { statusBar }
         .overlay(alignment: .top) { bannerView }
         .overlay { if previewID != nil { previewOverlay } }
@@ -448,8 +466,9 @@ struct ContentView: View {
                     .font(.callout).foregroundStyle(Color.reefText)
                     .multilineTextAlignment(.center)
             }
-            .padding(24)
-            .background(Color.reefDeep, in: RoundedRectangle(cornerRadius: 12))
+            .padding(CVERSpacing.xl)
+            .liquidGlassCard(cornerRadius: CVERRadius.panel)
+            .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
         }
         .contentShape(Rectangle())   // swallow all mouse input underneath
     }
@@ -482,6 +501,24 @@ struct ContentView: View {
         withAnimation(.easeOut(duration: 0.18)) { showHelp.toggle() }
     }
 
+    /// The menu-bar action bridge (see Commands.swift). Enablement mirrors the
+    /// toolbar's disabled logic; the model guards stay the final authority.
+    private var menuBridge: SnapsiftActions {
+        let busy = model.isScanning || model.refiningFaces || model.isWritingAlbums || deleting
+        return SnapsiftActions(
+            canScan: !busy,
+            canRefineFaces: !busy && !model.groups.isEmpty,
+            canWriteAlbums: !busy && !writingAlbums && !model.groups.isEmpty,
+            canDelete: !busy && model.totalDeletions > 0,
+            scan: { requestScan($0) },
+            refineFaces: { Task { await model.refineWithFaces(t) } },
+            writeAlbums: { Task { await runWriteAlbums() } },
+            deleteMarked: { Task { await runDelete() } },
+            showHistory: { showHistorySheet = true },
+            toggleHelp: { toggleHelp() }
+        )
+    }
+
     /// The keyboard cheat sheet, docked as a non-modal column on the trailing
     /// edge. It stays put — filling the otherwise-empty right side — until "?" is
     /// pressed again or the ✕ is tapped.
@@ -499,7 +536,10 @@ struct ContentView: View {
                     .help(t.helpClose())
                     .accessibilityLabel(t.helpClose())
                 }
-                ForEach(t.helpRows(), id: \.0) { row in
+                // id: \.offset, not \.0 — key labels repeat across zones
+                // ("1–9" appears for grid AND loupe), and duplicate ForEach
+                // IDs are undefined behavior that scrambles the rendered rows.
+                ForEach(Array(t.helpRows().enumerated()), id: \.offset) { _, row in
                     HStack(alignment: .top, spacing: 12) {
                         Text(row.0).font(.system(.callout, design: .monospaced).weight(.semibold))
                             .foregroundStyle(.white).frame(width: 116, alignment: .leading)
@@ -512,7 +552,9 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxHeight: .infinity)
-        .background(Color.reefDeep)
+        // Frosted teal to match the sidebar — same chrome, same recipe.
+        .background(Color.reefDeep.opacity(0.55))
+        .background(.ultraThinMaterial)
     }
 
     /// Dead-focus rescue. SwiftUI's focus can end up nowhere (first responder
@@ -820,26 +862,36 @@ struct ContentView: View {
 
     private func categoryRow(_ c: CategoryBucket) -> some View {
         let sel = c.id == categorySelection
-        return VStack(alignment: .leading, spacing: 3) {
-            Text(c.display).font(.headline)
-                .foregroundStyle(sel ? .white : Color.reefMint)
-            Text(t.frames(c.count)).font(.caption)
-                .foregroundStyle(sel ? Color.white.opacity(0.85) : Color.reefTextDim)
+        return Hovering { hovering in
+            VStack(alignment: .leading, spacing: 3) {
+                Text(c.display).font(.headline)
+                    .foregroundStyle(sel ? .white : Color.reefMint)
+                Text(t.frames(c.count)).font(.caption)
+                    .foregroundStyle(sel ? Color.white.opacity(0.85) : Color.reefTextDim)
+            }
+            .padding(.vertical, CVERSpacing.xs)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture { categorySelection = c.id; sidebarFocused = true }
+            // The deliberate non-List(selection:) styling loses the built-in
+            // row semantics — restore them for VoiceOver: one combined,
+            // activatable element that reports its selection state.
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(sel ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction { categorySelection = c.id; sidebarFocused = true }
+            .listRowBackground(
+                RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)
+                    .fill(sel ? Color.reefTeal
+                              : hovering ? Color.reefMint.opacity(0.08) : Color.clear)
+                    .padding(.vertical, 1)
+            )
         }
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .onTapGesture { categorySelection = c.id; sidebarFocused = true }
-        .listRowBackground(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(sel ? Color.reefTeal : Color.clear)
-                .padding(.vertical, 1)
-        )
     }
 
     private func sidebarRow(_ g: ReviewGroup) -> some View {
         let sel = g.id == selection
-        return VStack(alignment: .leading, spacing: 3) {
+        return Hovering { hovering in
+          VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Text(t.frames(g.photos.count))
                     .font(.headline)
@@ -856,19 +908,26 @@ struct ContentView: View {
             Text(t.sidebarSubtitle(span: g.spanSec, delete: g.deletionIDs.count))
                 .font(.caption)
                 .foregroundStyle(sel ? Color.white.opacity(0.85) : Color.reefTextDim)
+          }
+          .padding(.vertical, CVERSpacing.xs)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .contentShape(Rectangle())
+          // Clicking a row must also reclaim keyboard focus: once first-responder
+          // is lost (relaunch, app switching), no scan-end onChange will re-arm
+          // it, and without this the whole keyboard flow silently dies.
+          .onTapGesture { selection = g.id; sidebarFocused = true }
+          // Same VoiceOver restoration as categoryRow: combined element,
+          // button + selected traits, activatable.
+          .accessibilityElement(children: .combine)
+          .accessibilityAddTraits(sel ? [.isButton, .isSelected] : .isButton)
+          .accessibilityAction { selection = g.id; sidebarFocused = true }
+          .listRowBackground(
+              RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)
+                  .fill(sel ? Color.reefTeal
+                            : hovering ? Color.reefMint.opacity(0.08) : Color.clear)
+                  .padding(.vertical, 1)
+          )
         }
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        // Clicking a row must also reclaim keyboard focus: once first-responder
-        // is lost (relaunch, app switching), no scan-end onChange will re-arm
-        // it, and without this the whole keyboard flow silently dies.
-        .onTapGesture { selection = g.id; sidebarFocused = true }
-        .listRowBackground(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(sel ? Color.reefTeal : Color.clear)
-                .padding(.vertical, 1)
-        )
         .id(g.id)
     }
 
@@ -946,7 +1005,8 @@ struct ContentView: View {
             Text(text).foregroundStyle(Color.reefTextDim)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.reefGround)
+        // No photos on this surface — let the frosted backdrop through.
+        .background(ReefBackdrop())
     }
 
     /// The single, authoritative scan-progress display. Lives in the detail
@@ -998,7 +1058,7 @@ struct ContentView: View {
             } else {
                 Image(systemName: "rectangle.stack.badge.minus")
                     .font(.system(size: 52)).foregroundStyle(Color.reefMint)
-                Text("snapsift").font(.system(size: 26, weight: .bold)).foregroundStyle(.white)
+                Text("snapsift").font(.largeTitle.weight(.bold)).foregroundStyle(.white)
                 Text("v\(appVersion)")
                     .font(.caption.monospaced())
                     // One dilution step only (reefTextDim is already diluted) so
@@ -1027,15 +1087,16 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: 720)
-                .padding(.top, 8)
-                .padding(.horizontal, 24)
+                .padding(.top, CVERSpacing.sm)
+                .padding(.horizontal, CVERSpacing.xl)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 460)
-        .padding(.vertical, 24)
+        .padding(.vertical, CVERSpacing.xl)
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .background(Color.reefGround)
+      // No photos on the onboarding surface — frosted backdrop, not flat fill.
+      .background(ReefBackdrop())
     }
 
     /// Adaptive columns so the start cards wrap (and never clip) as the window
@@ -1056,10 +1117,10 @@ struct ContentView: View {
                     .multilineTextAlignment(.center).lineLimit(3)
             }
             .frame(maxWidth: .infinity, minHeight: 140)
-            .padding(12)
+            .padding(CVERSpacing.md)
             .onboardCardSurface(prominent: prominent)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableCard())
     }
 
     // MARK: scope bar (media type + source picker)
@@ -1076,12 +1137,13 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .accessibilityLabel(t.scopeMediaLabel())
             .disabled(model.isScanning)
             .frame(maxWidth: 260)
 
             sourceMenu
         }
-        .padding(.horizontal, 16).padding(.vertical, 7)
+        .padding(.horizontal, CVERSpacing.lg).padding(.vertical, 7)
         .frame(maxWidth: .infinity)
         .background(.ultraThinMaterial)
         .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .bottom)
@@ -1112,9 +1174,38 @@ struct ContentView: View {
                 .foregroundStyle(Color.reefTextDim)
                 .accessibilityLabel(t.staleRestoreDismiss())
             }
-            .padding(.horizontal, 16).padding(.vertical, 8)
+            .padding(.horizontal, CVERSpacing.lg).padding(.vertical, CVERSpacing.sm)
             .frame(maxWidth: .infinity)
             .background(Color.reefAmber.opacity(0.12))
+            .background(.ultraThinMaterial)
+            .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .bottom)
+        }
+    }
+
+    /// Persistent post-commit report of everything the delete HELD BACK — the
+    /// same treatment staleRestoreBar earned, for the same reason: the news
+    /// arrives at the exact moment the user is least likely to be watching.
+    @ViewBuilder private var commitNoticeBar: some View {
+        if let notice = commitNotice {
+            HStack(spacing: 10) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundStyle(Color.reefMint)
+                Text(notice)
+                    .font(.callout)
+                    .foregroundStyle(Color.reefText)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button { commitNotice = nil } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.reefTextDim)
+                .accessibilityLabel(t.staleRestoreDismiss())
+            }
+            .padding(.horizontal, CVERSpacing.lg).padding(.vertical, CVERSpacing.sm)
+            .frame(maxWidth: .infinity)
+            .background(Color.reefTeal.opacity(0.12))
+            .background(.ultraThinMaterial)
             .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .bottom)
         }
     }
@@ -1161,9 +1252,10 @@ struct ContentView: View {
             }
             .foregroundStyle(Color.reefMint)
             .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(Color.reefDeep.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
+            .background(Color.reefDeep.opacity(0.6),
+                        in: RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 7)
+                RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous)
                     .strokeBorder(Color.reefBorder, lineWidth: 1)
             )
         }
@@ -1240,7 +1332,6 @@ struct ContentView: View {
                 // A commit must never race a pipeline that is rebuilding
                 // `groups` — same gate as every other toolbar action.
                 .disabled(deleting || model.isScanning || model.refiningFaces)
-                .keyboardShortcut(.delete, modifiers: .command)
             }
         }
         .font(.caption)
@@ -1253,8 +1344,13 @@ struct ContentView: View {
         if let banner {
             Text(banner)
                 .font(.callout).foregroundStyle(.white)
-                .padding(.horizontal, 16).padding(.vertical, 10)
-                .background(Color.reefTeal, in: Capsule())
+                .padding(.horizontal, CVERSpacing.lg).padding(.vertical, 10)
+                // Glass capsule: teal identity over frosted material with a
+                // hairline — depth instead of a flat colored blob.
+                .background(Color.reefTeal.opacity(0.85), in: Capsule())
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
                 .padding(.top, 10)
                 .transition(.move(edge: .top).combined(with: .opacity))
         }
@@ -1301,40 +1397,39 @@ struct ContentView: View {
                 Label(t.scan(), systemImage: "sparkle.magnifyingglass")
             }
             .help(t.tipScan())
-            .disabled(model.isScanning || model.refiningFaces)
-            .keyboardShortcut("1", modifiers: .command)
+            // deleting/isWritingAlbums: a scan started while either commit is
+            // in flight races it over `groups` — mirror the model guards here
+            // (and in menuBridge.canScan, which owns the ⌘-shortcuts now) so
+            // the action can't even present the rescan dialog.
+            .disabled(model.isScanning || model.refiningFaces || model.isWritingAlbums || deleting)
         }
         ToolbarItem(placement: .primaryAction) {
             Button { requestScan(.lookAlikes) } label: {
                 Label(t.lookAlikes(), systemImage: "rectangle.on.rectangle")
             }
             .help(t.tipLookAlikes())
-            .disabled(model.isScanning || model.refiningFaces)
-            .keyboardShortcut("2", modifiers: .command)
+            .disabled(model.isScanning || model.refiningFaces || model.isWritingAlbums || deleting)
         }
         ToolbarItem(placement: .primaryAction) {
             Button { requestScan(.similarSets) } label: {
                 Label(t.similarSets(), systemImage: "square.grid.3x3.topleft.filled")
             }
             .help(t.tipSimilarSets())
-            .disabled(model.isScanning || model.refiningFaces)
-            .keyboardShortcut("3", modifiers: .command)
+            .disabled(model.isScanning || model.refiningFaces || model.isWritingAlbums || deleting)
         }
         ToolbarItem(placement: .primaryAction) {
             Button { Task { await model.refineWithFaces(t) } } label: {
                 Label(t.faces(model.facesApplied), systemImage: "face.smiling")
             }
             .help(t.tipFaces())
-            .disabled(model.groups.isEmpty || model.refiningFaces || model.isScanning)
-            .keyboardShortcut("4", modifiers: .command)
+            .disabled(model.groups.isEmpty || model.refiningFaces || model.isScanning || model.isWritingAlbums || deleting)
         }
         ToolbarItem(placement: .primaryAction) {
             Button { Task { await runWriteAlbums() } } label: {
                 Label(t.sortIntoAlbums(), systemImage: "rectangle.stack.badge.plus")
             }
             .help(t.tipSortIntoAlbums())
-            .disabled(model.groups.isEmpty || model.isWritingAlbums || writingAlbums || model.isScanning)
-            .keyboardShortcut("5", modifiers: .command)
+            .disabled(model.groups.isEmpty || model.isWritingAlbums || writingAlbums || model.isScanning || deleting)
         }
         // FIX 3: The toolbar Delete button stays for discoverability, but the
         // keyboard shortcut moves to the always-visible status-bar button so it
@@ -1344,7 +1439,7 @@ struct ContentView: View {
                 Label(t.deleteN(model.totalDeletions), systemImage: "trash")
             }
             .tint(.reefRed)
-            .disabled(model.totalDeletions == 0 || deleting || model.isScanning || model.refiningFaces)
+            .disabled(model.totalDeletions == 0 || deleting || model.isScanning || model.refiningFaces || model.isWritingAlbums)
         }
         // Feature 4: history toolbar button
         ToolbarItem {
@@ -1359,7 +1454,6 @@ struct ContentView: View {
             }
             .help(t.helpTitle())
             .accessibilityLabel(t.helpTitle())   // icon-only: VoiceOver needs a name
-            .keyboardShortcut("?", modifiers: .command)
         }
         ToolbarItem { languageMenu }
         #endif
@@ -1425,6 +1519,7 @@ struct ContentView: View {
         do {
             var protectedDropped = 0
             var burstSkipped = 0
+            var undeterminedSkipped = 0
             let n = try await model.deleteReviewed(
                 staleWarning: { [self] staleCount, foundCount in
                     // FIX 3: stale-asset warning — suspend until the user responds.
@@ -1435,22 +1530,24 @@ struct ContentView: View {
                     }
                 },
                 onProtectedDropped: { protectedDropped = $0 },
-                onBurstSkipped: { burstSkipped = $0 }
+                onBurstSkipped: { burstSkipped = $0 },
+                onUndeterminedSkipped: { undeterminedSkipped = $0 }
             )
             if !model.groups.contains(where: { $0.id == selection }) { selection = nil }
             // FIX 5: success banner explicitly states the 30-day recovery window
             // (mirrors the pre-commit sheet language — same promise, same place).
-            // Also honestly report anything the commit HELD BACK: frames protected
-            // since the scan, and burst representatives skipped to spare unreviewed
-            // stack siblings — never let those vanish from the count silently.
-            var parts: [String] = []
-            if n > 0 { parts.append(t.deletedBanner(n)) }
-            if protectedDropped > 0 { parts.append(t.commitProtectedKept(protectedDropped)) }
-            if burstSkipped > 0 { parts.append(t.commitBurstSkipped(burstSkipped)) }
-            // Honestly report a missing audit record — the delete stood but its
-            // accountability line couldn't be written (disk full is the norm here).
-            if model.lastDeleteAuditFailed { parts.append(t.commitAuditFailed()) }
-            if !parts.isEmpty { showBanner(parts.joined(separator: "  ")) }
+            // The pure success message is a transient toast; anything the commit
+            // HELD BACK (frames protected since the scan, burst representatives
+            // skipped, edit-state-undetermined frames, a missing audit record)
+            // is trust-relevant and lands at the exact moment the user looks
+            // away — it gets the persistent bar, dismissed only by hand.
+            if n > 0 { showBanner(t.deletedBanner(n)) }
+            var held: [String] = []
+            if protectedDropped > 0 { held.append(t.commitProtectedKept(protectedDropped)) }
+            if burstSkipped > 0 { held.append(t.commitBurstSkipped(burstSkipped)) }
+            if undeterminedSkipped > 0 { held.append(t.commitUndeterminedSkipped(undeterminedSkipped)) }
+            if model.lastDeleteAuditFailed { held.append(t.commitAuditFailed()) }
+            if !held.isEmpty { commitNotice = held.joined(separator: "  ·  ") }
         } catch {
             // Cancelling macOS's own delete-confirmation sheet is a normal user
             // decision, not a failure — it must never trigger the scary
@@ -1576,9 +1673,9 @@ struct GroupReview: View {
                                 .foregroundStyle(Color.reefAmber)
                                 .padding(.horizontal, 10).padding(.vertical, 6)
                                 .background(Color.reefAmber.opacity(0.15),
-                                            in: RoundedRectangle(cornerRadius: 8))
+                                            in: RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
+                                    RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous)
                                         .strokeBorder(Color.reefAmber.opacity(0.4), lineWidth: 1)
                                 )
                         }
@@ -1614,7 +1711,7 @@ struct GroupReview: View {
                 // so the row math reflows on window resize.
                 justifiedGallery
             }
-            .padding(16)
+            .padding(CVERSpacing.lg)
         }
         .background(Color.reefGround)
         .navigationTitle(t.frames(group.photos.count))
@@ -1689,7 +1786,7 @@ struct GroupReview: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        // Measure the available content width (already inside the .padding(16)).
+        // Measure the available content width (already inside the .padding(CVERSpacing.lg)).
         .background(
             GeometryReader { geo in
                 Color.clear.preference(key: GalleryWidthKey.self, value: geo.size.width)
@@ -1733,7 +1830,7 @@ struct GroupReview: View {
             badge(p: p, keep: keep, del: del, exactSuggested: isExactSuggested)
             if index < 9 {
                 Text("\(index + 1)")
-                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .font(.system(.subheadline, design: .monospaced).weight(.bold))
                     .frame(width: 18, height: 18)
                     .background(Color.reefGround.opacity(0.75), in: Circle())
                     .foregroundStyle(Color.reefMint)
@@ -1745,7 +1842,7 @@ struct GroupReview: View {
             Text(p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
                 .font(.caption2).lineLimit(1).truncationMode(.middle)
                 .foregroundStyle(Color.reefText)
-                .padding(.horizontal, 6).padding(.vertical, 4)
+                .padding(.horizontal, 6).padding(.vertical, CVERSpacing.xs)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     LinearGradient(colors: [.clear, Color.reefGround.opacity(0.85)],
@@ -1755,11 +1852,11 @@ struct GroupReview: View {
         }
         .frame(width: imageSize.width, height: imageSize.height)
         .background(Color.reefDeep)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(border, lineWidth: 2))
+        .clipShape(RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous).strokeBorder(border, lineWidth: 2))
         .overlay {
             if focused {
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous)
                     .strokeBorder(.white, style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
                     .padding(2)
             }
@@ -1767,15 +1864,16 @@ struct GroupReview: View {
         .overlay(alignment: .bottom) {
             if protectedHintFrame == p.uuid {
                 Text(t.protectedHint())
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 8).padding(.vertical, 5)
-                    .background(Color.reefAmber.opacity(0.92), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, CVERSpacing.sm).padding(.vertical, 5)
+                    .background(Color.reefAmber.opacity(0.92), in: RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
                     .padding(.bottom, 6)
                     .transition(.opacity.combined(with: .scale(scale: 0.92)))
             }
         }
         .contentShape(Rectangle())
+        .cardHover()
         .onTapGesture {
             // Desktop click = promote + reclaim grid focus (onDesktopTap). Touch
             // tap = open the loupe — inspect first, decide with swipes there;
@@ -1864,17 +1962,17 @@ struct GroupReview: View {
     @ViewBuilder
     private func chip(symbol: String, text: String?, _ bg: Color, _ fg: Color) -> some View {
         HStack(spacing: 3) {
-            Image(systemName: symbol).font(.system(size: 11, weight: .heavy))
+            Image(systemName: symbol).font(.subheadline.weight(.heavy))
             if let text {
-                Text(text).font(.system(size: 11, weight: .bold))
+                Text(text).font(.subheadline.weight(.bold))
             }
         }
         .foregroundStyle(fg)
         .padding(.horizontal, text == nil ? 5 : 7)
-        .padding(.vertical, 4)
-        .background(bg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .padding(.vertical, CVERSpacing.xs)
+        .background(bg, in: RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)
                 .strokeBorder(.white.opacity(0.22), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.45), radius: 2, y: 1)
@@ -1920,19 +2018,22 @@ struct CategoryBrowse: View {
                         AssetThumbnail(asset: model.asset(for: p.uuid),
                                        manager: model.imageManager,
                                        box: CGSize(width: 130, height: 130), fill: true)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .clipShape(RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous))
                             .overlay(alignment: .topTrailing) {
                                 if p.favorite {
-                                    Text("★").font(.system(size: 10, weight: .bold))
+                                    Text("★").font(.footnote.weight(.bold))
                                         .padding(3).background(Color.reefAmber)
                                         .foregroundStyle(Color(hex: 0x1a1203))
-                                        .clipShape(RoundedRectangle(cornerRadius: 4)).padding(4)
+                                        .clipShape(RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)).padding(CVERSpacing.xs)
                                 }
                             }
+                            // One spoken element per tile, not an unlabeled image.
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
                     }
                 }
             }
-            .padding(16)
+            .padding(CVERSpacing.lg)
         }
         .background(Color.reefGround)
         .navigationTitle(category.display)
@@ -1983,10 +2084,10 @@ struct LoupeOverlay: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 6) {
                     Text(hudText)
-                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .font(.system(.body, design: .monospaced).weight(.semibold))
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.horizontal, CVERSpacing.md).padding(.vertical, 7)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
                         .padding(.top, 14).padding(.leading, 14)
                     Spacer()
                     // Pass 2b: Save Rotation button in loupe HUD — visible only when
@@ -2002,8 +2103,8 @@ struct LoupeOverlay: View {
                                     .font(.callout.weight(.semibold))
                             }
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 12).padding(.vertical, 7)
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                            .padding(.horizontal, CVERSpacing.md).padding(.vertical, 7)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
                         }
                         .buttonStyle(.plain)
                         .padding(.top, 14)
@@ -2032,9 +2133,9 @@ struct LoupeOverlay: View {
         .overlay(alignment: .bottom) {
             if protectedHintVisible {
                 Text(t.protectedHintTouch())
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .padding(.horizontal, 14).padding(.vertical, CVERSpacing.sm)
                     .background(Color.reefAmber.opacity(0.92), in: Capsule())
                     .padding(.bottom, 40)
                     .transition(.opacity.combined(with: .scale(scale: 0.92)))

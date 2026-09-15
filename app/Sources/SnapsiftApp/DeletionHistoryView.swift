@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import SnapsiftCore
+import Signet
 
 // MARK: - History view
 
@@ -73,7 +74,7 @@ struct DeletionHistoryView: View {
                             sessionRow(sessions[idx])
                         }
                     }
-                    .padding(16)
+                    .padding(CVERSpacing.lg)
                 }
             }
 
@@ -94,7 +95,7 @@ struct DeletionHistoryView: View {
                     .tint(.reefTeal)
             }
             .padding(.horizontal, 20)
-            .padding(.vertical, 12)
+            .padding(.vertical, CVERSpacing.md)
         }
         .desktopSheetFrame(minWidth: 520, minHeight: 360, maxHeight: 600)
         .background(Color.reefGround)
@@ -191,11 +192,11 @@ struct DeletionHistoryView: View {
             }
             .padding(.top, 2)
         }
-        .padding(12)
+        .padding(CVERSpacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.reefDeep, in: RoundedRectangle(cornerRadius: 10))
+        .background(Color.reefDeep, in: RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous)
                 .strokeBorder(Color.reefBorder, lineWidth: 1)
         )
     }

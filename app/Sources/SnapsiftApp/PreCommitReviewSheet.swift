@@ -58,7 +58,7 @@ struct PreCommitReviewSheet: View {
                     .font(.callout)
                     .foregroundStyle(Color.reefTextDim)
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, CVERSpacing.xl)
             .padding(.vertical, 18)
 
             Divider().background(Color.reefBorder)
@@ -112,7 +112,7 @@ struct PreCommitReviewSheet: View {
                         GroupPreCommitRow(group: g, model: model, t: t)
                     }
                 }
-                .padding(16)
+                .padding(CVERSpacing.lg)
             }
             // Let the list flex: on iOS it fills the full-screen sheet (no more
             // 420pt letterbox with dead space under the footer); on macOS it gets
@@ -169,11 +169,14 @@ private struct GroupPreCommitRow: View {
                                    box: CGSize(width: 64, height: 64),
                                    quarterTurns: model.rotation(for: keeper.uuid),
                                    fill: true)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .clipShape(RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 6)
+                            RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)
                                 .strokeBorder(Color.reefGreen, lineWidth: 2)
                         )
+                        // Decorative: the KEEP text + filename beside it carry
+                        // the meaning — don't read an unlabeled image first.
+                        .accessibilityHidden(true)
 
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 4) {
@@ -230,9 +233,9 @@ private struct GroupPreCommitRow: View {
                                                    quarterTurns: model.rotation(for: p.uuid),
                                                    fill: true)
                                         .opacity(0.34)
-                                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                                        .clipShape(RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous))
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 5)
+                                            RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)
                                                 .strokeBorder(
                                                     p.isProtected ? Color.reefAmber : Color.reefRed,
                                                     lineWidth: 1.5
@@ -240,11 +243,16 @@ private struct GroupPreCommitRow: View {
                                         )
                                     if p.isProtected {
                                         Image(systemName: "lock.fill")
-                                            .font(.system(size: 10, weight: .bold))
+                                            .font(.footnote.weight(.bold))
                                             .foregroundStyle(Color.reefAmber)
                                     }
                                 }
                                 .frame(width: 52, height: 52)
+                                // These tiles are the removal list itself — a
+                                // VoiceOver user must hear WHICH photo, not
+                                // "image": speak the filename per tile.
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityLabel(p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
                             }
                         }
                     }
@@ -252,9 +260,9 @@ private struct GroupPreCommitRow: View {
             }
         }
         .padding(10)
-        .background(Color.reefDeep, in: RoundedRectangle(cornerRadius: 10))
+        .background(Color.reefDeep, in: RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous)
                 .strokeBorder(Color.reefBorder, lineWidth: 1)
         )
     }

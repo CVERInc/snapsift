@@ -203,7 +203,10 @@ final class LibraryModel: ObservableObject {
     /// A running face-refine mutates keepers concurrently, so the two pipelines
     /// are mutually exclusive here (and again in `refineWithFaces`).
     func startScan(_ kind: ScanKind, _ t: L10n) {
-        guard !isScanning, !refiningFaces, !isDeleting else { return }
+        // isWritingAlbums: writeAlbums suspends across performChanges and then
+        // saves a snapshot — a scan started in that window would wipe `groups`
+        // out from under it (the save itself is also guarded, belt-and-braces).
+        guard !isScanning, !refiningFaces, !isDeleting, !isWritingAlbums else { return }
         // Set synchronously — the scan method body runs in a separately-enqueued
         // task, and a guard that only trips once the body executes lets a second
         // startScan in the same runloop turn clobber scanTask/abortFlag (Cancel
@@ -600,7 +603,9 @@ final class LibraryModel: ObservableObject {
         }
         scanNotice = doneNotice
         await releaseScanCaches()
-        saveSnapshotNow()
+        // Unguarded variant: this pipeline's own defer hasn't cleared
+        // `isScanning` yet, and `groups` is complete here by construction.
+        saveSnapshotIgnoringScanState()
     }
 
     /// Release scan-only working memory once verdicts are materialized into
@@ -867,7 +872,9 @@ final class LibraryModel: ObservableObject {
         }
         scanNotice = doneNotice
         await releaseScanCaches()
-        saveSnapshotNow()
+        // Unguarded variant: this pipeline's own defer hasn't cleared
+        // `isScanning` yet, and `groups` is complete here by construction.
+        saveSnapshotIgnoringScanState()
     }
 
     /// "Similar sets": find sets of photos you took of the same thing — several
@@ -993,7 +1000,9 @@ final class LibraryModel: ObservableObject {
         }
         scanNotice = catNotice
         await releaseScanCaches()
-        saveSnapshotNow()
+        // Unguarded variant: this pipeline's own defer hasn't cleared
+        // `isScanning` yet, and `groups` is complete here by construction.
+        saveSnapshotIgnoringScanState()
     }
 
     /// Name a set from the Vision tags of its representative frame, prettified by
@@ -1437,10 +1446,29 @@ final class LibraryModel: ObservableObject {
         if wasCurrent { scanChangeToken = ScanSnapshotStore.currentChangeTokenData() }
     }
 
-    /// Persist the current review state immediately (scan end, after deletes).
-    /// Writes are serialized through ScanSnapshotStore (see saveAsync) so a newer
-    /// snapshot can never be overwritten by an older one still in flight.
+    /// Persist the current review state immediately (after deletes, album
+    /// writes, rotation saves). Writes are serialized through ScanSnapshotStore
+    /// (see saveAsync) so a newer snapshot can never be overwritten by an older
+    /// one still in flight.
+    ///
+    /// Refuses to write while a scan is rebuilding `groups`: an async caller
+    /// resuming mid-scan (writeAlbums holds an await across performChanges for
+    /// tens of seconds; rotation save likewise) would otherwise serialize the
+    /// WIPED state over last-scan.json — the sole store of the user's review
+    /// decisions — and a subsequent cancel/crash would restore nothing. The
+    /// scan pipelines persist their own completed state via the unguarded
+    /// variant below (their `defer` hasn't cleared `isScanning` yet at that
+    /// point). Skipping is safe for every guarded caller: the scan that
+    /// preempted them ends with its own fresh save.
     func saveSnapshotNow() {
+        guard !isScanning else { return }
+        saveSnapshotIgnoringScanState()
+    }
+
+    /// Unguarded write for the scan pipelines' natural end, where `groups` is
+    /// fully rebuilt but `isScanning` is still true. Everyone else goes through
+    /// `saveSnapshotNow()`.
+    private func saveSnapshotIgnoringScanState() {
         guard hasScanned else { return }
         snapshotSaveTask?.cancel()
         lastSnapshotWrite = Date()
@@ -1494,8 +1522,10 @@ final class LibraryModel: ObservableObject {
             guard !Task.isCancelled else { return }
             // Re-check at fire time: if a scan started inside the debounce
             // window, `groups` is already wiped — persisting now would destroy
-            // the previous snapshot.
-            guard self?.isScanning == false else { return }
+            // the previous snapshot. Same for a delete: mid-performChanges the
+            // groups still show pre-delete marks for photos Photos is removing;
+            // deleteReviewed writes its own fresh snapshot when it finishes.
+            guard self?.isScanning == false, self?.isDeleting == false else { return }
             self?.saveSnapshotNow()
         }
     }
@@ -1742,14 +1772,17 @@ final class LibraryModel: ObservableObject {
     func deleteReviewed(
         staleWarning: ((Int, Int) async -> Bool)? = nil,
         onProtectedDropped: ((Int) -> Void)? = nil,
-        onBurstSkipped: ((Int) -> Void)? = nil
+        onBurstSkipped: ((Int) -> Void)? = nil,
+        onUndeterminedSkipped: ((Int) -> Void)? = nil
     ) async throws -> Int {
         // Never commit while a scan or face-refine is rebuilding group state:
         // a delete would race the pipeline over `groups` and persist a
         // half-built snapshot over the previous complete one. And never
         // re-enter: a second confirm racing the first would double-book the
         // audit log and delete against indices the first is rewriting.
-        guard !isScanning, !refiningFaces, !isDeleting else { return 0 }
+        // isWritingAlbums: symmetric with writeAlbums' own !isDeleting guard —
+        // the two commits both mutate the library and must never interleave.
+        guard !isScanning, !refiningFaces, !isDeleting, !isWritingAlbums else { return 0 }
         isDeleting = true
         defer { isDeleting = false }
         var ids = groups.flatMap(\.deletionIDs)
@@ -1803,30 +1836,47 @@ final class LibraryModel: ObservableObject {
             // no-FDA user whose sync-lane breaker has tripped, nothing can be:
             // the stored value is itself an unverified guess there, so an
             // undetermined frame must resolve to the protective direction and
-            // be un-marked — never coerced to "not edited" at the last gate
-            // before performChanges (same rule as the paired-video check:
-            // cannot verify → cannot delete).
+            // be held out of THIS commit — never coerced to "not edited" at
+            // the last gate before performChanges (same rule as the paired-video
+            // check: cannot verify → cannot delete). Held out, NOT un-marked:
+            // the user's mark in `rejected` is their review work product, and
+            // "we couldn't read the edited flag right now" is a transient
+            // condition, not new protection — a later commit (breaker reset,
+            // FDA granted) re-checks instead of silently discarding the mark.
             let flags: [(gi: Int, uuid: String, fav: Bool, edited: Bool, undetermined: Bool)] = sweepTargets.map {
                 ($0.gi, $0.uuid, $0.asset.isFavorite, editedNow[$0.uuid] ?? false, editedNow[$0.uuid] == nil)
             }
             var dropped = 0
+            var undeterminedHeld: Set<String> = []
             for (gi, uuid, fav, edited, undetermined) in flags where fav || edited || undetermined {
-                guard let j = groups[gi].photos.firstIndex(where: { $0.uuid == uuid }) else { continue }
                 if fav || edited {
+                    guard let j = groups[gi].photos.firstIndex(where: { $0.uuid == uuid }) else { continue }
                     // Real new protection — upgrade the stored flags so the UI
-                    // and every later guard agree. An undetermined frame keeps
-                    // its stored flags (stamping edited=true would be a lie);
-                    // it is only un-marked for THIS commit.
+                    // and every later guard agree, and clear the mark for good.
                     groups[gi].photos[j] = groups[gi].photos[j].with(favorite: fav, edited: edited)
+                    groups[gi].rejected.remove(uuid)
+                    groups[gi].autoSeeded.remove(uuid)
+                    dropped += 1
+                } else {
+                    // Undetermined only: keep the mark, skip the frame this commit.
+                    undeterminedHeld.insert(uuid)
                 }
-                groups[gi].rejected.remove(uuid)
-                groups[gi].autoSeeded.remove(uuid)
-                dropped += 1
             }
             if dropped > 0 {
                 onProtectedDropped?(dropped)
                 ids = groups.flatMap(\.deletionIDs)   // shrink the commit set
-                guard !ids.isEmpty else { saveSnapshotNow(); return 0 }
+            }
+            if !undeterminedHeld.isEmpty {
+                onUndeterminedSkipped?(undeterminedHeld.count)
+                ids.removeAll { undeterminedHeld.contains($0) }
+            }
+            if dropped > 0 || !undeterminedHeld.isEmpty {
+                guard !ids.isEmpty else {
+                    // Persist only when flags were actually upgraded; a purely
+                    // held-back commit mutated nothing worth writing.
+                    if dropped > 0 { saveSnapshotNow() }
+                    return 0
+                }
             }
         }
 

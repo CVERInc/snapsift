@@ -3,11 +3,12 @@ from scan import Photo, cluster, quality_score
 
 
 def p(pk, taken_at, *, w=4032, h=3024, size=2_000_000, uti="public.heic",
-      kind=0, fav=False, quality=0.0):
+      kind=0, fav=False, edited=False, quality=0.0):
     """Build a Photo with sensible burst-frame defaults."""
     return Photo(pk=pk, uuid=f"U{pk}", filename=f"IMG_{pk}.heic",
                  taken_at=float(taken_at), width=w, height=h, size=size,
-                 uti=uti, kind=kind, favorite=fav, quality=quality)
+                 uti=uti, kind=kind, favorite=fav, edited=edited,
+                 quality=quality)
 
 
 def sizes(groups):

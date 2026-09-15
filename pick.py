@@ -30,9 +30,12 @@ Keeper heuristic (in order, highest first):
      quality version" (more bits = less compression).
   7. If still tied, keep the earliest one (the original take).
 
-We never need pixel access here: the App layer precomputes the aesthetic score,
-sharpness, original-camera flag, edited flag and document flag on-device and
-hands them in. Anything not the keeper *and* not protected gets deleted.
+We never need pixel access here. scan.py provides `favorite`, `edited` and the
+aesthetic score straight from Photos.sqlite; `is_document`, `sharpness` and
+`original_camera` are Vision/pixel-derived and only present when the input
+came from the macOS app — when absent they are treated as unknown-falsy, so
+document protection is only in effect for app-produced input. Anything not the
+keeper *and* not protected gets deleted.
 
 Usage:
     python3 pick.py --input groups.json --output plan.json \\
@@ -132,6 +135,16 @@ def main():
     args = ap.parse_args()
 
     data = json.loads(args.input.read_text())
+
+    # Fail-loudly guard: a groups.json written by an older scan.py carries no
+    # `edited` flags at all, which silently downgrades protection to
+    # favorites-only (an edited frame would land in delete-uuids.txt). Warn so
+    # the user re-scans instead of trusting a weaker guarantee than documented.
+    sample = next((p for g in data["groups"] for p in g["photos"]), None)
+    if sample is not None and "edited" not in sample:
+        print("⚠️  This groups.json has no 'edited' flags (written by an older "
+              "scan.py?) — only favorites are protected. Re-run scan.py so "
+              "edited photos are never marked for deletion.", file=sys.stderr)
 
     plan_groups = []
     delete_uuids: list[str] = []

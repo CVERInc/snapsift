@@ -113,6 +113,7 @@ struct BigPreview: View {
     let onClose: () -> Void
 
     @State private var image: PlatformImage?
+    @State private var failed = false
     @State private var pct: Double = 0
     @State private var zoom: CGFloat = 1
     @State private var lastZoom: CGFloat = 1
@@ -176,6 +177,18 @@ struct BigPreview: View {
                     // Inset is handled inside the GeometryReader (avail − 48);
                     // a shadow keeps the frame readable against the dim backdrop.
                     .shadow(radius: 30)
+            } else if failed {
+                // Terminal state, not a forever-spinner (same rule as
+                // AssetThumbnail): this is the inspection step before a
+                // keep/delete decision — it must dead-end loudly, with a way out.
+                VStack(spacing: 10) {
+                    Image(systemName: "photo.badge.exclamationmark")
+                        .font(.system(size: 28))
+                        .foregroundStyle(Color.reefMint.opacity(0.6))
+                    Text(t.previewFailed()).font(.callout).foregroundStyle(Color.reefTextDim)
+                    Button(t.previewRetry()) { Task { await load() } }
+                        .buttonStyle(.bordered)
+                }
             } else {
                 VStack(spacing: 10) {
                     ProgressView(value: pct > 0 && pct < 1 ? pct : nil)
@@ -195,6 +208,7 @@ struct BigPreview: View {
     private func load() async {
         guard let asset else { return }
         zoom = 1; lastZoom = 1; pan = .zero; lastPan = .zero; image = nil; pct = 0
+        failed = false
         let opts = PHImageRequestOptions()
         opts.isNetworkAccessAllowed = true             // deliberate iCloud fetch
         opts.deliveryMode = .highQualityFormat         // single callback
@@ -206,6 +220,6 @@ struct BigPreview: View {
                 cont.resume(returning: img)
             }
         }
-        if let result { image = result }
+        if let result { image = result } else { failed = true }
     }
 }
