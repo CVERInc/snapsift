@@ -68,20 +68,20 @@ struct SnapsiftApp: App {
     // docs/UPDATES.md).
     //
     // Source checkouts and CI builds have NEITHER SUPublicEDKey NOR SUFeedURL:
-    // `build-app.sh` writes the feed URL only alongside a public key, precisely
-    // so this sentence is true. With no feed there is nothing to fetch, so such
-    // a build makes no update request at all and this updater simply reports
-    // `canCheckForUpdates == false` — which is what disables the menu item
-    // below. (An earlier version wrote SUFeedURL unconditionally; the updater
-    // then had a feed and no key, and depending on how Sparkle judged the
-    // ad-hoc signature either failed startup with a modal alert one second
-    // after launch or scheduled real background checks against oss.cver.net.)
+    // `build-app.sh` writes the feed URL only alongside a public key. Sparkle
+    // 2.10 would still START an updater without a feed (it only requires one
+    // once a check runs), flip canCheckForUpdates to true, and on the second
+    // launch ask "check automatically?" — so a keyless build does not start
+    // the updater at all: canCheckForUpdates stays false, the menu item stays
+    // disabled, no prompt, no request (review r3 P2-2). The official signed
+    // binary carries both keys and starts normally.
     private let updaterController: SPUStandardUpdaterController
     @StateObject private var updaterState: SnapsiftUpdaterState
 
     init() {
+        let hasFeed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil
         let controller = SPUStandardUpdaterController(
-            startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+            startingUpdater: hasFeed, updaterDelegate: nil, userDriverDelegate: nil)
         updaterController = controller
         _updaterState = StateObject(wrappedValue: SnapsiftUpdaterState(controller.updater))
     }

@@ -619,7 +619,7 @@ final class LibraryModel: ObservableObject {
         // re-probed on every scan — otherwise granting FDA mid-session would
         // change nothing until relaunch, with no hint why quality is still off.
         // The re-probe costs one failed sqlite open per scan for a no-FDA user.
-        await loadEnrichmentIfNeeded(t, newestFirst: assets)
+        await loadEnrichmentIfNeeded(t, assets: assets)
         if bailIfCancelled(t) { return }
         let enr = enrichment ?? [:]
         // Chunked with yields: a 120K-asset map monopolises the main actor for
@@ -830,9 +830,9 @@ final class LibraryModel: ObservableObject {
     ///     database at all — through the WAL-aware read, because the bulk `load`
     ///     opens `immutable=1` and by design never sees the last few minutes.
     ///
-    /// `newestFirst` must be the scan's asset list; all three call sites fetch
-    /// sorted by creationDate ASCENDING, so the newest are at the tail.
-    private func loadEnrichmentIfNeeded(_ t: L10n, newestFirst assets: [PHAsset]) async {
+    /// `assets` is the scan's asset list in ANY order; `verifyLibraryIdentity`
+    /// sorts by creationDate itself, so callers need not agree on a direction.
+    private func loadEnrichmentIfNeeded(_ t: L10n, assets: [PHAsset]) async {
         guard enrichment?.isEmpty != false else { return }
         progress = t.progReadingQuality()
         progressFraction = nil   // length unknown — indeterminate
@@ -868,7 +868,13 @@ final class LibraryModel: ObservableObject {
                                        location: QualitySidecar.Location? = nil) async {
         let loc = location ?? QualitySidecar.locate()
         sidecarPath = loc.path
-        let sample = assets.suffix(200)
+        // Sort the WHOLE input newest-first before sampling. `suffix(200)` was
+        // only "the newest 200" when the caller happened to pass an ascending
+        // list; scanSimilarSets fetches descending and the restore path passes
+        // an unordered dictionary's values, so the probe was asking an old copy
+        // about old photos and calling it verified (review r3 P2-1). Sorting
+        // 121K PHAssets on a prefetched creationDate is milliseconds.
+        let sample = assets
             .sorted { ($0.creationDate ?? .distantPast) > ($1.creationDate ?? .distantPast) }
             .prefix(Self.identitySampleSize)
             .map { QualitySidecar.zuuid(fromLocalIdentifier: $0.localIdentifier) }
@@ -1046,7 +1052,7 @@ final class LibraryModel: ObservableObject {
         for a in assets { map[a.localIdentifier] = a }
         assetsByID = map
 
-        await loadEnrichmentIfNeeded(t, newestFirst: assets)
+        await loadEnrichmentIfNeeded(t, assets: assets)
         if bailIfCancelled(t) { return }
         let enr = enrichment ?? [:]
 
@@ -1144,7 +1150,7 @@ final class LibraryModel: ObservableObject {
         for a in assets { map[a.localIdentifier] = a }
         assetsByID = map
 
-        await loadEnrichmentIfNeeded(t, newestFirst: assets)
+        await loadEnrichmentIfNeeded(t, assets: assets)
         if bailIfCancelled(t) { return }
         let enr = enrichment ?? [:]
 

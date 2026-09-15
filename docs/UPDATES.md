@@ -40,10 +40,11 @@ spoofed feed/download can't push a tampered build.
 - **Never check at all**: build snapsift yourself from source
   (`app/scripts/build-app.sh` with no `SNAPSIFT_SU_PUBLIC_ED_KEY` set — the
   default for anyone who just clones the repo). That build gets **neither**
-  `SUPublicEDKey` **nor** `SUFeedURL` in its `Info.plist`, so Sparkle has no
-  feed to fetch and no key to trust: it makes no update request at all, to
-  `oss.cver.net` or anywhere else. The script prints a warning saying exactly
-  that when you run it this way.
+  `SUPublicEDKey` **nor** `SUFeedURL` in its `Info.plist`, and snapsift does
+  not start the Sparkle updater when `SUFeedURL` is absent: the menu item
+  stays disabled, no "check automatically?" prompt appears, and no request is
+  made to `oss.cver.net` or anywhere else. The script prints a warning saying
+  exactly that when you run it this way.
 
   (The two keys travel together deliberately. An earlier build script wrote
   `SUFeedURL` unconditionally, which made this paragraph untrue: Sparkle then
