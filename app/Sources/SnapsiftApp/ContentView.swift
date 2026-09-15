@@ -1259,8 +1259,9 @@ struct ContentView: View {
         guard !degradedProtectionDismissed else { return out }
         // Only while there is a scan to be degraded ABOUT: the unverified-library
         // line before the first scan would be a warning about nothing.
-        if model.hasScanned && !model.libraryIdentity.isVerified && model.qualityAvailable {
-            out.append(t.libraryUnverified())
+        if model.hasScanned && model.qualityAvailable,
+           case .unverified(let reason) = model.libraryIdentity {
+            out.append(t.libraryUnverified(reason))
         }
         let undetermined = model.undeterminedEditCount
         if undetermined > 0 { out.append(t.protectionDegraded(undetermined)) }
@@ -1579,36 +1580,40 @@ struct ContentView: View {
         // nothing at all.
         guard model.totalDeletions > 0, !deleting,
               !model.isScanning, !model.refiningFaces, !model.isWritingAlbums else { return }
-        // LIVE keeper check before the sheet is drawn. The sheet's "KEEP
+        // LIVE survival check before the sheet is drawn. The sheet's "KEEP
         // IMG_1234" is the promise the whole surface rests on; between the scan
         // and this moment (hours, on a big library) that photo can have been
         // deleted from an iPhone — and it is the likeliest one to be, since the
-        // natural human action is "two identical shots, bin one". Such a group
-        // is shown as WITHDRAWN and contributes nothing to the totals; the
-        // commit re-checks independently right before performChanges, because
-        // the sheet can sit open for a long time too.
-        let missingKeepers = await model.missingKeeperGroupIDs()
+        // natural human action is "two identical shots, bin one". The check
+        // covers EVERY frame a group would leave behind, not just the nominated
+        // keeper (red-team r2 P1-2). Such a group is shown as WITHDRAWN and
+        // contributes nothing to the totals; the commit re-checks independently
+        // right before performChanges, because the sheet can sit open for a long
+        // time too.
+        let withdrawn = await model.withdrawnGroupIDs()
         let pendingGroups = model.groups.compactMap { g -> PreCommitGroup? in
             let toRemove = g.photos.filter { g.isDelete($0) }
             guard !toRemove.isEmpty else { return nil }
-            // keeper == nil is the no-survivor case (user force-rejected every
-            // frame). Such groups MUST still appear in the sheet — dropping
+            // keeper == nil is the genuine no-survivor case (user force-rejected
+            // every frame). Such groups MUST still appear in the sheet — dropping
             // them here would delete photos the confirmation never displayed.
+            // `isKeeper` is Core `namedSurvivor`, so this row, the no-survivor
+            // checkbox and the commit all read one answer.
             let keeper = g.photos.first(where: { g.isKeeper($0) })
-            let why = keeperReason(photos: g.photos, keeperID: g.keeperID)
+            let why = keeperReason(photos: g.photos, keeperID: keeper?.uuid ?? g.keeperID)
             return PreCommitGroup(
                 id: g.id,
                 keeper: keeper,
                 keeperReason: why,
                 toRemove: toRemove,
                 includeProtected: g.includeProtected,
-                keeperMissing: missingKeepers.contains(g.id),
+                withdrawal: withdrawn[g.id],
                 uniqueMetadataIDs: model.uniqueMetadataIDs.intersection(toRemove.map(\.uuid))
             )
         }
-        let withdrawn = pendingGroups.filter(\.keeperMissing)
-        let withdrawnDeletions = withdrawn.reduce(0) { $0 + $1.toRemove.count }
-        let withdrawnBytes = withdrawn.reduce(0) { $0 + $1.toRemove.reduce(0) { $0 + $1.size } }
+        let withheld = pendingGroups.filter(\.keeperMissing)
+        let withdrawnDeletions = withheld.reduce(0) { $0 + $1.toRemove.count }
+        let withdrawnBytes = withheld.reduce(0) { $0 + $1.toRemove.reduce(0) { $0 + $1.size } }
         preCommitPayload = PreCommitPayload(
             groups: pendingGroups,
             // Withdrawn groups are displayed but not committed, so they must not
@@ -1618,7 +1623,7 @@ struct ContentView: View {
             protectedCount: pendingGroups.filter { !$0.keeperMissing }
                 .reduce(0) { $0 + $1.toRemove.filter(\.isProtected).count },
             noSurvivor: noSurvivorCountForCurrentGroups(),
-            withdrawnCount: withdrawn.count
+            withdrawnCount: withheld.count
         )
     }
 
@@ -1640,6 +1645,7 @@ struct ContentView: View {
             var burstSkipped = 0
             var undeterminedSkipped = 0
             var keeperMissing = 0
+            var noSurvivorLeft = 0
             let n = try await model.deleteReviewed(
                 staleWarning: { [self] staleCount, foundCount in
                     // FIX 3: stale-asset warning — suspend until the user responds.
@@ -1652,7 +1658,8 @@ struct ContentView: View {
                 onProtectedDropped: { protectedDropped = $0 },
                 onBurstSkipped: { burstSkipped = $0 },
                 onUndeterminedSkipped: { undeterminedSkipped = $0 },
-                onKeeperMissing: { keeperMissing = $0 }
+                onKeeperMissing: { keeperMissing = $0 },
+                onNoSurvivorLeft: { noSurvivorLeft = $0 }
             )
             if !model.groups.contains(where: { $0.id == selection }) { selection = nil }
             // FIX 5: success banner explicitly states the 30-day recovery window
@@ -1668,6 +1675,7 @@ struct ContentView: View {
             if burstSkipped > 0 { held.append(t.commitBurstSkipped(burstSkipped)) }
             if undeterminedSkipped > 0 { held.append(t.commitUndeterminedSkipped(undeterminedSkipped)) }
             if keeperMissing > 0 { held.append(t.commitKeeperMissing(keeperMissing)) }
+            if noSurvivorLeft > 0 { held.append(t.commitNoSurvivorLeft(noSurvivorLeft)) }
             if model.lastDeleteAuditFailed { held.append(t.commitAuditFailed()) }
             if !held.isEmpty { commitNotice = held.joined(separator: "  ·  ") }
         } catch {
@@ -1867,18 +1875,25 @@ struct GroupReview: View {
             // Never offered for a frame that already carries the user's own
             // edits: saving would flatten them (PhotoKit hands back the RENDERED
             // version of an adjusted asset) and "Revert to Original" would then
-            // also lose their crop. Disabled rather than hidden, with the reason
-            // in the tooltip — an affordance that silently disappears reads as a
-            // bug, and the model refuses this path too.
-            let isEdited = group.photos.contains { $0.uuid == focused && $0.edited }
+            // also lose their crop. Nor for a frame whose edit state could not
+            // be READ — `edited == false` is a placeholder there, not a finding,
+            // and this is the one path in the app that rewrites a photo.
+            // Disabled rather than hidden, with the reason in the tooltip — an
+            // affordance that silently disappears reads as a bug — and the model
+            // refuses both cases too, re-reading the flag live before it writes.
+            let blocked = group.photos.first {
+                $0.uuid == focused && ($0.edited || $0.editedUndetermined)
+            }
+            let blockedReason: RotationSaveError? = blocked.map {
+                $0.edited ? .frameAlreadyEdited : .frameEditStateUnknown
+            }
             Button { model.showSaveRotationConfirm = true } label: {
                 Label(t.saveRotationButton(), systemImage: "arrow.clockwise.circle.fill")
             }
             .buttonStyle(.bordered)
             .tint(.reefMint)
-            .help(isEdited ? t.saveRotationErrorBody(RotationSaveError.frameAlreadyEdited)
-                           : t.tipSaveRotation())
-            .disabled(isEdited)
+            .help(blockedReason.map { t.saveRotationErrorBody($0) } ?? t.tipSaveRotation())
+            .disabled(blockedReason != nil)
             .keyboardShortcut("r", modifiers: [.shift, .command])
         }
     }

@@ -15,24 +15,27 @@ struct PreCommitGroup: Identifiable {
     let keeperReason: KeeperReason
     let toRemove: [Photo]
     let includeProtected: Bool
-    /// The photo this group promised to KEEP no longer exists (deleted from
-    /// another device / Photos.app since the scan). Nothing here is committed:
-    /// deleting the rest would leave zero copies of an image the sheet is
-    /// simultaneously claiming to keep. Shown, struck through, with the reason.
-    let keeperMissing: Bool
+    /// Why this group is being withheld from the commit, or nil if it commits.
+    /// `.keeperMissing` — the photo the sheet promised to KEEP no longer
+    /// exists; `.noSurvivorLeft` — every frame this group would have left
+    /// behind is gone. Either way nothing here is committed: deleting the rest
+    /// would leave zero copies of an image the sheet claims to keep. Shown,
+    /// dimmed, with the reason that actually applies.
+    let withdrawal: GroupWithdrawal?
+    var keeperMissing: Bool { withdrawal != nil }
     /// Frames being removed that carry album membership or a caption the keeper
     /// does not — byte-identical as pixels, not as library entries.
     let uniqueMetadataIDs: Set<String>
 
     init(id: ReviewGroup.ID, keeper: Photo?, keeperReason: KeeperReason,
          toRemove: [Photo], includeProtected: Bool,
-         keeperMissing: Bool = false, uniqueMetadataIDs: Set<String> = []) {
+         withdrawal: GroupWithdrawal? = nil, uniqueMetadataIDs: Set<String> = []) {
         self.id = id
         self.keeper = keeper
         self.keeperReason = keeperReason
         self.toRemove = toRemove
         self.includeProtected = includeProtected
-        self.keeperMissing = keeperMissing
+        self.withdrawal = withdrawal
         self.uniqueMetadataIDs = uniqueMetadataIDs
     }
 }
@@ -55,7 +58,7 @@ struct PreCommitReviewSheet: View {
     let reclaimableBytes: Int
     let totalProtected: Int   // total protected frames across all groups being deleted
     let noSurvivorCount: Int  // groups where every frame goes to Recently Deleted
-    let withdrawnCount: Int   // groups withheld because their keeper is gone
+    let withdrawnCount: Int   // groups withheld: nothing they keep still exists
     let model: LibraryModel
     let t: L10n
     let onConfirm: () -> Void
@@ -201,11 +204,11 @@ private struct GroupPreCommitRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Keeper row — or the loud no-survivor banner when there is none.
-            if group.keeperMissing {
+            if let withdrawal = group.withdrawal {
                 HStack(spacing: 6) {
                     Image(systemName: "questionmark.folder")
                         .foregroundStyle(Color.reefAmber)
-                    Text(t.preCommitWithdrawnRow())
+                    Text(t.preCommitWithdrawnRow(withdrawal))
                         .font(.caption.bold())
                         .foregroundStyle(Color.reefAmber)
                         .fixedSize(horizontal: false, vertical: true)

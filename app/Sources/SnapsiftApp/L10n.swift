@@ -1049,7 +1049,8 @@ struct L10n: Sendable {
         case .zhTW: return "寫入相簿中…"
         }
     }
-    func albumsWritten(bursts: Int, blurry: Int, docs: Int, exact: Int, needsLook: Int) -> String {
+    func albumsWritten(bursts: Int, blurry: Int, docs: Int, exact: Int, needsLook: Int,
+                       moved: Int = 0) -> String {
         // Compact summary: "Sorted into albums · 12 bursts, 3 blurry, 1 exact dup"
         var parts: [String] = []
         if bursts > 0 { parts.append(albumsWrittenBursts(bursts)) }
@@ -1057,6 +1058,7 @@ struct L10n: Sendable {
         if docs   > 0 { parts.append(albumsWrittenDocs(docs)) }
         if exact  > 0 { parts.append(albumsWrittenExact(exact)) }
         if needsLook > 0 { parts.append(albumsWrittenNeedsLook(needsLook)) }
+        if moved > 0 { parts.append(albumsMovedBetweenBuckets(moved)) }
         // English joins with a comma; CJK uses the ideographic comma 「、」.
         let sep: String
         switch language {
@@ -1068,6 +1070,17 @@ struct L10n: Sendable {
         case .en:   return "Sorted into albums · \(summary)"
         case .ja:   return "アルバムに仕分け完了 · \(summary)"
         case .zhTW: return "整理進相簿完成 · \(summary)"
+        }
+    }
+    /// Frames taken OUT of one snapsift album because this scan put them in the
+    /// other one. Said out loud rather than done quietly: the user is looking at
+    /// these albums in Photos.app, and a photo that silently leaves "Exact
+    /// Duplicates" is a change to what they were about to act on.
+    private func albumsMovedBetweenBuckets(_ n: Int) -> String {
+        switch language {
+        case .en:   return "\(n) moved to the album that now fits"
+        case .ja:   return "\(n)枚を今の分類に合うアルバムへ移動"
+        case .zhTW: return "有 \(n) 張移到現在該去的相簿"
         }
     }
     private func albumsWrittenBursts(_ n: Int) -> String {
@@ -1126,11 +1139,20 @@ struct L10n: Sendable {
         }
     }
     /// Tooltip for the exact-dup badge.
+    ///
+    /// Names the LIMIT of "safe to remove" in the same breath as the claim.
+    /// The two frames are byte-identical as pixels; what can still differ is
+    /// what the LIBRARY knows about each copy, and snapsift compares only part
+    /// of that — albums and captions, because those it can read and prove.
+    /// Keywords, people and places are not compared (no public API, and a
+    /// guard written from an unverified database schema would fail by making
+    /// every exact-dup suggestion quietly vanish). Saying so here is the
+    /// difference between a limit and a surprise.
     func tipExactDupe() -> String {
         switch language {
-        case .en:   return "Exact duplicate — same image saved twice. Safe to remove (goes to Recently Deleted)"
-        case .ja:   return "完全な重複 — 同じ画像が2回保存されています。削除して問題ありません（「最近削除した項目」に移動）"
-        case .zhTW: return "完全相同 —— 同一張圖存了兩份，可安心清（移到「最近刪除」，30 天內可復原）"
+        case .en:   return "Exact duplicate — same image saved twice. Safe to remove (goes to Recently Deleted). Albums and captions are compared; keywords, people and places are not."
+        case .ja:   return "完全な重複 — 同じ画像が2回保存されています。削除して問題ありません（「最近削除した項目」に移動）。比較するのはアルバムと説明のみで、キーワード・人物・場所は比較しません。"
+        case .zhTW: return "完全相同 —— 同一張圖存了兩份，可安心清（移到「最近刪除」，30 天內可復原）。比對的是相簿與說明；關鍵字、人物、地點不會比對。"
         }
     }
     /// Tooltip for a protected frame that is in an exact-dup group — even here,
@@ -1566,6 +1588,15 @@ struct L10n: Sendable {
             case .ja:   return "この写真にはすでにご自身の編集があります。回転を保存すると編集が統合され、「オリジナルに戻す」でトリミングまで失われるため、snapsift は保存しません。写真アプリで回転してください — ここでの表示回転はそのまま残ります。"
             case .zhTW: return "這張照片已經有你自己的編輯。儲存旋轉會把那些編輯壓平成新版本，「回復到原始項目」連裁切也會一起失去，所以 snapsift 不會這麼做。請改在「照片」裡旋轉 —— 這裡的顯示旋轉會保留。"
             }
+        case .frameEditStateUnknown:
+            // Says what is actually true — "we could not read it" — rather than
+            // asserting the photo IS edited. This is the only path in the app
+            // that rewrites a photo, so an honest refusal beats a confident one.
+            switch language {
+            case .en:   return "snapsift can't read whether this photo has your own edits right now (no Full Disk Access, or the Photos library in use couldn't be confirmed). Saving a rotation would flatten any edits it does have, so snapsift won't do it while it can't check. Rotate it in Photos instead — the display rotation here stays."
+            case .ja:   return "この写真にご自身の編集があるかどうか、いま snapsift には読み取れません（フルディスクアクセスがない、または使用中の写真ライブラリを確認できませんでした）。編集があった場合は回転の保存で統合されてしまうため、確認できないあいだは保存しません。写真アプリで回転してください — ここでの表示回転はそのまま残ります。"
+            case .zhTW: return "snapsift 現在讀不到這張照片有沒有你自己的編輯（沒有「完整磁碟取用權限」，或無法確認正在使用哪一座「照片」圖庫）。萬一有編輯，儲存旋轉會把它壓平，所以在確認得了之前不會儲存。請改在「照片」裡旋轉 —— 這裡的顯示旋轉會保留。"
+            }
         }
     }
     /// Dismiss button for the save-rotation error alert.
@@ -1881,6 +1912,16 @@ struct L10n: Sendable {
         }
     }
 
+    /// Groups withheld because EVERY frame they would have left behind is gone
+    /// from the library — committing would have left zero copies of the image.
+    func commitNoSurvivorLeft(_ n: Int) -> String {
+        switch language {
+        case .en: return "held \(n) group\(n == 1 ? "" : "s") — the photo\(n == 1 ? "" : "s") they would have left behind\(n == 1 ? " is" : " are") gone from your library, so deleting the rest would have left no copy at all"
+        case .ja: return "\(n)グループを保留 — 残るはずだった写真がライブラリにないため、他を削除すると1枚も残らなくなります"
+        case .zhTW: return "有 \(n) 組暫緩 —— 原本會留下的那張已不在圖庫中，再刪其餘的就一張都不剩了"
+        }
+    }
+
     /// The commit was blocked by another library write in flight.
     func commitBusy() -> String {
         switch language {
@@ -1902,11 +1943,43 @@ struct L10n: Sendable {
 
     /// Standing notice: the sidecar we can read is not provably the library
     /// Photos is serving, so edit protection falls back / degrades.
-    func libraryUnverified() -> String {
+    /// Why the library the sidecar reads could not be confirmed. Four different
+    /// findings, four different sentences: "we could not check" and "the file we
+    /// read is frozen" are not the same news, and a banner that states the
+    /// second when only the first is true invents a fact about someone's
+    /// library. All four end the same way, because the consequence is the same.
+    func libraryUnverified(_ reason: UnverifiedReason) -> String {
+        let tail: String
         switch language {
-        case .en: return "Can't confirm which Photos library this Mac is using, so edits can't be verified from it — snapsift protects anything it can't check and won't pre-mark."
-        case .ja: return "この Mac が使用している写真ライブラリを特定できないため、編集状態をそこから確認できません — snapsift は確認できないものをすべて保護し、事前マークも行いません。"
-        case .zhTW: return "無法確認這台 Mac 正在使用哪一座「照片」圖庫，因此無法從中確認編輯狀態 —— snapsift 會保護所有無法檢查的照片，也不會預先標記。"
+        case .en: tail = " snapsift protects anything it can't check and won't pre-mark."
+        case .ja: tail = " snapsift は確認できないものをすべて保護し、事前マークも行いません。"
+        case .zhTW: tail = " snapsift 會保護所有無法檢查的照片，也不會預先標記。"
+        }
+        switch reason {
+        case .pathUnknown:
+            switch language {
+            case .en: return "Can't confirm which Photos library this Mac is using, so edits can't be verified from it —" + tail
+            case .ja: return "この Mac が使用している写真ライブラリを特定できないため、編集状態をそこから確認できません —" + tail
+            case .zhTW: return "無法確認這台 Mac 正在使用哪一座「照片」圖庫，因此無法從中確認編輯狀態 ——" + tail
+            }
+        case .pathMismatch:
+            switch language {
+            case .en: return "The Photos library in use isn't available right now (an external disk, or it moved), so snapsift is reading an older copy for ranking only — edits can't be verified from it." + tail
+            case .ja: return "使用中の写真ライブラリに今アクセスできないため（外部ディスク、または移動された可能性）、snapsift は並べ替え用に古いコピーだけを読んでいます — 編集状態はそこからは確認できません。" + tail
+            case .zhTW: return "現在讀不到正在使用的那座「照片」圖庫（可能在外接磁碟，或已被移動），snapsift 只拿一份較舊的副本來排序 —— 編輯狀態無法從中確認。" + tail
+            }
+        case .staleContents:
+            switch language {
+            case .en: return "The Photos library file snapsift can read is missing photos Photos itself can see, so it's an old copy, not the live library — edits can't be verified from it." + tail
+            case .ja: return "snapsift が読める写真ライブラリのファイルには、写真アプリ側にある写真が入っていません。つまり古いコピーであり、現在のライブラリではありません — 編集状態はそこからは確認できません。" + tail
+            case .zhTW: return "snapsift 讀得到的那個「照片」圖庫檔案裡，少了「照片」App 看得到的照片，所以那是一份舊副本、不是正在用的圖庫 —— 編輯狀態無法從中確認。" + tail
+            }
+        case .probeUnavailable:
+            switch language {
+            case .en: return "Can't check the Photos library right now (it's busy, or unreadable), so snapsift can't confirm the edit states it reads are current." + tail
+            case .ja: return "いま写真ライブラリを確認できません（使用中か、読み取れません）。読み取った編集状態が最新かどうか確認できません。" + tail
+            case .zhTW: return "現在無法檢查「照片」圖庫（正在忙，或讀不到），因此無法確認讀到的編輯狀態是不是最新的。" + tail
+            }
         }
     }
 
@@ -1973,18 +2046,28 @@ struct L10n: Sendable {
     /// Header warning in the pre-commit sheet: N groups are shown but withheld.
     func preCommitWithdrawnWarning(_ n: Int) -> String {
         switch language {
-        case .en: return "\(n) group\(n == 1 ? " is" : "s are") not being deleted: the photo they would keep no longer exists in your library."
+        case .en: return "\(n) group\(n == 1 ? " is" : "s are") not being deleted: the photo\(n == 1 ? "" : "s") they would leave behind no longer exist\(n == 1 ? "s" : "") in your library."
         case .ja: return "\(n)グループは削除しません：残すはずの写真がライブラリにもう存在しません。"
-        case .zhTW: return "有 \(n) 組不會刪除：原本要留下的那張照片已不在你的圖庫中。"
+        case .zhTW: return "有 \(n) 組不會刪除：原本會留下的那張照片已不在你的圖庫中。"
         }
     }
 
-    /// Per-row label for a withdrawn group.
-    func preCommitWithdrawnRow() -> String {
-        switch language {
-        case .en: return "Skipped — the photo to keep is gone; nothing here is deleted"
-        case .ja: return "スキップ — 残すはずの写真がありません。このグループは削除しません"
-        case .zhTW: return "略過 —— 要保留的那張已不存在，這組不會刪除任何東西"
+    /// Per-row label for a withdrawn group. The two reasons are different news:
+    /// "the one we named is gone" vs "nothing at all would be left".
+    func preCommitWithdrawnRow(_ reason: GroupWithdrawal) -> String {
+        switch reason {
+        case .keeperMissing:
+            switch language {
+            case .en: return "Skipped — the photo to keep is gone; nothing here is deleted"
+            case .ja: return "スキップ — 残すはずの写真がありません。このグループは削除しません"
+            case .zhTW: return "略過 —— 要保留的那張已不存在，這組不會刪除任何東西"
+            }
+        case .noSurvivorLeft:
+            switch language {
+            case .en: return "Skipped — nothing here would be left; the photo that was staying is gone"
+            case .ja: return "スキップ — 残る写真が1枚もなくなります。残るはずだった写真がありません"
+            case .zhTW: return "略過 —— 這組會一張都不剩，原本會留下的那張已不存在"
+            }
         }
     }
 

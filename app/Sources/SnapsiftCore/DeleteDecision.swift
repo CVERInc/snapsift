@@ -65,6 +65,34 @@ public func hasNoSurvivor(photos: [Photo],
     survivors(photos: photos, rejected: rejected, includeProtected: includeProtected).isEmpty
 }
 
+/// THE frame the confirmation surface must name as the one that stays — and
+/// the single source every surface reads, so they cannot describe two
+/// different realities for the same group.
+///
+/// `survivingKeeper` answers a narrower question ("does the NOMINATED keeper
+/// survive?") and returns nil in a state the app can reach: mark the keeper
+/// with `X` when nothing outranks it, then un-mark a different frame. The
+/// keeper stays nominated-and-marked while that other frame is what actually
+/// stays. The sheet then printed "⚠️ no photo left" (nil keeper) while the
+/// no-survivor checkbox stayed hidden (`hasNoSurvivor` == false) and the
+/// commit quietly kept a third thing — three surfaces, three stories.
+///
+/// Definition: the nominated keeper when it survives, otherwise the
+/// best-ranked frame that does survive, and nil ONLY when the group really
+/// would be emptied. By construction `namedSurvivor(...) == nil` is exactly
+/// `hasNoSurvivor(...)`, which is the invariant the tests pin.
+public func namedSurvivor(photos: [Photo],
+                          keeperID: String,
+                          rejected: Set<String>,
+                          includeProtected: Bool) -> Photo? {
+    if let k = survivingKeeper(photos: photos, keeperID: keeperID,
+                               rejected: rejected, includeProtected: includeProtected) {
+        return k
+    }
+    return survivors(photos: photos, rejected: rejected, includeProtected: includeProtected)
+        .max { rankKey($0) < rankKey($1) }
+}
+
 // MARK: - Delete-set composition (bulk actions + auto-seed)
 
 /// The frames a BULK action (`d` reject-all, keep-all's re-seed, the
@@ -152,14 +180,44 @@ public struct SweptFrame: Equatable {
     public let edited: Bool
 }
 
+/// Why a whole group was pulled out of the commit. Both answers mean the same
+/// thing to the library — nothing in that group is deleted — but they are
+/// different news to the user, so they are different strings.
+public enum GroupWithdrawal: String, Equatable {
+    /// The photo the sheet named as the one to KEEP no longer resolves.
+    case keeperMissing
+    /// Every frame this group would have left behind is gone from the library.
+    /// Committing would leave ZERO copies of the image.
+    case noSurvivorLeft
+}
+
+/// One group pulled out of the commit, and why.
+public struct WithdrawnGroup: Equatable {
+    public let index: Int
+    public let reason: GroupWithdrawal
+    public init(index: Int, reason: GroupWithdrawal) {
+        self.index = index
+        self.reason = reason
+    }
+}
+
 /// The verdict of the commit-time sweep.
 public struct CommitDecision: Equatable {
     /// The ids that may go to `PHAssetChangeRequest.deleteAssets`.
     public let deleteIDs: [String]
-    /// Groups pulled out WHOLE because the photo they promised to keep is gone.
-    public let withdrawnGroupIndexes: [Int]
+    /// Groups pulled out WHOLE, with the reason for each.
+    public let withdrawnGroups: [WithdrawnGroup]
+    /// Groups pulled out WHOLE — indexes only, for callers that just count.
+    public var withdrawnGroupIndexes: [Int] { withdrawnGroups.map(\.index) }
     /// Frames removed from the commit, with the reason for each.
     public let swept: [SweptFrame]
+
+    public var keeperMissingCount: Int {
+        withdrawnGroups.filter { $0.reason == .keeperMissing }.count
+    }
+    public var noSurvivorLeftCount: Int {
+        withdrawnGroups.filter { $0.reason == .noSurvivorLeft }.count
+    }
 
     public var newlyProtectedCount: Int { swept.filter { $0.reason == .newlyProtected }.count }
     public var undeterminedCount: Int { swept.filter { $0.reason == .undetermined }.count }
@@ -171,16 +229,28 @@ public struct CommitDecision: Equatable {
 /// Doctrine 3 says the commit re-checks protection against the LIVE library.
 /// Three things are re-checked here, and each failure mode has its own exit:
 ///
-///  • **The keeper must still exist.** The scan-to-commit window is hours long
+///  • **Something must still be left.** The scan-to-commit window is hours long
 ///    on a big library; "two identical shots, I deleted one on my phone" is the
 ///    most natural action a user can take in it, and the one they take on the
 ///    frame snapsift picked as keeper. Committing anyway leaves ZERO copies of
 ///    that image while the sheet said "KEEP IMG_1234" and the audit log names a
-///    photo that no longer exists. So: a group whose surviving keeper does not
-///    resolve is WITHDRAWN WHOLE — none of its frames are deleted, and the
-///    caller tells the user which and why. (A group the user deliberately
-///    emptied — no survivor, acknowledged via the sheet checkbox — has no
-///    keeper to lose and is left alone.)
+///    photo that no longer exists.
+///
+///    The gate is therefore asked about the SURVIVORS, not about the nominated
+///    keeper alone: at least one frame this group intends to leave behind must
+///    resolve in the live fetch. Guarding only the nominee was a hole with a
+///    reachable path into it — mark the keeper with `X`, then un-mark another
+///    frame: the nominee stays nominated-and-marked, the OTHER frame is what
+///    survives, `survivingKeeper` is nil, and the old code read that nil as
+///    "the user deliberately emptied this group" and waved the whole commit
+///    through. If that one real survivor had meanwhile been deleted on a
+///    phone, every copy of the image went to Recently Deleted.
+///
+///    A group that really is deliberately empty (no survivors at all,
+///    acknowledged via the sheet checkbox) has nothing to lose and is left
+///    alone. A group whose NOMINATED keeper is gone is still withdrawn even
+///    when another frame survives: the sheet promised that photo by name.
+///    Both exits report their own reason — see `GroupWithdrawal`.
 ///
 ///  • **Favorite / edited since the scan** → the frame is newly protected. It is
 ///    un-marked, not merely skipped: this is new, durable knowledge.
@@ -195,7 +265,7 @@ public struct CommitDecision: Equatable {
 public func commitSweepDecision(groups: [CommitGroupState],
                                 live: LiveCommitFacts) -> CommitDecision {
     var deleteIDs: [String] = []
-    var withdrawn: [Int] = []
+    var withdrawn: [WithdrawnGroup] = []
     var swept: [SweptFrame] = []
 
     for g in groups {
@@ -204,13 +274,12 @@ public func commitSweepDecision(groups: [CommitGroupState],
         }
         guard !candidates.isEmpty else { continue }
 
-        // Keeper liveness. Only meaningful when this group HAS a surviving
-        // keeper; a deliberately emptied group has none by construction.
-        if let keeper = survivingKeeper(photos: g.photos, keeperID: g.keeperID,
-                                        rejected: g.rejected,
-                                        includeProtected: g.includeProtected),
-           !live.resolved.contains(keeper.uuid) {
-            withdrawn.append(g.index)
+        // Survival gate — ONE function, shared with the pre-sheet check.
+        if let reason = groupWithdrawalReason(photos: g.photos, keeperID: g.keeperID,
+                                              rejected: g.rejected,
+                                              includeProtected: g.includeProtected,
+                                              resolved: live.resolved) {
+            withdrawn.append(WithdrawnGroup(index: g.index, reason: reason))
             continue
         }
 
@@ -246,8 +315,44 @@ public func commitSweepDecision(groups: [CommitGroupState],
         }
     }
     return CommitDecision(deleteIDs: deleteIDs,
-                          withdrawnGroupIndexes: withdrawn,
+                          withdrawnGroups: withdrawn,
                           swept: swept)
+}
+
+/// Would this group be pulled out of the commit whole, and why? `nil` = it may
+/// proceed.
+///
+/// THE zero-survivor guard, in one place so the pre-sheet check
+/// (`LibraryModel.withdrawnGroupIDs`) and the commit-time gate
+/// (`commitSweepDecision`) can never drift apart — and so the fetch that feeds
+/// `resolved` has one obvious obligation: it must cover EVERY survivor, not
+/// just the nominated keeper. An id that was never fetched is missing from
+/// `resolved`, which now reads as "gone" — fail-safe, but only because the
+/// caller is told so here.
+///
+/// Order matters: a missing nominee is reported as `.keeperMissing` even when
+/// it is also the last survivor, because "the photo we promised to keep is
+/// gone" is the more specific, more useful sentence.
+public func groupWithdrawalReason(photos: [Photo],
+                                  keeperID: String,
+                                  rejected: Set<String>,
+                                  includeProtected: Bool,
+                                  resolved: Set<String>) -> GroupWithdrawal? {
+    if let keeper = survivingKeeper(photos: photos, keeperID: keeperID,
+                                    rejected: rejected, includeProtected: includeProtected),
+       !resolved.contains(keeper.uuid) {
+        return .keeperMissing
+    }
+    let remaining = survivors(photos: photos, rejected: rejected,
+                              includeProtected: includeProtected)
+    // A group with no survivors AT ALL is the deliberate "delete everything
+    // here" case: the user acknowledged it on the sheet and there is nothing
+    // left to lose. A group that DOES intend to leave something behind must
+    // still have one of those frames in the library.
+    if !remaining.isEmpty && !remaining.contains(where: { resolved.contains($0.uuid) }) {
+        return .noSurvivorLeft
+    }
+    return nil
 }
 
 // MARK: - "Carries unique metadata" (exact-duplicate protection class)
@@ -330,6 +435,15 @@ public enum UnverifiedReason: String, Equatable {
     /// Right path, frozen contents: assets PhotoKit can see are absent from the
     /// database, so it is a snapshot, not the live file.
     case staleContents
+    /// The freshness probe could not run AT ALL (the database was locked —
+    /// SQLITE_BUSY while Photos writes — or an IO error). We learned nothing.
+    ///
+    /// Distinct from `.staleContents` on purpose: that one is a POSITIVE
+    /// finding ("assets PhotoKit can see are missing from this file"), and
+    /// telling the user their library file looks frozen when the truth is
+    /// "Photos was busy for two seconds" is a banner that invents a fact.
+    /// Both are untrusted for this sweep; only one of them is news.
+    case probeUnavailable
 }
 
 /// Decide whether the sidecar database may be trusted for PROTECTION facts.
@@ -337,6 +451,19 @@ public enum UnverifiedReason: String, Equatable {
 /// `sampledNewest` / `foundInSidecar`: the N most recently created assets as
 /// PhotoKit reports them, and how many of those the sidecar knows. A database
 /// at the right path but frozen (an old copy, a restored snapshot) fails here.
+/// `foundInSidecar == nil` means THE PROBE ITSELF FAILED (database busy, IO
+/// error) — we learned nothing, which is `.probeUnavailable`, not "stale".
+///
+/// WHAT `photosLibraryPath` ACTUALLY IS, stated because the guarantee depends
+/// on it: the caller resolves Photos' own `IPXDefaultLibraryURLBookmark`, which
+/// is the library Photos.app LAST OPENED — not, provably, the System Photo
+/// Library that PhotoKit serves. They are the same on every ordinary Mac, and
+/// they diverge for a user who opened a second library (⌥-launch) once. There
+/// is no public PhotoKit API for the served library's URL (`PHPhotoLibrary`
+/// exposes none), so the path check is the cheap half of the identity proof and
+/// the freshness probe below is the half that catches a divergence: a library
+/// Photos merely opened once is missing everything imported since. Where the
+/// probe cannot run, we say we could not check — we never upgrade a guess.
 ///
 /// Anything short of a positive answer is a MISMATCH, never a shrug: `edited`
 /// then comes from the per-asset PhotoKit fallback, and where that fails too
@@ -344,7 +471,7 @@ public enum UnverifiedReason: String, Equatable {
 public func evaluateLibraryIdentity(sidecarPath: String?,
                                     photosLibraryPath: String?,
                                     sampledNewest: Int = 0,
-                                    foundInSidecar: Int = 0) -> LibraryIdentity {
+                                    foundInSidecar: Int? = 0) -> LibraryIdentity {
     guard let sidecarPath, !sidecarPath.isEmpty else { return .unverified(.pathUnknown) }
     guard let photosLibraryPath, !photosLibraryPath.isEmpty else { return .unverified(.pathUnknown) }
     func normalize(_ p: String) -> String {
@@ -355,8 +482,58 @@ public func evaluateLibraryIdentity(sidecarPath: String?,
     guard normalize(sidecarPath) == normalize(photosLibraryPath) else {
         return .unverified(.pathMismatch)
     }
-    if sampledNewest > 0 && foundInSidecar < sampledNewest { return .unverified(.staleContents) }
+    if sampledNewest > 0 {
+        guard let foundInSidecar else { return .unverified(.probeUnavailable) }
+        if foundInSidecar < sampledNewest { return .unverified(.staleContents) }
+    }
     return .verified
+}
+
+// MARK: - Snapsift's own albums: one bucket per frame, across scans
+
+/// Which frames go into "Exact Duplicates" and "Needs a look" THIS pass, and
+/// which have to come OUT of the other one.
+///
+/// The two buckets are mutually exclusive within a single write
+/// (`exactCandidates` filters on `isDeletable`, `needsLookCandidates` on
+/// `isUnverifiable`), but the album write itself is membership-only and never
+/// recomputes what it wrote last time. So a frame filed under "Exact
+/// Duplicates" (which the UI and the README call safe to remove) on a run with
+/// Full Disk Access reappears under "Needs a look" on a run without it, and
+/// Photos.app — the surface this tool deliberately delegates the decision to —
+/// shows the same photo carrying two labels that contradict each other.
+///
+/// Removing an asset from an album snapsift created is membership-only and
+/// destroys nothing (`PHAssetCollectionChangeRequest.removeAssets`); the photo
+/// stays in the library and in every album the USER filed it into. Only
+/// snapsift's own albums are ever touched.
+///
+/// If the two inputs ever overlap (they must not), NEEDS-A-LOOK WINS: a frame
+/// we could not classify must never be the one wearing the "safe to remove"
+/// label.
+public struct AlbumBucketPlan: Equatable {
+    /// Frames to add to "Snapsift · Exact Duplicates".
+    public let exactAdd: [String]
+    /// Frames to add to "Snapsift · Needs a look".
+    public let needsLookAdd: [String]
+    /// Frames to remove from "Snapsift · Exact Duplicates" — they belong in
+    /// Needs-a-look now.
+    public let exactRemove: Set<String>
+    /// Frames to remove from "Snapsift · Needs a look" — they are classifiable
+    /// again and belong in Exact Duplicates.
+    public let needsLookRemove: Set<String>
+}
+
+public func albumBucketPlan(exactCandidates: [String],
+                            needsLookCandidates: [String]) -> AlbumBucketPlan {
+    let needsLook = Set(needsLookCandidates)
+    // Overlap is a bug upstream; resolve it in the protective direction here
+    // rather than letting both albums claim the frame.
+    let exact = exactCandidates.filter { !needsLook.contains($0) }
+    return AlbumBucketPlan(exactAdd: exact,
+                           needsLookAdd: needsLookCandidates,
+                           exactRemove: needsLook,
+                           needsLookRemove: Set(exact))
 }
 
 // MARK: - Own-write token restamp

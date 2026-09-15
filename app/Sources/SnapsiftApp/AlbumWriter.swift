@@ -15,12 +15,18 @@ struct AlbumWriteResult {
     /// Live Photo pairing was undetermined. Never a delete bucket — the human
     /// decides in Photos.app (ruling, chodaict, 2026-09-16).
     var needsLook: Int = 0
+    /// Frames REMOVED from the snapsift album they no longer belong to, because
+    /// this scan classified them into the other one. Membership-only; no photo
+    /// is ever deleted (see `removeAssets`).
+    var moved: Int = 0
 }
 
 // MARK: - AlbumWriter
 
-/// Writes scan results into named Photos albums (strictly non-destructive — only
-/// `PHAssetCollectionChangeRequest` create/add, never delete).
+/// Writes scan results into named Photos albums (strictly non-destructive —
+/// `PHAssetCollectionChangeRequest` create/add, plus membership REMOVAL from
+/// snapsift's own albums; never `PHAssetChangeRequest.deleteAssets`, and never
+/// any change at all to an album the user made).
 ///
 /// Philosophy: "Surface into albums, don't judge."
 /// - The user browses candidates in their own time via the standard Photos UI
@@ -131,6 +137,14 @@ enum AlbumWriter {
         let burstsAssets  = burstsIDs.compactMap  { assetsByID[$0] }
         let blurryAssets  = blurryIDs.compactMap  { assetsByID[$0] }
         let docsAssets    = docsIDs.compactMap    { assetsByID[$0] }
+        // Exclusivity across scans (red-team r2 P2-3). Within one write the two
+        // buckets cannot overlap, but the album write is membership-only and
+        // never recomputes what a PREVIOUS run put there: a frame filed under
+        // "Exact Duplicates" while Full Disk Access was granted reappears under
+        // "Needs a look" on a run without it, and Photos.app — the surface this
+        // tool deliberately hands the decision to — then shows one photo wearing
+        // "safe to remove" and "snapsift couldn't read this" at the same time.
+        // The plan says what to add and what to take OUT of the other bucket.
         let exactAssets   = exactIDs.compactMap   { assetsByID[$0] }
         // De-dup by localIdentifier: a Photo-level unverifiable frame and an
         // extra (asset-only) frame can never collide in practice, but two
@@ -161,8 +175,25 @@ enum AlbumWriter {
                                                    toAlbumNamed: albumDocs(t),
                                                    candidateTitles: allTitles { $0.albumNameDocs() })
         }
-        if !exactAssets.isEmpty {
-            result.exactDupes = try await addAssets(exactAssets,
+        // Reconcile FIRST, so the final membership is what this scan believes.
+        // `albumBucketPlan` also resolves an (impossible-by-construction)
+        // overlap in the protective direction: needs-a-look wins, because a
+        // frame we could not classify must never be the one wearing the "safe
+        // to remove" label.
+        let plan = albumBucketPlan(
+            exactCandidates: exactAssets.map(\.localIdentifier),
+            needsLookCandidates: needsLookAssets.map(\.localIdentifier))
+        result.moved = try await removeAssets(
+            ids: plan.exactRemove,
+            fromAlbumTitles: allTitles { $0.albumNameExact() })
+        result.moved += try await removeAssets(
+            ids: plan.needsLookRemove,
+            fromAlbumTitles: allTitles { $0.albumNameNeedsLook() })
+
+        let exactToAdd = Set(plan.exactAdd)
+        let exactAddAssets = exactAssets.filter { exactToAdd.contains($0.localIdentifier) }
+        if !exactAddAssets.isEmpty {
+            result.exactDupes = try await addAssets(exactAddAssets,
                                                     toAlbumNamed: albumExact(t),
                                                     candidateTitles: allTitles { $0.albumNameExact() })
         }
@@ -265,6 +296,58 @@ enum AlbumWriter {
     /// degraded eval.
     private static func needsLookCandidates(groups: [ReviewGroup]) -> [String] {
         groups.flatMap(\.photos).filter(\.isUnverifiable).map(\.uuid)
+    }
+
+    // MARK: - PhotoKit helpers (idempotent add / bucket reconciliation)
+
+    /// Remove `ids` from a snapsift-owned album, if that album exists and any of
+    /// them are actually in it. Returns how many memberships were removed.
+    ///
+    /// SAFETY, stated because this is the only removal in the app that is not a
+    /// deletion: `PHAssetCollectionChangeRequest.removeAssets` removes
+    /// MEMBERSHIP. The photo stays in the library, in every other album, in
+    /// every smart album, and in iCloud; nothing goes to Recently Deleted. The
+    /// album is resolved ONLY by snapsift's own titles in every language
+    /// (`candidateTitles`), exactly as `addAssets` resolves it — so a user album
+    /// is never touched, and a snapsift album the user RENAMED is simply not
+    /// found and nothing happens (the same degradation `addAssets` already has).
+    /// If the album does not exist yet, this is a no-op: we never create an
+    /// album in order to remove from it.
+    @discardableResult
+    private static func removeAssets(ids: Set<String>,
+                                     fromAlbumTitles candidateTitles: [String]) async throws -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let existing = PHAssetCollection.fetchAssetCollections(
+            with: .album, subtype: .albumRegular,
+            options: {
+                let o = PHFetchOptions()
+                o.predicate = NSPredicate(format: "localizedTitle IN %@", candidateTitles)
+                return o
+            }()
+        )
+        var removed = 0
+        var albums: [PHAssetCollection] = []
+        existing.enumerateObjects { col, _, _ in albums.append(col) }
+        // Every matching album, not just the current language's: a user who
+        // flipped languages can hold two, and leaving the stale one populated
+        // would leave the contradiction this exists to end.
+        for album in albums {
+            var members: [PHAsset] = []
+            PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { a, _, _ in
+                if ids.contains(a.localIdentifier) { members.append(a) }
+            }
+            guard !members.isEmpty else { continue }
+            let cid = album.localIdentifier
+            let doomed = members
+            try await PHPhotoLibrary.shared().performChanges {
+                guard let col = PHAssetCollection.fetchAssetCollections(
+                        withLocalIdentifiers: [cid], options: nil).firstObject,
+                      let req = PHAssetCollectionChangeRequest(for: col) else { return }
+                req.removeAssets(doomed as NSArray)
+            }
+            removed += members.count
+        }
+        return removed
     }
 
     // MARK: - PhotoKit helpers (idempotent add)

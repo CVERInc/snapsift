@@ -73,6 +73,12 @@ enum RotationSaveError: LocalizedError {
     /// them (see `saveRotation`'s note on `canHandleAdjustmentData`), so this path
     /// refuses rather than quietly rewriting someone's edit.
     case frameAlreadyEdited
+    /// We could not READ whether the frame carries adjustments — no Full Disk
+    /// Access, the library the sidecar reads could not be confirmed, or the
+    /// per-asset PhotoKit fallback timed out. Unknown ⇒ protected: this is the
+    /// app's only path that rewrites a photo, so it is the last place that may
+    /// act on a guess.
+    case frameEditStateUnknown
 
     var errorDescription: String? {
         switch self {
@@ -86,6 +92,8 @@ enum RotationSaveError: LocalizedError {
             return "Photos couldn't save the rotation: \(underlying.localizedDescription)"
         case .frameAlreadyEdited:
             return "This photo already has edits. Saving a rotation would flatten them into a new version, so snapsift won't — rotate it in Photos instead."
+        case .frameEditStateUnknown:
+            return "snapsift can't tell whether this photo has edits right now, and saving a rotation would flatten any it does have. Rotate it in Photos instead."
         }
     }
 }
@@ -119,9 +127,13 @@ func saveRotation(asset: PHAsset, quarterTurns: Int) async throws {
     // hands back the RENDERED result and our output would REPLACE their
     // adjustment chain — "Revert to Original" would then also discard their
     // crop. Rather than describe that in a dialog, the caller refuses the
-    // action on edited frames (`RotationSaveError.frameAlreadyEdited`); this
-    // function therefore only ever sees pristine assets, for which the
-    // "reversible, the original is preserved" promise is exactly true.
+    // action on edited frames (`RotationSaveError.frameAlreadyEdited`) AND on
+    // frames whose edit state it could not read
+    // (`.frameEditStateUnknown`), re-reading that flag from the LIVE library
+    // immediately before calling here — not from the scan, which can be hours
+    // old. This function therefore only ever sees assets PROVEN pristine
+    // moments ago, for which the "reversible, the original is preserved"
+    // promise is exactly true.
     let options = PHContentEditingInputRequestOptions()
     options.isNetworkAccessAllowed = true  // fetch iCloud-evicted originals
 

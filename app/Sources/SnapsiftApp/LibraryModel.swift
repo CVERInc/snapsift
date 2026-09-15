@@ -61,14 +61,16 @@ struct ReviewGroup: Identifiable {
         return candidates.isSubset(of: rejected)
     }
 
-    /// The keeper AS IT WILL SURVIVE — the same definition the pre-commit sheet
-    /// and `noSurvivorGroupCount` use (Core `survivingKeeper`). A keeper that is
-    /// marked but protected-and-not-overridden still survives, so it is still
-    /// the keeper; the two surfaces used to disagree about exactly that case and
-    /// the sheet printed "no photo left" for a group the model counted as safe.
+    /// The frame THAT WILL SURVIVE and that every surface names (Core
+    /// `namedSurvivor`). A keeper that is marked but protected-and-not-
+    /// overridden still survives, so it is still the keeper; and when the
+    /// nominated keeper is itself marked while another frame survives, this
+    /// names that other frame instead of answering "nobody". Three surfaces
+    /// (gallery badge, sheet keeper row, no-survivor checkbox) used to give
+    /// three different answers for exactly those states.
     func isKeeper(_ p: Photo) -> Bool {
-        survivingKeeper(photos: photos, keeperID: keeperID,
-                        rejected: rejected, includeProtected: includeProtected)?.uuid == p.uuid
+        namedSurvivor(photos: photos, keeperID: keeperID,
+                      rejected: rejected, includeProtected: includeProtected)?.uuid == p.uuid
     }
     /// Would this frame actually be removed? Delegates to the Core rule so the
     /// protection guarantee has exactly one implementation — and one that the
@@ -465,6 +467,42 @@ final class LibraryModel: ObservableObject {
             saveRotationError = RotationSaveError.frameAlreadyEdited
             return
         }
+        // REFUSED when the edit state was never DETERMINED. `edited == false` on
+        // an `editedUndetermined` frame is a placeholder, not a finding: no Full
+        // Disk Access, or a sidecar we could not prove belongs to the library
+        // PhotoKit serves. Every other guard in this app already treats that as
+        // protected; this one was reading the placeholder as permission to
+        // rewrite someone's crop. Unknown ⇒ protected, here most of all.
+        if groups.contains(where: { g in
+            g.photos.contains { $0.uuid == frameID && $0.editedUndetermined }
+        }) {
+            saveRotationError = RotationSaveError.frameEditStateUnknown
+            return
+        }
+        // And re-read it LIVE, in the same lane the commit sweep uses. The scan
+        // can be hours old, and "I cropped it in Photos just now, then came back
+        // here and pressed ⇧⌘R" is an ordinary sequence. `currentEditedFlags`
+        // returns only what it could determine, so a missing answer is an
+        // answer: we do not know, so we do not write.
+        let liveEdited = await currentEditedFlags(for: [(uuid: frameID, asset: asset)])
+        guard let editedNow = liveEdited[frameID] else {
+            saveRotationError = RotationSaveError.frameEditStateUnknown
+            return
+        }
+        if editedNow {
+            // New, durable knowledge — record it the way the commit sweep does,
+            // so every later guard (and the disabled button) agrees.
+            for i in groups.indices {
+                guard let j = groups[i].photos.firstIndex(where: { $0.uuid == frameID })
+                else { continue }
+                groups[i].photos[j] = groups[i].photos[j].with(edited: true)
+                groups[i].rejected.remove(frameID)
+                groups[i].autoSeeded.remove(frameID)
+            }
+            saveSnapshotNow()
+            saveRotationError = RotationSaveError.frameAlreadyEdited
+            return
+        }
         let wasCurrent = ScanSnapshotStore.changeTokenIsCurrent(scanChangeToken)
         do {
             try await saveRotation(asset: asset, quarterTurns: net)
@@ -811,19 +849,50 @@ final class LibraryModel: ObservableObject {
             libraryIdentity = .unverified(.pathUnknown)
             return
         }
+        await verifyLibraryIdentity(sample: assets, location: loc)
+    }
+
+    /// Establish (or re-establish) whether the sidecar we would read is the
+    /// library PhotoKit serves. Extracted from `loadEnrichmentIfNeeded` so the
+    /// RESTORE path can run the same check: a launch that rehydrates yesterday's
+    /// scan never called the scan path, so `libraryIdentity` stayed at its
+    /// initial `.unverified(.pathUnknown)` forever — a permanent "can't confirm
+    /// which library this Mac is using" banner on every launch with a snapshot,
+    /// and a commit that fell back from ONE batched sidecar query to one
+    /// sequential XPC round-trip per candidate (which, on a wedged lane, un-marks
+    /// the user's whole review in the protective direction).
+    ///
+    /// `sample` is any set of live assets; the newest few are what the freshness
+    /// probe needs. Cheap by construction: one WAL-aware query over ≤12 uuids.
+    private func verifyLibraryIdentity(sample assets: [PHAsset],
+                                       location: QualitySidecar.Location? = nil) async {
+        let loc = location ?? QualitySidecar.locate()
+        sidecarPath = loc.path
         let sample = assets.suffix(200)
             .sorted { ($0.creationDate ?? .distantPast) > ($1.creationDate ?? .distantPast) }
             .prefix(Self.identitySampleSize)
             .map { QualitySidecar.zuuid(fromLocalIdentifier: $0.localIdentifier) }
         let path = loc.path
-        let known = await Task.detached(priority: .userInitiated) {
+        // ONE retry on a nil answer. `editedFlags` returns nil for "the probe
+        // could not run" — SQLITE_BUSY while Photos writes, or an IO error — and
+        // that is a transient state a second attempt usually clears. A nil that
+        // survives the retry is reported as `.probeUnavailable`, NOT as
+        // `.staleContents`: "your library file looks frozen" is a positive
+        // finding, and inventing it out of a two-second lock is a banner that
+        // lies. Both are untrusted; only one of them is news.
+        var known = await Task.detached(priority: .userInitiated) {
             QualitySidecar.editedFlags(zuuids: sample, libraryPath: path)
         }.value
+        if known == nil {
+            known = await Task.detached(priority: .userInitiated) {
+                QualitySidecar.editedFlags(zuuids: sample, libraryPath: path)
+            }.value
+        }
         libraryIdentity = evaluateLibraryIdentity(
             sidecarPath: loc.path,
             photosLibraryPath: loc.photosLibraryPath,
             sampledNewest: sample.count,
-            foundInSidecar: known?.count ?? 0)
+            foundInSidecar: known?.count)
     }
 
     private func makePhoto(from asset: PHAsset, enr: [String: QualitySidecar.Enrichment]) -> Photo {
@@ -1260,6 +1329,21 @@ final class LibraryModel: ObservableObject {
             if p.isProtected && groups[i].protectedDeletionCount == 0 {
                 groups[i].includeProtected = false
             }
+            // Re-nominate when the standing keeper is itself marked. Marking the
+            // keeper with nothing left to promote to (the `else` branch below
+            // finds no `next`) leaves it nominated AND marked; un-marking some
+            // OTHER frame then made that frame the real survivor while the
+            // nomination stayed on a photo being deleted. The commit-time gate
+            // refuses such a group either way, but leaving the nomination wrong
+            // means the gallery badge, the sheet's keeper row and the
+            // no-survivor checkbox each describe a different group. Promote the
+            // best-ranked unmarked frame — the same rule the marking branch uses.
+            if groups[i].rejected.contains(groups[i].keeperID) {
+                let remaining = groups[i].photos.filter { !groups[i].rejected.contains($0.uuid) }
+                if let next = remaining.max(by: { rankKey($0) < rankKey($1) }) {
+                    groups[i].keeperID = next.uuid
+                }
+            }
         } else {
             if p.isProtected || p.isUnverifiable { return false }   // blocked — caller shows hint
             groups[i].rejected.insert(frameID)
@@ -1674,17 +1758,17 @@ final class LibraryModel: ObservableObject {
     /// group is being skipped, before the user commits — `commitSweepDecision`
     /// enforces the same rule again at the last moment, because the sheet can
     /// sit open for a long time.
-    func missingKeeperGroupIDs() async -> Set<ReviewGroup.ID> {
-        var keeperByGroup: [ReviewGroup.ID: String] = [:]
+    func withdrawnGroupIDs() async -> [ReviewGroup.ID: GroupWithdrawal] {
+        // EVERY survivor, not just the nominated keeper: the gate asks whether
+        // ANYTHING this group promises to leave behind still exists, and an id
+        // that was never fetched is indistinguishable from one that is gone.
+        var survivorsByGroup: [ReviewGroup.ID: [Photo]] = [:]
         for g in groups where !g.deletionIDs.isEmpty {
-            if let k = survivingKeeper(photos: g.photos, keeperID: g.keeperID,
-                                       rejected: g.rejected,
-                                       includeProtected: g.includeProtected) {
-                keeperByGroup[g.id] = k.uuid
-            }
+            survivorsByGroup[g.id] = survivors(photos: g.photos, rejected: g.rejected,
+                                               includeProtected: g.includeProtected)
         }
-        guard !keeperByGroup.isEmpty else { return [] }
-        let ids = Array(Set(keeperByGroup.values))
+        let ids = Array(Set(survivorsByGroup.values.flatMap { $0.map(\.uuid) }))
+        guard !ids.isEmpty else { return [:] }
         let opts = PHFetchOptions()
         opts.includeAllBurstAssets = true
         let found: Set<String> = await Task.detached(priority: .userInitiated) {
@@ -1693,7 +1777,16 @@ final class LibraryModel: ObservableObject {
                 .enumerateObjects { a, _, _ in live.insert(a.localIdentifier) }
             return live
         }.value
-        return Set(keeperByGroup.filter { !found.contains($0.value) }.keys)
+        var out: [ReviewGroup.ID: GroupWithdrawal] = [:]
+        for g in groups where survivorsByGroup[g.id] != nil {
+            if let reason = groupWithdrawalReason(photos: g.photos, keeperID: g.keeperID,
+                                                  rejected: g.rejected,
+                                                  includeProtected: g.includeProtected,
+                                                  resolved: found) {
+                out[g.id] = reason
+            }
+        }
+        return out
     }
 
     // MARK: - Deletion-intent journal
@@ -1982,6 +2075,21 @@ final class LibraryModel: ObservableObject {
         // re-check `edited` for the frames the user REJECTED, so a frame
         // edited after being rejected re-protects itself instead of surviving
         // inside the delete bucket.
+        // ESTABLISH LIBRARY IDENTITY, exactly as a fresh scan does. Without
+        // this the restore path left `libraryIdentity` at its initial
+        // `.unverified(.pathUnknown)`: every launch that rehydrated a snapshot
+        // showed "can't confirm which Photos library this Mac is using" forever
+        // (a warning about nothing, which teaches people to dismiss the degraded
+        // bar), and `currentEditedFlags` below — plus the one at commit time —
+        // skipped the batched sidecar query for a sequential per-asset XPC round
+        // trip. On a 121K library, restore-without-rescan is the NORMAL launch.
+        //
+        // Runs before the first `currentEditedFlags` call so that call already
+        // benefits, and before the guard re-check so an interleaved scan still
+        // wins. `map` holds the live assets; the probe uses the newest few.
+        await verifyLibraryIdentity(sample: Array(map.values))
+        guard !isScanning, groups.isEmpty, categories.isEmpty else { return false }
+
         var editedNowByID: [String: Bool] = [:]
         if !tokenCurrent {
             let recheckTargets: [(uuid: String, asset: PHAsset)] = snap.groups.flatMap { gs in
@@ -2133,7 +2241,7 @@ final class LibraryModel: ObservableObject {
         saveSnapshotNow()
         return t.albumsWritten(bursts: result.bursts, blurry: result.blurry,
                                docs: result.documents, exact: result.exactDupes,
-                               needsLook: result.needsLook)
+                               needsLook: result.needsLook, moved: result.moved)
     }
 
     /// Delete every reviewed non-keeper, non-favorite frame via PhotoKit. macOS
@@ -2154,7 +2262,8 @@ final class LibraryModel: ObservableObject {
         onProtectedDropped: ((Int) -> Void)? = nil,
         onBurstSkipped: ((Int) -> Void)? = nil,
         onUndeterminedSkipped: ((Int) -> Void)? = nil,
-        onKeeperMissing: ((Int) -> Void)? = nil
+        onKeeperMissing: ((Int) -> Void)? = nil,
+        onNoSurvivorLeft: ((Int) -> Void)? = nil
     ) async throws -> Int {
         // Never commit while a scan or face-refine is rebuilding group state:
         // a delete would race the pipeline over `groups` and persist a
@@ -2202,15 +2311,21 @@ final class LibraryModel: ObservableObject {
         // Must match the scan/restore fetch: without includeAllBurstAssets the
         // burst sub-frames don't resolve by identifier and would be misread as
         // externally deleted (same gotcha restoreSnapshot documents).
-        let keeperIDs = states.compactMap { st -> String? in
+        //
+        // ALL SURVIVORS, not just the nominated keeper (red-team r2 P1-2):
+        // `groupWithdrawalReason` asks whether anything a group promises to
+        // leave behind still exists, and an id we never fetched is missing from
+        // `resolved` — which now reads as "gone" and withdraws the group. Too
+        // narrow a fetch is therefore no longer a silent zero-survivor delete,
+        // but it would withdraw good groups, so the set has to be right.
+        let survivorIDs = states.flatMap { st -> [String] in
             guard st.photos.contains(where: {
                 isEffectiveDeletion($0, rejected: st.rejected, includeProtected: st.includeProtected)
-            }) else { return nil }
-            return survivingKeeper(photos: st.photos, keeperID: st.keeperID,
-                                   rejected: st.rejected,
-                                   includeProtected: st.includeProtected)?.uuid
+            }) else { return [] }
+            return survivors(photos: st.photos, rejected: st.rejected,
+                             includeProtected: st.includeProtected).map(\.uuid)
         }
-        let fetchIDs = Array(Set(candidateIDs).union(keeperIDs))
+        let fetchIDs = Array(Set(candidateIDs).union(survivorIDs))
         let liveOpts = PHFetchOptions()
         liveOpts.includeAllBurstAssets = true
         let liveFetch = PHAsset.fetchAssets(withLocalIdentifiers: fetchIDs, options: liveOpts)
@@ -2277,9 +2392,10 @@ final class LibraryModel: ObservableObject {
         }
         if decision.newlyProtectedCount > 0 { onProtectedDropped?(decision.newlyProtectedCount) }
         if decision.undeterminedCount > 0 { onUndeterminedSkipped?(decision.undeterminedCount) }
-        if !decision.withdrawnGroupIndexes.isEmpty {
-            onKeeperMissing?(decision.withdrawnGroupIndexes.count)
-        }
+        // Two different sentences for two different facts — never one number
+        // standing in for both (the user acts on WHY, not on how many).
+        if decision.keeperMissingCount > 0 { onKeeperMissing?(decision.keeperMissingCount) }
+        if decision.noSurvivorLeftCount > 0 { onNoSurvivorLeft?(decision.noSurvivorLeftCount) }
 
         let ids = decision.deleteIDs
         guard !ids.isEmpty else {

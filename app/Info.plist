@@ -13,6 +13,10 @@
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <!-- Finder/App Store category and the copyright line shown in "Get Info" and
+       the About panel. Both are expected of a shipping, notarized app. -->
+  <key>LSApplicationCategoryType</key><string>public.app-category.photography</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 CVER Inc. MIT licensed.</string>
   <!-- Development region + localizations so macOS shows the TCC permission
        prompts in the user's language (InfoPlist.strings live in the .lproj
        folders assembled by scripts/build-app.sh). -->

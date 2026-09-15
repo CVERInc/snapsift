@@ -43,6 +43,19 @@ enum QualitySidecar {
     /// cannot be read — which the caller must treat as "identity unknown", not
     /// as "the default path is fine".
     ///
+    /// WHAT THIS KEY MEANS, precisely, because the protection guarantee rests on
+    /// it: it is the library Photos.app LAST OPENED. That is the System Photo
+    /// Library on every ordinary Mac, but the two are not the same field, and
+    /// they diverge for anyone who ⌥-launched Photos onto a second library once.
+    /// PhotoKit publishes no library URL of its own (`PHPhotoLibrary` has no
+    /// such public API; the older osxphotos heuristic,
+    /// com.apple.photolibraryd's `SystemLibraryPath`, no longer exists on macOS
+    /// 26 — checked, it is gone), so there is nothing better to compare against.
+    /// The path check is therefore the CHEAP half of the identity proof and the
+    /// freshness probe in `evaluateLibraryIdentity` is the half that catches the
+    /// divergence: a library Photos merely opened once is missing everything
+    /// imported since, and fails it.
+    ///
     /// Read-only and side-effect-free on purpose: `.withoutUI` so a stale
     /// bookmark can never put a dialog in front of the user, `.withoutMounting`
     /// so probing an unplugged external library never spins up a mount. (An
@@ -79,12 +92,34 @@ enum QualitySidecar {
         let photosLibraryPath: String?
     }
 
+    /// Is there a readable Photos.sqlite under this library bundle right now?
+    /// Used to decide whether the declared library is actually AVAILABLE — an
+    /// external library that is unplugged is declared but not present.
+    static func hasDatabase(at libraryPath: String) -> Bool {
+        guard !libraryPath.isEmpty else { return false }
+        return FileManager.default.isReadableFile(atPath: "\(libraryPath)/database/Photos.sqlite")
+    }
+
     static func locate() -> Location {
         let declared = photosLibraryPath()
         // Prefer the library Photos names, even when it is somewhere unexpected:
         // the external-disk user was reading a stale ~/Pictures copy AND being
         // told to grant Full Disk Access they had already granted.
-        return Location(path: declared ?? fallbackLibraryPath, photosLibraryPath: declared)
+        //
+        // …but only if it is REALLY THERE. When the declared library is on an
+        // unplugged external disk (or was moved away under a stale bookmark),
+        // the path we can actually read is the old copy at the default
+        // location — and that copy keeps every asset UUID, so every lookup
+        // succeeds and every `edited` answer is months old. Returning both
+        // paths is what lets `evaluateLibraryIdentity` return `.pathMismatch`
+        // for exactly that case instead of the branch being unreachable: the
+        // quality/sharpness numbers stay useful for RANKING, and
+        // `sidecarTrusted` stays false so nothing in that file is ever
+        // evidence about protection.
+        if let declared, hasDatabase(at: declared) {
+            return Location(path: declared, photosLibraryPath: declared)
+        }
+        return Location(path: fallbackLibraryPath, photosLibraryPath: declared)
     }
 
     /// Load the enrichment map. Heavy (one row per asset) — call off the main

@@ -17,9 +17,34 @@ import Sparkle
 /// the default — unavailable, no-op — is what every non-macOS build sees,
 /// since only the macOS `WindowGroup` below ever overrides it.
 struct SnapsiftUpdateChecker {
+    /// Whether the updater can actually run a check RIGHT NOW. Not a constant:
+    /// when Sparkle's startup validation fails (no public key, or no feed to
+    /// check — every source build), `canCheckForUpdates` is false and the menu
+    /// item must be disabled. Hard-coding `true` left a "Check for Updates…"
+    /// item that was clickable and did nothing.
     var checkAvailable: Bool = false
     var check: () -> Void = {}
 }
+
+#if os(macOS)
+/// Republishes Sparkle's KVO-observable `canCheckForUpdates` as SwiftUI state,
+/// so the menu item's `.disabled` re-evaluates when the updater's readiness
+/// changes (it starts false and flips once the updater has validated itself, or
+/// stays false forever in a build with no feed). This is the shape Sparkle's own
+/// SwiftUI guidance uses; a one-shot read at scene-construction time would be
+/// captured before the answer exists.
+final class SnapsiftUpdaterState: ObservableObject {
+    @Published var canCheckForUpdates = false
+    private var observation: NSKeyValueObservation?
+    init(_ updater: SPUUpdater) {
+        observation = updater.observe(\.canCheckForUpdates, options: [.initial, .new]) {
+            [weak self] u, _ in
+            let value = u.canCheckForUpdates
+            Task { @MainActor in self?.canCheckForUpdates = value }
+        }
+    }
+}
+#endif
 private struct SnapsiftUpdateCheckerKey: EnvironmentKey {
     static let defaultValue = SnapsiftUpdateChecker()
 }
@@ -37,12 +62,26 @@ struct SnapsiftApp: App {
     // window opening/closing. `startingUpdater: true` makes it perform
     // Sparkle's own default background check-on-launch — no extra nag on top
     // of that, and nothing beyond a version/OS check is ever sent (see
-    // docs/UPDATES.md). Source checkouts and CI builds simply have no
-    // SUFeedURL/SUPublicEDKey (build-app.sh omits them when the env vars
-    // aren't set), so this updater has nothing to check against and stays
-    // silent — no separate "am I the official binary" branch needed here.
-    private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+    // docs/UPDATES.md).
+    //
+    // Source checkouts and CI builds have NEITHER SUPublicEDKey NOR SUFeedURL:
+    // `build-app.sh` writes the feed URL only alongside a public key, precisely
+    // so this sentence is true. With no feed there is nothing to fetch, so such
+    // a build makes no update request at all and this updater simply reports
+    // `canCheckForUpdates == false` — which is what disables the menu item
+    // below. (An earlier version wrote SUFeedURL unconditionally; the updater
+    // then had a feed and no key, and depending on how Sparkle judged the
+    // ad-hoc signature either failed startup with a modal alert one second
+    // after launch or scheduled real background checks against oss.cver.net.)
+    private let updaterController: SPUStandardUpdaterController
+    @StateObject private var updaterState: SnapsiftUpdaterState
+
+    init() {
+        let controller = SPUStandardUpdaterController(
+            startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        updaterController = controller
+        _updaterState = StateObject(wrappedValue: SnapsiftUpdaterState(controller.updater))
+    }
     #endif
 
     var body: some Scene {
@@ -51,7 +90,7 @@ struct SnapsiftApp: App {
             ContentView()
                 .cverTheme(ReefTheme())
                 .environment(\.snapsiftUpdateChecker, SnapsiftUpdateChecker(
-                    checkAvailable: true,
+                    checkAvailable: updaterState.canCheckForUpdates,
                     check: { updaterController.updater.checkForUpdates() }))
         }
         .windowResizability(.contentSize)   // macOS-only modifier

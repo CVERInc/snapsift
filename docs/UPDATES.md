@@ -31,29 +31,44 @@ spoofed feed/download can't push a tampered build.
 
 - **Skip one version**: click "Skip This Version" in the update dialog.
 - **Turn off background checks**: `snapsift ▸ Settings…` has no separate
-  toggle today (Sparkle's own default: it still checks, silently, and only
-  ever shows you something when there *is* an update — see
+  toggle today. The shipped `Info.plist` does not set `SUEnableAutomaticChecks`
+  either way, so Sparkle applies its own default — which, on the second launch
+  of the official binary, is to ask you once whether it may check
+  automatically, and then to honour that answer. See
   [Sparkle's user documentation](https://sparkle-project.org/documentation/)
-  for the `SUEnableAutomaticChecks` default and how a user can be given a
-  toggle for it in-app).
+  for that prompt and for how an app can offer an in-app toggle instead.
 - **Never check at all**: build snapsift yourself from source
   (`app/scripts/build-app.sh` with no `SNAPSIFT_SU_PUBLIC_ED_KEY` set — the
-  default for anyone who just clones the repo). That build has no public key
-  to verify an appcast against, so Sparkle has nothing to trust and never
-  offers an update; the script prints a warning saying exactly that when you
-  run it this way.
+  default for anyone who just clones the repo). That build gets **neither**
+  `SUPublicEDKey` **nor** `SUFeedURL` in its `Info.plist`, so Sparkle has no
+  feed to fetch and no key to trust: it makes no update request at all, to
+  `oss.cver.net` or anywhere else. The script prints a warning saying exactly
+  that when you run it this way.
+
+  (The two keys travel together deliberately. An earlier build script wrote
+  `SUFeedURL` unconditionally, which made this paragraph untrue: Sparkle then
+  had a feed and only lacked a key to verify it with, and depending on how it
+  judged the ad-hoc signature it either showed a modal "Unable to Check For
+  Updates" a second after every launch or asked permission on the second
+  launch and then fetched the feed on every launch after that.)
 
 ## Maintainer release steps
 
 Producing a shippable update is four steps across two repos — this one and
 the family's `cver-tools` signing pipeline:
 
-1. **Build** — `app/scripts/build-app.sh release` with both
-   `SNAPSIFT_FEED_URL` (defaults to the production appcast, so usually
-   unset) and `SNAPSIFT_SU_PUBLIC_ED_KEY` (the EdDSA **public** key —
-   see "One-time key setup" below) set. This produces an unsigned
-   `.app` with `Sparkle.framework` embedded and the update-check Info.plist
-   keys filled in.
+1. **Build** — `app/scripts/build-app.sh release` with
+   `SNAPSIFT_SU_PUBLIC_ED_KEY` (the EdDSA **public** key — see "One-time key
+   setup" below) set; `SNAPSIFT_FEED_URL` defaults to the production appcast,
+   so it is usually left unset. **Setting the public key is what turns
+   updating on**: with it, the script writes both `SUPublicEDKey` and
+   `SUFeedURL`; without it, neither. This produces an `.app` with
+   `Sparkle.framework` embedded, the update-check `Info.plist` keys filled in,
+   and an **ad-hoc** signature on the executable and the bundle (the script
+   verifies it with `codesign --verify --deep --strict` and refuses to finish
+   otherwise — an unsigned-after-`install_name_tool` binary is SIGKILLed at
+   launch on Apple Silicon). Ad-hoc is not distribution signing; step 2
+   replaces it.
 2. **Sign, notarize, package** — `cver-tools`' `mac-release/release.sh`
    (family pipeline; not part of this repo) turns that `.app` into a signed,
    notarized, stapled `.dmg`, using

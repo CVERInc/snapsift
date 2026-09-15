@@ -1546,6 +1546,117 @@ do {
           "deliberate no-survivor group is not confused with a lost keeper")
 }
 
+print("Commit decision — at least one SURVIVOR must still exist (P1-2)")
+do {
+    // The state red-team r2's probe #5 reaches, and the app can reach without
+    // any protection flag at all: press `X` on keeper A (nothing outranks it,
+    // so nothing is promoted — A stays nominated AND marked), then change your
+    // mind about B and un-mark it. A is keeper+rejected, C is rejected, and B —
+    // the frame the user just decided to KEEP — is the only survivor.
+    let a = ph(1, 0, quality: 0.9), b = ph(2, 1), c = ph(3, 2)
+    let photos = [a, b, c]
+    let rejected: Set<String> = ["U1", "U3"]
+    let state = CommitGroupState(index: 0, photos: photos, keeperID: "U1",
+                                 rejected: rejected, includeProtected: false)
+
+    // There IS no nominated surviving keeper in this state — which is exactly
+    // what made the old gate skip the liveness check altogether.
+    check(survivingKeeper(photos: photos, keeperID: "U1", rejected: rejected,
+                          includeProtected: false) == nil,
+          "the nominated keeper is itself marked → survivingKeeper is nil")
+    check(survivors(photos: photos, rejected: rejected, includeProtected: false)
+            .map(\.uuid) == ["U2"],
+          "…while the group plainly still has a survivor: U2")
+
+    // B was deleted on a phone between the scan and the commit — the same
+    // ordinary action r1 P1-1 was filed for, one frame over.
+    let gone = commitSweepDecision(groups: [state],
+        live: LiveCommitFacts(resolved: ["U1", "U3"],
+                              favoriteNow: ["U1": false, "U3": false],
+                              editedNow: ["U1": false, "U3": false]))
+    check(gone.deleteIDs.isEmpty,
+          "the only survivor vanished → NOTHING in that group is deleted")
+    check(gone.withdrawnGroups == [WithdrawnGroup(index: 0, reason: .noSurvivorLeft)],
+          "…the group is withdrawn whole, and says the survivor is what is gone")
+
+    // Positive control: B is still there → the commit proceeds normally, so the
+    // guard is not just "withdraw everything".
+    let fine = commitSweepDecision(groups: [state],
+        live: LiveCommitFacts(resolved: ["U1", "U2", "U3"],
+                              favoriteNow: ["U1": false, "U3": false],
+                              editedNow: ["U1": false, "U3": false]))
+    check(Set(fine.deleteIDs) == ["U1", "U3"] && fine.withdrawnGroups.isEmpty,
+          "survivor alive → the two marked frames commit as normal")
+    // NEGATIVE CONTROL: restore the old gate (only `survivingKeeper` liveness,
+    // nil ⇒ proceed) and `the only survivor vanished…` fails with
+    // deleteIDs == ["U1","U3"] — the zero-surviving-copies commit itself.
+}
+do {
+    // The nominated keeper is gone but ANOTHER frame survives: still withdrawn
+    // (the sheet named that photo), and reported as a keeper loss, not as a
+    // no-survivor loss — two different sentences for two different facts.
+    let a = ph(1, 0, quality: 0.9), b = ph(2, 1), c = ph(3, 2)
+    let state = CommitGroupState(index: 0, photos: [a, b, c], keeperID: "U1",
+                                 rejected: ["U3"], includeProtected: false)
+    let d = commitSweepDecision(groups: [state],
+        live: LiveCommitFacts(resolved: ["U2", "U3"],
+                              favoriteNow: ["U3": false], editedNow: ["U3": false]))
+    check(d.deleteIDs.isEmpty && d.keeperMissingCount == 1 && d.noSurvivorLeftCount == 0,
+          "nominated keeper gone, another survivor alive → withdrawn as keeperMissing")
+}
+do {
+    // The gate reads the whole group, so `groupWithdrawalReason` is asked about
+    // every survivor — the App layer's live fetch has to cover them all. This
+    // pins the contract the fetch set must satisfy.
+    let a = ph(1, 0, quality: 0.9), b = ph(2, 1)
+    check(groupWithdrawalReason(photos: [a, b], keeperID: "U1",
+                                rejected: ["U1"], includeProtected: false,
+                                resolved: ["U1"]) == .noSurvivorLeft,
+          "survivor never fetched (absent from resolved) reads as gone — fail-safe")
+    check(groupWithdrawalReason(photos: [a, b], keeperID: "U1",
+                                rejected: ["U1"], includeProtected: false,
+                                resolved: ["U1", "U2"]) == nil,
+          "…and with the survivor in the fetch set the group proceeds")
+    check(groupWithdrawalReason(photos: [a, b], keeperID: "U1",
+                                rejected: ["U1", "U2"], includeProtected: false,
+                                resolved: []) == nil,
+          "a deliberately emptied group has nothing to lose — never withdrawn")
+}
+
+print("One function names the survivor: sheet, checkbox and commit agree (P1-2)")
+do {
+    // Same rejected-keeper state. Three surfaces used to answer differently:
+    // the sheet's keeper row (survivingKeeper ⇒ "⚠️ no photo left"), the
+    // acknowledge checkbox (hasNoSurvivor == false ⇒ no checkbox), and the
+    // commit (which kept U2). `namedSurvivor` is the one answer they all read.
+    let a = ph(1, 0, quality: 0.9), b = ph(2, 1), c = ph(3, 2)
+    let photos = [a, b, c]
+    let rejected: Set<String> = ["U1", "U3"]
+    check(namedSurvivor(photos: photos, keeperID: "U1", rejected: rejected,
+                        includeProtected: false)?.uuid == "U2",
+          "the sheet names the frame that actually stays, not 'no photo left'")
+    check(!hasNoSurvivor(photos: photos, rejected: rejected, includeProtected: false),
+          "…and the checkbox stays away, because a photo really does remain")
+
+    // THE INVARIANT: the two can never disagree, whatever the state.
+    var agree = true
+    for r in [Set<String>(), ["U1"], ["U2"], ["U3"], ["U1", "U2"], ["U1", "U3"],
+              ["U2", "U3"], ["U1", "U2", "U3"]] {
+        for inc in [false, true] {
+            let named = namedSurvivor(photos: photos, keeperID: "U1",
+                                      rejected: r, includeProtected: inc)
+            if (named == nil) != hasNoSurvivor(photos: photos, rejected: r,
+                                               includeProtected: inc) { agree = false }
+        }
+    }
+    check(agree, "namedSurvivor == nil is EXACTLY hasNoSurvivor, over every mark state")
+    check(namedSurvivor(photos: photos, keeperID: "U1",
+                        rejected: ["U1", "U2", "U3"], includeProtected: false) == nil,
+          "a group that really is emptied still reports no survivor")
+    // NEGATIVE CONTROL: make namedSurvivor return `survivingKeeper` only and
+    // the first check fails (nil, the "⚠️ no photo left" fork).
+}
+
 print("Commit decision — live protection sweep")
 do {
     let keep = ph(1, 0, quality: 0.9)
@@ -1759,7 +1870,60 @@ do {
     check(evaluateLibraryIdentity(sidecarPath: "", photosLibraryPath: real)
             == .unverified(.pathUnknown),
           "iOS / empty sidecar path ⇒ unverified")
+    // The freshness PROBE ITSELF failing is not a finding about the library.
+    // `editedFlags` returns nil for SQLITE_BUSY / IO error; reading that as
+    // `.staleContents` told the user their library file looks frozen when the
+    // truth was "Photos was writing for two seconds".
+    check(evaluateLibraryIdentity(sidecarPath: real, photosLibraryPath: real,
+                                  sampledNewest: 12, foundInSidecar: nil)
+            == .unverified(.probeUnavailable),
+          "probe couldn't run (nil, not 0) ⇒ unknown — NOT 'stale contents'")
+    check(evaluateLibraryIdentity(sidecarPath: real, photosLibraryPath: real,
+                                  sampledNewest: 12, foundInSidecar: 0)
+            == .unverified(.staleContents),
+          "…while a probe that ran and found NOTHING really is stale contents")
+    check(!evaluateLibraryIdentity(sidecarPath: real, photosLibraryPath: real,
+                                   sampledNewest: 12, foundInSidecar: nil).isVerified,
+          "either way it is untrusted for this sweep — the difference is the banner")
+    check(evaluateLibraryIdentity(sidecarPath: stale, photosLibraryPath: real,
+                                  sampledNewest: 12, foundInSidecar: nil)
+            == .unverified(.pathMismatch),
+          "a wrong path is decided before the probe is even consulted")
     // NEGATIVE CONTROL: drop the path comparison and the pathMismatch check fails.
+    // NEGATIVE CONTROL: make `foundInSidecar` non-optional again (nil ⇒ 0) and
+    // "probe couldn't run … NOT 'stale contents'" fails.
+}
+
+print("Snapsift albums: a frame is in ONE bucket, across scans (P2-3)")
+do {
+    // Within a single write the two buckets are already disjoint. The bug is
+    // ACROSS scans: the album write only ever added, so a frame filed under
+    // "Exact Duplicates" on a run with Full Disk Access stayed there when the
+    // next run classified it as unreadable and put it in "Needs a look".
+    let plan = albumBucketPlan(exactCandidates: ["A", "B"],
+                               needsLookCandidates: ["C", "D"])
+    check(plan.exactAdd == ["A", "B"] && plan.needsLookAdd == ["C", "D"],
+          "each frame is added to the bucket this scan puts it in")
+    check(plan.exactRemove == ["C", "D"],
+          "…and taken OUT of Exact Duplicates if a previous scan filed it there")
+    check(plan.needsLookRemove == ["A", "B"],
+          "…and out of Needs a look in the other direction — both ways reconcile")
+
+    // Overlap must be impossible upstream; if it ever happens, the frame we
+    // could not classify must not be the one wearing "safe to remove".
+    let bad = albumBucketPlan(exactCandidates: ["A", "X"], needsLookCandidates: ["X"])
+    check(bad.exactAdd == ["A"],
+          "an overlapping frame is dropped from the exact-duplicate bucket")
+    check(bad.exactRemove.contains("X") && !bad.needsLookRemove.contains("X"),
+          "…and removed from it: unknown ⇒ protected wins the tie")
+    check(bad.needsLookAdd == ["X"], "…while Needs a look keeps it")
+
+    // Nothing to reconcile when a bucket is empty — no spurious removals.
+    let onlyExact = albumBucketPlan(exactCandidates: ["A"], needsLookCandidates: [])
+    check(onlyExact.exactRemove.isEmpty && onlyExact.needsLookRemove == ["A"],
+          "an empty needs-look set removes nothing from Exact Duplicates")
+    // NEGATIVE CONTROL: return `exactCandidates` unfiltered from albumBucketPlan
+    // and "an overlapping frame is dropped…" fails with ["A","X"].
 }
 
 print("Own-write token restamp (P2-6)")

@@ -37,6 +37,17 @@ leaves your Mac.
   app only ever pre-marks a photo for deletion when it is a **byte-verified
   exact duplicate** (identical original files). Everything else is yours to
   decide, and the built-in deletion history records which was which.
+- **What "exact duplicate" compares, and what it doesn't.** Two copies can be
+  byte-identical as *pixels* and still differ as *library entries*: one of them
+  may be the copy you filed into albums or wrote a caption on. snapsift
+  compares **album membership and captions/titles/descriptions** and leaves the
+  copy carrying something extra unmarked (if it cannot read either signal, it
+  treats the copy as carrying it). It does **not** compare **keywords, people,
+  or places** — Photos exposes no public API for them, and a guard written from
+  an unverified database schema would fail silently in the worst way, by making
+  every exact-duplicate suggestion disappear. Deleting the wrong copy is
+  recoverable for 30 days from Recently Deleted, keywords and all; this is a
+  limit worth knowing, not a hole in the safety guarantee.
 - **Protected photos are never pre-marked, and protection is re-checked
   against the live library right before anything is deleted.** Protected means
   favorites, edited photos, documents/scans — and anything snapsift could not
@@ -54,9 +65,13 @@ swift run SnapsiftTests         # run the Core test suite
 
 First-launch notes:
 
-- **Gatekeeper**: the app is unsigned (built from source on your machine, so
-  macOS usually launches it directly; a downloaded copy needs right-click →
-  Open the first time).
+- **Gatekeeper**: the app is unsigned for distribution purposes (built from
+  source on your machine, so macOS usually launches it directly; a downloaded
+  copy needs right-click → Open the first time). The build script does ad-hoc
+  sign the bundle, which carries no identity but is what lets the executable
+  launch at all on Apple Silicon after its embedded-framework path is patched;
+  the script verifies that with `codesign --verify --deep --strict` and refuses
+  to finish if it fails.
 - **Photos access**: on first scan, macOS asks for read/write access to your
   Photos library — required to enumerate, sort into albums, and delete into
   Recently Deleted.
@@ -140,9 +155,13 @@ they differ it is said so below.
   "include protected" override, because there is no fact to consent to
   overriding. Ruling (chodaict, 2026-09-16): these photos are collected into a
   Photos album — **"Snapsift · Needs a look"** — non-destructively (membership
-  only; nothing is moved or removed from anywhere else), so a human decides in
-  Photos.app instead of the tool guessing. The same album also collects videos
-  whose Live Photo pairing could not be confirmed. This is stricter than "not
+  only; no photo is deleted, and no album you made is ever touched), so a human
+  decides in Photos.app instead of the tool guessing. The same album also
+  collects videos whose Live Photo pairing could not be confirmed. A frame can
+  never sit in both "Needs a look" and "Exact Duplicates": whichever the latest
+  sort decides, the frame is taken out of the other one, so Photos.app never
+  shows you the same photo labelled both "safe to remove" and "snapsift
+  couldn't read this". This is stricter than "not
   pre-marked": it replaces that earlier compromise.
 - **Documents/scans** are only protected for input produced by the macOS app —
   `scan.py` cannot detect them (no pixel access). The CLI path does not protect
