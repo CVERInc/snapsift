@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Hardened-runtime entitlements for the signed, notarized, direct-sale
+    snapsift.app (not the App Store; not sandboxed — see the owner's ruling
+    of 2026-08-02 in the repo's task history). Consumed by the family
+    signing pipeline, cver-tools' mac-release/release.sh, via its
+    --entitlements flag; this file does no signing itself.
+
+    Starting point: the family template at
+    tools-lanes/.../mac-release/entitlements/direct-sale.entitlements. Same
+    baseline reasoning applies here — com.apple.security.app-sandbox is
+    deliberately ABSENT (that IS "not sandboxed"), and hardened runtime's
+    defaults (no JIT, no unsigned executable memory, no DYLD_* injection, no
+    debugger attach, no loading of dylibs/frameworks not signed by the same
+    Team ID, no sending Apple events to unrelated processes) are all left in
+    force below.
+
+    Sparkle-specific finding: Sparkle 2's sandbox-escape machinery — its
+    Installer.xpc / Downloader.xpc XPC services, and the
+    temporary-exception.mach-lookup / temporary-exception.shared-preference
+    entitlements that go with them (see Sparkle's own
+    TestApplication/Sparkle-Test-App.entitlements) — exists ONLY to let a
+    SANDBOXED host app reach outside its sandbox to install an update.
+    snapsift is not sandboxed, so there is no sandbox boundary for Sparkle to
+    cross: it runs its updater and relaunch helper (Autoupdate) as an
+    ordinary child process, same as any other non-sandboxed app spawning a
+    signed helper it ships. None of the sandboxed-app entitlements apply
+    here, and adding them would be the same inert cargo-culting the family
+    template already warns against.
+
+    Library validation (the one hardened-runtime restriction Sparkle usually
+    needs an exception for) is handled by SIGNING, not an entitlement:
+    release.sh's `codesign --deep` re-signs Sparkle.framework and its nested
+    Autoupdate.app with snapsift's OWN Developer ID Application identity
+    before notarization, so every nested binary carries the same Team ID the
+    hardened runtime checks for. com.apple.security.cs.disable-library-validation
+    is not needed unless that deep-sign step is ever skipped for Sparkle's
+    nested code — if it is, add the key here and say why, per the family
+    template's rule.
+
+    Net result, as of 2026-09-15: zero additional keys. Add one only when a
+    real codesign/notarize/launch rejection names it, with a comment here
+    explaining which Sparkle mechanism needed it.
+  -->
+</dict>
+</plist>

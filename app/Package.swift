@@ -21,6 +21,14 @@ let package = Package(
         // Signet — CVER's shared design system (palette, tokens, glass surfaces, chrome).
         // Pinned to main / latest per the in-house dep convention.
         .package(url: "https://github.com/CVERInc/signet", branch: "main"),
+        // Sparkle 2 — auto-update framework for the sold-direct signed binary
+        // (source builds have no feed URL / public key and simply never see an
+        // update). Pinned to an exact release tag, unlike the in-house deps
+        // above: it is third-party and macOS-only (its own Package.swift
+        // declares only .macOS(.v12)), so it is attached to SnapsiftApp alone
+        // via a macOS platform condition below, not to the package's
+        // `dependencies` list as a whole.
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
     ],
     targets: [
         .target(name: "SnapsiftCore"),
@@ -31,6 +39,10 @@ let package = Package(
         .executableTarget(name: "SnapsiftApp", dependencies: [
             "SnapsiftCore",
             .product(name: "Signet", package: "signet"),
+            // macOS-only: `platforms` above also declares iOS 17 for the future
+            // iPhone target, and Sparkle has no iOS build. All call sites are
+            // additionally guarded with #if os(macOS).
+            .product(name: "Sparkle", package: "Sparkle", condition: .when(platforms: [.macOS])),
         ]),
         .executableTarget(name: "SnapsiftTests", dependencies: ["SnapsiftCore"]),
         // Live-machine harness (`swift run SnapsiftLiveTests`): exercises the

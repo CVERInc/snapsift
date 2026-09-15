@@ -15,6 +15,12 @@ struct SnapsiftActions {
     var deleteMarked: () -> Void
     var showHistory: () -> Void
     var toggleHelp: () -> Void
+    /// Sparkle "Check for Updates…" (macOS only; see SnapsiftUpdateCommands
+    /// below). ContentView forwards the App-owned updater through here rather
+    /// than a second FocusedValue-style bridge. Always false/no-op on
+    /// platforms without Sparkle linked.
+    var canCheckForUpdates: Bool
+    var checkForUpdates: () -> Void
 }
 
 private struct SnapsiftActionsKey: FocusedValueKey {
@@ -69,6 +75,25 @@ struct SnapsiftMenuCommands: Commands {
             Button(t.helpTitle()) { actions?.toggleHelp() }
                 .keyboardShortcut("?", modifiers: .command)
                 .disabled(actions == nil)
+        }
+    }
+}
+
+/// Standard-placement "Check for Updates…" item (App menu, right after the
+/// automatic "About snapsift" group — CommandGroupPlacement.appInfo is macOS's
+/// documented spot for it, and is what Sparkle's own SwiftUI guidance uses).
+/// Reuses the same `snapsiftActions` FocusedValue bridge as every other menu
+/// item above rather than a second updater-specific mechanism; the updater
+/// itself lives in SnapsiftApp.swift and is forwarded in by ContentView.
+struct SnapsiftUpdateCommands: Commands {
+    @FocusedValue(\.snapsiftActions) private var actions
+    @AppStorage("snapsift.language") private var langRaw = Language.detect().rawValue
+    private var t: L10n { L10n(Language(rawValue: langRaw) ?? .en) }
+
+    var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button(t.checkForUpdates()) { actions?.checkForUpdates() }
+                .disabled(actions?.canCheckForUpdates != true)
         }
     }
 }

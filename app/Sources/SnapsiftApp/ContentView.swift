@@ -5,6 +5,10 @@ import Signet
 
 struct ContentView: View {
     @StateObject private var model = LibraryModel()
+    // App-owned Sparkle updater, forwarded here so it can flow through the
+    // existing menuBridge/SnapsiftActions bridge below (see Commands.swift).
+    // Defaults to unavailable/no-op — set for real by SnapsiftApp on macOS.
+    @Environment(\.snapsiftUpdateChecker) private var updateChecker
     @State private var selection: ReviewGroup.ID?
     @State private var categorySelection: CategoryBucket.ID?
     @State private var deleting = false
@@ -529,7 +533,9 @@ struct ContentView: View {
             writeAlbums: { Task { await runWriteAlbums() } },
             deleteMarked: { Task { await runDelete() } },
             showHistory: { showHistorySheet = true },
-            toggleHelp: { toggleHelp() }
+            toggleHelp: { toggleHelp() },
+            canCheckForUpdates: updateChecker.checkAvailable,
+            checkForUpdates: { updateChecker.check() }
         )
     }
 

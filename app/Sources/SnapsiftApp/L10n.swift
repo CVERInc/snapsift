@@ -154,6 +154,15 @@ struct L10n: Sendable {
         case .zhTW: return "刪除已標記的照片…"
         }
     }
+    /// App-menu item (Sparkle-driven, macOS only): explicit user-triggered
+    /// update check.
+    func checkForUpdates() -> String {
+        switch language {
+        case .en: return "Check for Updates…"
+        case .ja: return "アップデートを確認…"
+        case .zhTW: return "檢查更新…"
+        }
+    }
     /// Settings (⌘,) language picker label.
     func settingsLanguage() -> String {
         switch language {
