@@ -18,6 +18,11 @@ struct ContentView: View {
     /// so the keyboard handler can walk the SAME geometry the gallery drew
     /// (SPEC §2: ↑/↓ move by row). 0 until the first layout pass.
     @State private var galleryWidth: CGFloat = 0
+    /// Measured statusBar height (W1.5) so the "?" cheat sheet can reserve
+    /// exactly that much room at its bottom instead of guessing a constant —
+    /// the bar's height moves with locale (ja/zh-TW wrap differently) and
+    /// Dynamic Type, so a fixed number would drift back out of sync.
+    @State private var statusBarHeight: CGFloat = 0
     @State private var previewID: String?        // big-preview overlay (loupe)
     @State private var loupeOpen = false          // true when loupe is showing
     @State private var protectedHintFrame: String? // frame showing "protected — ⇧X" hint
@@ -252,10 +257,24 @@ struct ContentView: View {
                     .safeAreaInset(edge: .top) { staleRestoreBar }
                     .safeAreaInset(edge: .top) { degradedProtectionBar }
                     .safeAreaInset(edge: .top) { commitNoticeBar }
+                    // W1.5: pane focus reads as dimming, not a coloured frame.
+                    // Sidebar-focused ⇒ content dims slightly; toolbar (a
+                    // sibling, set via .toolbar{} below) is untouched.
+                    .opacity(sidebarFocused ? 0.85 : 1)
+                    .animation(.easeInOut(duration: 0.15), value: sidebarFocused)
                 if showHelp {
                     Divider()
                     helpPanel
                         .frame(width: 290)
+                        // W1.5: the cheat sheet's last row was landing under the
+                        // status bar. Reserve exactly the bar's measured height
+                        // (`statusBarHeight`, from `StatusBarHeightKey` below) at
+                        // the panel's own bottom rather than relying on safe-area
+                        // propagation through the split view, which is what let
+                        // the overlap happen in the first place.
+                        .safeAreaInset(edge: .bottom) {
+                            Color.clear.frame(height: statusBarHeight)
+                        }
                         .transition(.move(edge: .trailing))
                 }
             }
@@ -265,6 +284,11 @@ struct ContentView: View {
         // SnapsiftMenuCommands. The ⌘-shortcuts live on the menu items only.
         .focusedSceneValue(\.snapsiftActions, menuBridge)
         .safeAreaInset(edge: .bottom) { statusBar }
+        // W1.5: statusBar publishes its own height (StatusBarHeightKey); the
+        // help panel's safeAreaInset above reads it back via `statusBarHeight`.
+        .onPreferenceChange(StatusBarHeightKey.self) { h in
+            if abs(h - statusBarHeight) > 0.5 { statusBarHeight = h }
+        }
         .overlay(alignment: .top) { bannerView }
         .overlay { if previewID != nil { previewOverlay } }
         // While the delete (and its system confirmation) is in flight, the
@@ -609,6 +633,9 @@ struct ContentView: View {
                 .frame(minWidth: 240)
                 .overlay { if model.groups.isEmpty && model.categories.isEmpty { emptyState } }
                 .focusable(!model.groups.isEmpty || !model.categories.isEmpty)
+                // W1.5: same reasoning as the content pane below — dimming
+                // carries the pane-focus signal, the system glow does not.
+                .focusEffectDisabled()
                 .focused($sidebarFocused)
                 .onKeyPress { handleListKey($0, proxy) }
                 .onChange(of: model.groups.count) { _, n in if n > 0 { sidebarFocused = true } }
@@ -988,6 +1015,10 @@ struct ContentView: View {
                               : hovering ? Color.reefMint.opacity(0.08) : Color.clear)
                     .padding(.vertical, 1)
             )
+            // W1.5: content pane has focus ⇒ sidebar rows dim (selected row
+            // stays readable so "where am I" survives the dim).
+            .opacity(gridFocused && !sel ? 0.55 : 1)
+            .animation(.easeInOut(duration: 0.15), value: gridFocused)
         }
     }
 
@@ -1030,6 +1061,10 @@ struct ContentView: View {
                             : hovering ? Color.reefMint.opacity(0.08) : Color.clear)
                   .padding(.vertical, 1)
           )
+          // W1.5: same as categoryRow — dim non-selected rows while the
+          // content pane holds focus.
+          .opacity(gridFocused && !sel ? 0.55 : 1)
+          .animation(.easeInOut(duration: 0.15), value: gridFocused)
         }
         .id(g.id)
     }
@@ -1078,6 +1113,12 @@ struct ContentView: View {
                             gridFocused = true
                         })
                 .focusable()
+                // W1.5 (owner dogfood ruling): pane focus is shown by dimming
+                // the OTHER pane, not by the system's default focus glow — that
+                // glow was the "orange vertical divider" the owner saw lighting
+                // up the whole content pane. `onboarding` below already
+                // disables it for the same reason; this arm was the miss.
+                .focusEffectDisabled()
                 .focused($gridFocused)
                 .onKeyPress { handleGridKey($0) }
                 // Belt-and-braces Esc: macOS may deliver Esc as the cancel
@@ -1465,10 +1506,12 @@ struct ContentView: View {
                     .foregroundStyle(Color.reefText)
             }
             Spacer()
-            if model.qualityAvailable {
-                Label(t.appleRanked(), systemImage: "wand.and.stars")
-                    .foregroundStyle(Color.reefMint)
-            } else if model.hasScanned {
+            // W1.5: this used to also show `t.appleRanked()` here whenever
+            // `model.qualityAvailable` — the exact same line GroupReview's own
+            // header already shows (`qualityAvailable` gate, `body` above).
+            // Owner's dogfood screenshot caught the duplicate; the group
+            // header is the one source, per spec §3 item 4.
+            if !model.qualityAvailable && model.hasScanned {
                 // The missing "X MB freed" estimate must be explained, not
                 // silently absent: without Full Disk Access the sidecar (quality
                 // scores + real file sizes) can't be read.
@@ -1507,6 +1550,14 @@ struct ContentView: View {
         .padding(.horizontal, 14).padding(.vertical, 7)
         .background(.ultraThinMaterial)
         .overlay(Rectangle().frame(height: 1).foregroundStyle(Color.reefBorder), alignment: .top)
+        // W1.5: measure this bar's real height so the help panel (below) can
+        // reserve exactly that much room instead of guessing — see
+        // `StatusBarHeightKey`.
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: StatusBarHeightKey.self, value: geo.size.height)
+            }
+        )
     }
 
     @ViewBuilder private var bannerView: some View {
@@ -2052,6 +2103,10 @@ struct GroupReview: View {
                            fill: true)   // fill the exact aspect-true box (no letterbox)
                 .opacity(dimmed ? 0.34 : 1)
             badge(p: p, keep: keep, del: del, exactSuggested: isExactSuggested)
+            // W1.5 (owner dogfood ruling): moved from bottom-leading — it was
+            // covered by the filename caption there. Top-trailing keeps the
+            // same size and never collides with the KEEP/DELETE badge, which
+            // stays top-leading (`badge(p:...)` above).
             if index < 9 {
                 Text("\(index + 1)")
                     .font(.system(.subheadline, design: .monospaced).weight(.bold))
@@ -2059,7 +2114,7 @@ struct GroupReview: View {
                     .background(Color.reefGround.opacity(0.75), in: Circle())
                     .foregroundStyle(Color.reefMint)
                     .padding(6)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
             // Filename caption overlaid on a gradient strip so the card height
             // stays equal to the row height (justified rows need uniform height).
@@ -2078,13 +2133,9 @@ struct GroupReview: View {
         .background(Color.reefDeep)
         .clipShape(RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous).strokeBorder(border, lineWidth: 2))
-        .overlay {
-            if focused {
-                RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous)
-                    .strokeBorder(.white, style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
-                    .padding(2)
-            }
-        }
+        // W1.5: focus ring drawn OUTSIDE the KEEP/amber/teal border so both
+        // read at once — see `CVERFocusRing` in Chrome.swift.
+        .cverFocusRing(focused)
         .overlay(alignment: .bottom) {
             if protectedHintFrame == p.uuid {
                 // Unverifiable has no ⇧X override — a distinct hint that
@@ -2258,6 +2309,18 @@ private struct GalleryWidthKey: PreferenceKey {
     // Last-writer wins: there is a single background reader, and a narrowing
     // window must be able to REDUCE the width (a `max` reducer would latch to the
     // widest value ever seen and overflow the rows).
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 { value = next }
+    }
+}
+
+/// W1.5: carries the rendered statusBar height up so the help panel can
+/// reserve exactly that much bottom room — same last-writer-wins shape as
+/// `GalleryWidthKey`, for the same reason (a single reader, height can shrink
+/// as well as grow across locales/Dynamic Type).
+private struct StatusBarHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         let next = nextValue()
         if next > 0 { value = next }

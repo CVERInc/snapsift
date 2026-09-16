@@ -75,6 +75,53 @@ extension View {
     func cardHover() -> some View { modifier(CardHover()) }
 }
 
+/// W1.5 (owner dogfood ruling, `docs/reviews/REVIEW-designer-2026-09-16.md` §3.7):
+/// the photo-focus indicator, distinct from the KEEP green border and the
+/// amber protected border so all three can coexist on one card. A 2pt ring in
+/// the system accent colour plus a 1pt dark outer halo, drawn OUTSIDE the
+/// card's own border — never inset over it — with a very slight lift and no
+/// scale change. Local canvas-variant implementation now; W3 lifts the same
+/// contract (an `isFocused`-driven additive ring that never overlaps the
+/// subject's own border/tint, so color-true surfaces stay color-true) into
+/// Signet as `CVERFocusRing`, alongside a `.chrome` variant for buttons/rows.
+struct CVERFocusRing: ViewModifier {
+    var isFocused: Bool
+    var cornerRadius: CGFloat = CVERRadius.control
+    private let ringWidth: CGFloat = 2
+    private let haloWidth: CGFloat = 1
+    private let gap: CGFloat = 2   // clears the card's own KEEP/amber/teal border
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                ZStack {
+                    // Dark halo first (outermost) so the accent ring reads against
+                    // any photo, light or dark, without needing its own opacity trick.
+                    RoundedRectangle(cornerRadius: cornerRadius + gap + haloWidth, style: .continuous)
+                        .strokeBorder(Color.black.opacity(0.55), lineWidth: haloWidth)
+                        .padding(-(gap + haloWidth))
+                    RoundedRectangle(cornerRadius: cornerRadius + gap, style: .continuous)
+                        .strokeBorder(Color.accentColor, lineWidth: ringWidth)
+                        .padding(-gap)
+                }
+                .opacity(isFocused ? 1 : 0)
+            }
+            .shadow(color: .black.opacity(isFocused ? 0.35 : 0),
+                    radius: isFocused ? 5 : 0, y: isFocused ? 2 : 0)
+            .animation(.easeOut(duration: 0.12), value: isFocused)
+    }
+}
+
+extension View {
+    /// Applies the canvas-variant `CVERFocusRing` — see the type doc. Used on
+    /// photo cards (and, later, loupe neighbour frames): surfaces whose own
+    /// colour must stay true, so the ring lives outside the content instead of
+    /// tinting it.
+    func cverFocusRing(_ isFocused: Bool, cornerRadius: CGFloat = CVERRadius.control) -> some View {
+        modifier(CVERFocusRing(isFocused: isFocused, cornerRadius: cornerRadius))
+    }
+}
+
 /// The window backdrop: frosted glass under a strong reef tint. Chrome only —
 /// surfaces that must read color-true (the photo grid, the loupe) keep their
 /// opaque `reefGround`/`reefDeep` fills per the Signet rule: glass is for
