@@ -2023,5 +2023,132 @@ do {
           "the dedupe key reads back from the real log file")
 }
 
+// MARK: - W1: row-walk geometry (↑/↓ move by ROW, not by index)
+
+print("JustifiedLayout.targetHeight — one formula for the drawer and the walker")
+do {
+    // Table: (containerWidth, expected nominal row height).
+    let cases: [(Double, Double)] = [
+        (0, 200),        // not measured yet → the baseline, never a divide by zero
+        (-50, 200),      // degenerate width → same baseline
+        (400, 150),      // narrow pane clamps at the floor (400/4.2 = 95.2)
+        (1000, 1000 / 4.2),
+        (2000, 260),     // wide window clamps at the ceiling (2000/4.2 = 476)
+    ]
+    for (w, expected) in cases {
+        check(approx(JustifiedLayout.targetHeight(forWidth: w), expected, 1e-9),
+              "targetHeight(\(Int(w))) == \(String(format: "%.1f", expected))")
+    }
+}
+
+print("JustifiedLayout.rowNeighbor — ↑/↓ walk rows, not the index")
+do {
+    // 10 landscape frames, 3 to a row: rows are [0,1,2] [3,4,5] [6,7,8] [9].
+    let aspects = Array(repeating: 1.5, count: 10)
+    let W = 1000.0, gap = 8.0, H = 200.0
+    let rows = JustifiedLayout.rows(aspectRatios: aspects, containerWidth: W,
+                                    targetHeight: H, spacing: gap)
+    check(rows.map(\.items.count) == [3, 3, 3, 1],
+          "fixture packs 10 frames into rows of 3, 3, 3, 1")
+
+    // Table: (from, delta, expected index or nil).
+    // Every ↓ answer is +3 and every ↑ answer is −3 — which is the whole point:
+    // the old handler answered +1/−1 here.
+    let cases: [(Int, Int, Int?)] = [
+        (0,  1, 3),      // down a row from the first frame
+        (1,  1, 4),      // …keeps the column
+        (2,  1, 5),
+        (3, -1, 0),      // up a row
+        (5, -1, 2),
+        (0, -1, nil),    // already on the first row → no move invented
+        (9,  1, nil),    // already on the last row
+        (9, -1, 6),      // trailing row is short: up lands under the same x
+        (4,  0, nil),    // a zero step is not a move
+        (99, 1, nil),    // an index that isn't placed
+    ]
+    for (from, delta, expected) in cases {
+        let got = JustifiedLayout.rowNeighbor(rows: rows, spacing: gap, from: from, delta: delta)
+        check(got == expected,
+              "rowNeighbor(from: \(from), delta: \(delta)) == \(expected.map(String.init) ?? "nil")")
+    }
+    // NEGATIVE CONTROL: if ↑/↓ were still index arithmetic, (0, +1) would be 1.
+    check(JustifiedLayout.rowNeighbor(rows: rows, spacing: gap, from: 0, delta: 1) != 1,
+          "row-walk is NOT index±1 (the defect this replaces)")
+}
+
+do {
+    // Rows of unequal length: the neighbour row may not span the source frame's
+    // centre at all, and then the NEAREST frame is the honest answer.
+    // 4 squares fill the row exactly; a very wide frame takes the next row alone.
+    let rows = JustifiedLayout.rows(aspectRatios: [1, 1, 1, 1, 3], containerWidth: 400,
+                                    targetHeight: 100, spacing: 0)
+    check(rows.map(\.items.count) == [4, 1], "fixture packs 4 + 1")
+    check(JustifiedLayout.rowNeighbor(rows: rows, spacing: 0, from: 3, delta: 1) == 4,
+          "down from a frame with nothing under it lands on the nearest frame")
+    // Back up from the wide frame: the walk follows its CENTRE (x = 150), which
+    // sits over the second square — not its left edge, which would give 0.
+    check(JustifiedLayout.rowNeighbor(rows: rows, spacing: 0, from: 4, delta: -1) == 1,
+          "…and back up follows the wide frame's centre, not its left edge")
+    check(JustifiedLayout.rowNeighbor(rows: [], spacing: 0, from: 0, delta: 1) == nil,
+          "an empty layout has no neighbour")
+}
+
+// MARK: - W1: DELETE carries a reason (label only — decides nothing)
+
+print("deleteMarkReason — the DELETE side finally answers \"why\"")
+do {
+    // Table: (frame, app-seeded set, whole group armed, expected reason).
+    // The app's own seed is the ONE distinction W1 can make truthfully; every
+    // other mark is a person's, whether they used X on one frame or D on the
+    // group, and the label says exactly that.
+    let cases: [(String, Set<String>, Bool, DeleteMarkReason)] = [
+        ("A", ["A"],      false, .exactDuplicate),  // the app seeded this one
+        ("A", ["A"],      true,  .exactDuplicate),
+        ("A", ["A", "B"], false, .exactDuplicate),
+        ("B", ["A"],      true,  .userRejected),    // marked by the person
+        ("B", [],         true,  .userRejected),
+        ("B", ["A"],      false, .userRejected),
+        ("B", [],         false, .userRejected),
+    ]
+    for (frame, seeded, armed, expected) in cases {
+        check(deleteMarkReason(frameID: frame, autoSeeded: seeded, wholeGroupMarked: armed) == expected,
+              "deleteMarkReason(\(frame), seeded: \(seeded.sorted()), armed: \(armed)) == .\(expected.rawValue)")
+    }
+}
+
+do {
+    // REGRESSION GUARD for review P2-1. `wholeGroupMarked` is fed from
+    // `ReviewGroup.deleteAll`, a PREDICATE (bulkRejectCandidates ⊆ rejected)
+    // that flips on actions the label has nothing to do with: crossing out the
+    // last frame by hand, un-crossing one after D, or nominating a new keeper
+    // after D. A label that changes when the person did nothing to THAT frame
+    // is the same defect W1 set out to fix, wearing another face.
+    //
+    // So: the reason must not depend on that argument at all. The old table
+    // could not catch this — it fed constants and asserted the flip.
+    for frame in ["A", "B"] {
+        for seeded: Set<String> in [[], ["A"], ["A", "B"]] {
+            let armed = deleteMarkReason(frameID: frame, autoSeeded: seeded, wholeGroupMarked: true)
+            let idle  = deleteMarkReason(frameID: frame, autoSeeded: seeded, wholeGroupMarked: false)
+            check(armed == idle,
+                  "the label for \(frame) (seeded: \(seeded.sorted())) survives deleteAll flipping")
+        }
+    }
+
+    // …and nothing reaches `.notPicked`, because nothing RECORDS it yet. The
+    // case stays defined (W2 writes a real `bulkMarked` set); what must not
+    // happen is a chip claiming a fact no state holds — and the audit log,
+    // whose `.burstNonKeeper` is RESERVED and never written, agreeing with it.
+    let everyReachable = Set([true, false].flatMap { armed in
+        ["A", "B", "C"].flatMap { frame in
+            [Set<String>(), ["A"], ["A", "B"]].map {
+                deleteMarkReason(frameID: frame, autoSeeded: $0, wholeGroupMarked: armed)
+            }
+        }
+    })
+    check(everyReachable == [.exactDuplicate, .userRejected],
+          "only the two reasons real state can back are reachable (.notPicked is W2)")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

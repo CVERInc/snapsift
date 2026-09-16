@@ -18,6 +18,11 @@ struct DeletionHistoryView: View {
     let onClose: () -> Void
 
     @State private var sessions: [DeletionSession] = []
+    /// The seven technical reason names are OFF by default: this panel answers
+    /// "when, how many, how long can I still get them back", and an audit trail
+    /// sitting on top of that answer reads as an engineer's tool. They are still
+    /// one click away in the ⋯ menu — demoted, not removed.
+    @State private var showReasons = false
     @State private var exporting = false
     // Built once on demand (not on every body render) so the O(history) export
     // string isn't rebuilt when the sheet merely re-renders.
@@ -45,6 +50,21 @@ struct DeletionHistoryView: View {
                     .font(.title3.bold())
                     .foregroundStyle(Color.reefMint)
                 Spacer()
+                Menu {
+                    Toggle(t.historyShowReasons(), isOn: $showReasons)
+                    Divider()
+                    Button(t.historyExportLog()) { exportLog() }
+                        .disabled(sessions.isEmpty || exporting)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.title3)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .foregroundStyle(Color.reefTextDim)
+                .help(t.historyMoreMenu())
+                .accessibilityLabel(t.historyMoreMenu())
                 Button { onClose() } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title3)
@@ -87,9 +107,6 @@ struct DeletionHistoryView: View {
                         .foregroundStyle(Color.reefGreen)
                 }
                 Spacer()
-                Button(t.historyExportLog()) { exportLog() }
-                    .buttonStyle(.bordered)
-                    .disabled(sessions.isEmpty || exporting)
                 Button(t.historyClose()) { onClose() }
                     .buttonStyle(.borderedProminent)
                     .tint(.reefTeal)
@@ -139,12 +156,11 @@ struct DeletionHistoryView: View {
                 .font(.callout.bold())
                 .foregroundStyle(.white)
 
-            // Recovery window
+            // Recovery window — days LEFT, not a date she has to subtract from.
             if let until = session.recoverableUntil {
-                let untilStr = displayFmt.string(from: until)
                 let expired = until < Date()
                 HStack(spacing: 8) {
-                    Text(expired ? t.historyExpired() : t.historyRecoverable(until: untilStr))
+                    Text(expired ? t.historyExpired() : t.historyDaysLeft(daysLeft(until: until)))
                         .font(.caption)
                         .foregroundStyle(expired ? Color.reefTextDim : Color.reefGreen)
                     // "recoverable until <date>" is otherwise a dead end — give it
@@ -176,9 +192,11 @@ struct DeletionHistoryView: View {
                                 Text("\(t.historyKeeperLabel()) \(r.keeperFilename.isEmpty && r.keeperIdentifier.isEmpty ? t.historyNoSurvivor() : (r.keeperFilename.isEmpty ? r.keeperIdentifier : r.keeperFilename))")
                                     .font(.caption2)
                                     .foregroundStyle(Color.reefTextDim)
-                                Text("\(t.historyReasonLabel()) \(t.historyReasonName(r.reason))")
-                                    .font(.caption2)
-                                    .foregroundStyle(Color.reefTextDim)
+                                if showReasons {
+                                    Text("\(t.historyReasonLabel()) \(t.historyReasonName(r.reason))")
+                                        .font(.caption2)
+                                        .foregroundStyle(Color.reefTextDim)
+                                }
                             }
                         }
                     }
@@ -254,6 +272,14 @@ struct DeletionHistoryView: View {
         func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
             FileWrapper(regularFileWithContents: Data(text.utf8))
         }
+    }
+
+    /// Whole days remaining in the 30-day window, counted the way a person
+    /// counts them: a window closing later today is "1 day left", never "0".
+    private func daysLeft(until: Date) -> Int {
+        let seconds = until.timeIntervalSinceNow
+        guard seconds > 0 else { return 0 }
+        return max(1, Int(ceil(seconds / 86_400)))
     }
 
     private let isoFmt = ISO8601DateFormatter()

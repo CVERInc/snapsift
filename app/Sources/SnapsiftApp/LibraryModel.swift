@@ -1247,6 +1247,18 @@ final class LibraryModel: ObservableObject {
         groups[i].keeperID = photoID
         groups[i].rejected.remove(photoID)   // un-reject the new keeper
         groups[i].autoSeeded.remove(photoID)
+        // Same rule `toggleReject` applies when it un-marks a frame
+        // (see its "a lingering flag would silently re-arm the next ⇧X"
+        // branch): the group-level override must not outlive its last
+        // protected rejection. Nominating a force-rejected protected frame
+        // used to clear the mark and leave the flag standing, so the
+        // pre-commit warning and the toolbar toggle both read a state that
+        // no longer had anything to describe. Never widens a deletion —
+        // it can only turn the override OFF, and only when nothing is
+        // relying on it.
+        if groups[i].protectedDeletionCount == 0 {
+            groups[i].includeProtected = false
+        }
         scheduleSnapshotSave()
     }
 

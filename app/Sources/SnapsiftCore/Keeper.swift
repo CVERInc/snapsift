@@ -176,6 +176,59 @@ public func keeperReason(photos: [Photo], keeperID: String) -> KeeperReason {
     return .earliest
 }
 
+// MARK: - Delete "Why" transparency
+
+/// Why a frame is marked for removal — the DELETE-side counterpart to
+/// ``KeeperReason``. The frame that gets kept had seven reasons on offer and
+/// the frame that gets spent had none; this closes that asymmetry.
+public enum DeleteMarkReason: String, Sendable, Equatable {
+    case exactDuplicate   // the app seeded it: a byte-verified second copy
+    /// Swept by a whole-group action rather than singled out. NOT PRODUCED YET:
+    /// W1 has no recorded state that says so (review P2-1) — `deleteMarkReason`
+    /// explains what W2 has to write before this can be returned truthfully.
+    /// Kept defined so the label, its three translations and the audit log's
+    /// reserved `.burstNonKeeper` all stay in place for that wave.
+    case notPicked
+    case userRejected     // the person crossed this one out by hand
+}
+
+/// LABEL ONLY. This function never decides whether a frame is deleted — it is
+/// handed a frame that some OTHER rule (`isEffectiveDeletion`) already marked,
+/// and reports which existing piece of state put the mark there:
+///
+///   * `autoSeeded` — the exact-duplicate pass seeded it (`ReviewGroup.autoSeeded`,
+///     the same set the audit log uses to attribute `.exactDuplicate`);
+///   * otherwise — the person marked it, with X on one frame or D on the group.
+///
+/// No new inputs, no new thresholds: if this function disappeared, not one
+/// photo's fate would change.
+///
+/// ## Why `wholeGroupMarked` is accepted and NOT consulted (review P2-1)
+///
+/// It was consulted, to tell "swept by a group action" (`.notPicked`) apart from
+/// "crossed out one by one" (`.userRejected`). Its only available source is
+/// `ReviewGroup.deleteAll`, which is not a record of what the person did — it is
+/// a live predicate, `bulkRejectCandidates ⊆ rejected`, recomputed on every
+/// change. So the label flipped on actions that had nothing to do with it:
+/// crossing out the LAST frame by hand turned the whole group's chips to
+/// "not picked"; un-crossing one frame after D turned the rest to "you marked
+/// it"; nominating a new keeper after D did the same. And the audit log, a
+/// fourth surface, can only ever write `.exactDuplicate` or `.userRejected`
+/// (`DeletionAuditLog.reason`), so the history panel contradicted the chip.
+///
+/// The parameter stays so the call site keeps naming the state it has, and
+/// `.notPicked` stays defined, because W2 gives this a REAL input: a recorded
+/// `bulkMarked` set written by `rejectAll` and cleared per-frame by
+/// `toggleReject`. Until that exists, a frame marked by a person is labelled as
+/// marked by a person, which is true of both keys.
+public func deleteMarkReason(frameID: String,
+                             autoSeeded: Set<String>,
+                             wholeGroupMarked: Bool) -> DeleteMarkReason {
+    _ = wholeGroupMarked   // deliberately unread until W2 records it — see above
+    if autoSeeded.contains(frameID) { return .exactDuplicate }
+    return .userRejected
+}
+
 // MARK: - No-survivor guard
 
 /// Count the number of review groups that would be completely emptied —

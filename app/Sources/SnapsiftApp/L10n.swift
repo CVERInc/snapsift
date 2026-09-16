@@ -147,6 +147,15 @@ struct L10n: Sendable {
         }
     }
     /// Menu item: commit the marked deletions (count-less, unlike the toolbar).
+    /// Menu-item wording for ⌘. — the hero screen's button can say just
+    /// "Cancel" because it sits under the thing it cancels; a menu item cannot.
+    func menuStopScan() -> String {
+        switch language {
+        case .en: return "Stop Scanning"
+        case .ja: return "スキャンを停止"
+        case .zhTW: return "停止掃描"
+        }
+    }
     func menuDeleteMarked() -> String {
         switch language {
         case .en: return "Delete Marked Photos…"
@@ -194,91 +203,164 @@ struct L10n: Sendable {
         case .zhTW: return "關閉預覽"
         }
     }
+    /// THE keyboard map — one table, not two.
+    ///
+    /// The cheat sheet and the handlers used to be two hand-written lists, and
+    /// they had already drifted apart: ⌘. and ⌘Y were implemented and appeared
+    /// in no documentation at all, while j/k/l/h were documented right up to
+    /// the day they were removed. The KEYS are written once, here, next to the
+    /// case that the handler switches on; only the description is per-language.
+    ///
+    /// (The full single-source version — the same table registering the menu
+    /// items AND the handlers — is `CVERKeyMap` in signet, W3.)
+    enum KeyMapRow: CaseIterable {
+        // List zone
+        case listMove, listEnter, listKeepAll, listRejectAll
+        // Grid zone
+        case gridMove, gridRowMove, gridBackOut, gridCrown, gridKeep, gridPreview
+        case gridReject, gridForceReject, gridRotate, gridSaveRotation
+        // Preview (loupe)
+        case loupeMove, loupeCrown, loupeKeep, loupeReject, loupeForceReject
+        case loupeRotate, loupeClose
+        // Anywhere
+        case escape, commit, sheetConfirm, scans, stop, history, help
+
+        /// Exactly what the handlers bind — see `handleListKey`,
+        /// `handleGridKey`, `handleLoupeKey` and `SnapsiftMenuCommands`.
+        var keys: String {
+            switch self {
+            case .listMove:         return "↑ ↓"
+            case .listEnter:        return "→ / ⏎"
+            case .listKeepAll:      return "A"
+            case .listRejectAll:    return "D"
+            case .gridMove:         return "← →"
+            case .gridRowMove:      return "↑ ↓"
+            case .gridBackOut:      return "←"
+            case .gridCrown:        return "1–9"
+            case .gridKeep:         return "K"
+            case .gridPreview:      return "Space / ⏎"
+            case .gridReject:       return "X / ⌫"
+            case .gridForceReject:  return "⇧X"
+            case .gridRotate:       return "R / ⇧R"
+            case .gridSaveRotation: return "⇧⌘R"
+            case .loupeMove:        return "← → ↑ ↓"
+            case .loupeCrown:       return "1–9"
+            case .loupeKeep:        return "K"
+            case .loupeReject:      return "X / ⌫"
+            case .loupeForceReject: return "⇧X"
+            case .loupeRotate:      return "R / ⇧R"
+            case .loupeClose:       return "Space / Esc"
+            case .escape:           return "Esc"
+            case .commit:           return "⌘⌫"
+            case .sheetConfirm:     return "⌘⏎"
+            case .scans:            return "⌘1–⌘5"
+            case .stop:             return "⌘."
+            case .history:          return "⌘Y"
+            case .help:             return "? / ⌘?"
+            }
+        }
+    }
+
     /// (keys, what it does) rows for the keyboard cheat sheet.
     func helpRows() -> [(String, String)] {
+        KeyMapRow.allCases.map { ($0.keys, helpRowText($0)) }
+    }
+
+    private func helpRowText(_ row: KeyMapRow) -> String {
         switch language {
-        case .en: return [
-            // List zone
-            ("↑ ↓ / j k",     "Move between groups"),
-            ("→ / l / ⏎",     "Enter frames"),
-            ("a",              "Keep whole group"),
-            ("d",              "Reject whole group"),
-            // Grid zone
-            ("← → ↑ ↓ / hjkl","Move between frames"),
-            ("1–9",            "Crown frame n as keeper ★"),
-            ("Space",          "Open loupe"),
-            ("X / ⌫",          "Reject frame · toggle"),
-            ("⏎",              "Keep frame + set keeper ★"),
-            ("⇧X",             "Force-reject protected frame"),
-            ("R / ⇧R",         "Rotate frame · display only"),
-            ("⇧⌘R",            "Save rotation to Photos"),
-            ("Esc",            "Back to list"),
-            // Loupe zone
-            ("← → ↑ ↓ / hjkl", "Loupe: prev / next frame"),
-            ("1–9",            "Loupe: crown frame n ★"),
-            ("X / ⌫",          "Loupe: reject frame · toggle"),
-            ("⏎",              "Loupe: keep frame + set keeper ★"),
-            ("⇧X",             "Loupe: force-reject protected"),
-            ("R / ⇧R",         "Loupe: rotate · display only"),
-            ("Space / Esc",    "Close loupe"),
-            // Global
-            ("⌘⌫",             "Commit — delete all rejected"),
-            ("⌘⏎",             "Review sheet: confirm delete"),
-            ("⌘1–⌘5",          "Scans · Faces · Sort into Albums"),
-            ("?",              "This cheat sheet"),
-        ]
-        case .ja: return [
-            ("↑ ↓ / j k",     "グループを移動"),
-            ("→ / l / ⏎",     "写真へ入る"),
-            ("a",              "グループ全部を残す"),
-            ("d",              "グループ全部を却下"),
-            ("← → ↑ ↓ / hjkl","写真を移動"),
-            ("1–9",            "n 番目を残す ★"),
-            ("スペース",        "ルーペを開く"),
-            ("X / ⌫",          "フレームを却下・切替"),
-            ("⏎",              "このフレームを残す ★"),
-            ("⇧X",             "保護フレームを強制削除"),
-            ("R / ⇧R",         "フレームを回転・表示のみ"),
-            ("⇧⌘R",            "回転を写真に保存"),
-            ("Esc",            "リストへ戻る"),
-            ("← → ↑ ↓ / hjkl", "ルーペ：前／次"),
-            ("1–9",            "ルーペ：n 番目を残す ★"),
-            ("X / ⌫",          "ルーペ：却下・切替"),
-            ("⏎",              "ルーペ：このフレームを残す ★"),
-            ("⇧X",             "ルーペ：保護を強制削除"),
-            ("R / ⇧R",         "ルーペ：回転・表示のみ"),
-            ("スペース / Esc", "ルーペを閉じる"),
-            ("⌘⌫",             "削除を実行"),
-            ("⌘⏎",             "確認シート：削除を確定"),
-            ("⌘1–⌘5",          "スキャン・顔・アルバムに仕分け"),
-            ("?",              "このキー一覧"),
-        ]
-        case .zhTW: return [
-            ("↑ ↓ / j k",     "上一群／下一群"),
-            ("→ / l / ⏎",     "進入格子"),
-            ("a",              "整群保留"),
-            ("d",              "整群標刪"),
-            ("← → ↑ ↓ / hjkl","格子間移動"),
-            ("1–9",            "把第 n 張立為保留 ★"),
-            ("空白",            "開啟放大鏡"),
-            ("X / ⌫",          "標刪這張 · 切換"),
-            ("⏎",              "保留這張並設為主保留 ★"),
-            ("⇧X",             "強制標刪受保護的張"),
-            ("R / ⇧R",         "旋轉這張 · 僅顯示用"),
-            ("⇧⌘R",            "儲存旋轉至「照片」"),
-            ("Esc",            "回到清單"),
-            ("← → ↑ ↓ / hjkl", "放大鏡：前一張／後一張"),
-            ("1–9",            "放大鏡：把第 n 張立為保留 ★"),
-            ("X / ⌫",          "放大鏡：標刪這張 · 切換"),
-            ("⏎",              "放大鏡：保留這張並設為主保留 ★"),
-            ("⇧X",             "放大鏡：強制標刪受保護的張"),
-            ("R / ⇧R",         "放大鏡：旋轉 · 僅顯示用"),
-            ("空白 / Esc",     "關閉放大鏡"),
-            ("⌘⌫",             "執行刪除所有標刪"),
-            ("⌘⏎",             "審核視窗：確認刪除"),
-            ("⌘1–⌘5",          "掃描 · 人臉 · 整理進相簿"),
-            ("?",              "這張快速鍵小抄"),
-        ]
+        case .en:
+            switch row {
+            case .listMove:         return "Move between groups"
+            case .listEnter:        return "Go into the photos"
+            case .listKeepAll:      return "Keep the whole group"
+            case .listRejectAll:    return "Cross out the whole group"
+            case .gridMove:         return "Previous / next photo"
+            case .gridRowMove:      return "One row up / down"
+            case .gridBackOut:      return "On the first photo: back to the list"
+            case .gridCrown:        return "Keep the nth photo"
+            case .gridKeep:         return "Keep THIS one — the way to reach photo 10 and beyond"
+            case .gridPreview:      return "Open the preview"
+            case .gridReject:       return "Cross this one out · press again to undo"
+            case .gridForceReject:  return "Cross out a protected photo (asks first)"
+            case .gridRotate:       return "Turn it — on screen only"
+            case .gridSaveRotation: return "Save the turn to Photos (grid or preview)"
+            case .loupeMove:        return "Preview: previous / next photo"
+            case .loupeCrown:       return "Preview: keep the nth photo"
+            case .loupeKeep:        return "Preview: keep THIS one"
+            case .loupeReject:      return "Preview: cross out · press again to undo"
+            case .loupeForceReject: return "Preview: cross out a protected photo (asks first)"
+            case .loupeRotate:      return "Preview: turn it — on screen only"
+            case .loupeClose:       return "Close the preview"
+            case .escape:           return "One level up — nothing changes"
+            case .commit:           return "See what would be removed"
+            case .sheetConfirm:     return "On that screen: move them to Recently Deleted"
+            case .scans:            return "Scans · Faces · Sort into albums"
+            case .stop:             return "Stop whatever is running"
+            case .history:          return "What was removed, and how long you can still get it back"
+            case .help:             return "This list"
+            }
+        case .ja:
+            switch row {
+            case .listMove:         return "グループを移動"
+            case .listEnter:        return "写真へ入る"
+            case .listKeepAll:      return "グループ全部を残す"
+            case .listRejectAll:    return "グループ全部を外す"
+            case .gridMove:         return "前の写真／次の写真"
+            case .gridRowMove:      return "1行上／1行下"
+            case .gridBackOut:      return "先頭の写真で押すとリストへ戻る"
+            case .gridCrown:        return "n 番目を残す"
+            case .gridKeep:         return "この1枚を残す — 10枚目以降はこれで"
+            case .gridPreview:      return "プレビューを開く"
+            case .gridReject:       return "この1枚を外す・もう一度で取り消し"
+            case .gridForceReject:  return "保護された写真も外す（確認あり）"
+            case .gridRotate:       return "回す — 画面の中だけ"
+            case .gridSaveRotation: return "回転を「写真」に保存（グリッド／プレビュー）"
+            case .loupeMove:        return "プレビュー：前／次"
+            case .loupeCrown:       return "プレビュー：n 番目を残す"
+            case .loupeKeep:        return "プレビュー：この1枚を残す"
+            case .loupeReject:      return "プレビュー：外す・もう一度で取り消し"
+            case .loupeForceReject: return "プレビュー：保護された写真も外す（確認あり）"
+            case .loupeRotate:      return "プレビュー：回す — 画面の中だけ"
+            case .loupeClose:       return "プレビューを閉じる"
+            case .escape:           return "1つ上へ — 何も変わりません"
+            case .commit:           return "外すものを確認する"
+            case .sheetConfirm:     return "その画面で：「最近削除した項目」へ移動"
+            case .scans:            return "スキャン・顔・アルバムに仕分け"
+            case .stop:             return "実行中の処理を止める"
+            case .history:          return "外した記録と、戻せる残り日数"
+            case .help:             return "このキー一覧"
+            }
+        case .zhTW:
+            switch row {
+            case .listMove:         return "上一群／下一群"
+            case .listEnter:        return "進入照片"
+            case .listKeepAll:      return "整群保留"
+            case .listRejectAll:    return "整群劃掉"
+            case .gridMove:         return "上一張／下一張"
+            case .gridRowMove:      return "上一列／下一列"
+            case .gridBackOut:      return "在第一張上按，回到清單"
+            case .gridCrown:        return "把第 n 張留下"
+            case .gridKeep:         return "留下這一張 —— 第 10 張以後就靠它"
+            case .gridPreview:      return "打開預覽"
+            case .gridReject:       return "劃掉這張 · 再按一次取消"
+            case .gridForceReject:  return "連受保護的也劃掉（會先問你）"
+            case .gridRotate:       return "轉一下 —— 只有畫面上"
+            case .gridSaveRotation: return "把轉向存回「照片」（格線與預覽都可以）"
+            case .loupeMove:        return "預覽：上一張／下一張"
+            case .loupeCrown:       return "預覽：把第 n 張留下"
+            case .loupeKeep:        return "預覽：留下這一張"
+            case .loupeReject:      return "預覽：劃掉這張 · 再按一次取消"
+            case .loupeForceReject: return "預覽：連受保護的也劃掉（會先問你）"
+            case .loupeRotate:      return "預覽：轉一下 —— 只有畫面上"
+            case .loupeClose:       return "關閉預覽"
+            case .escape:           return "回上一層 —— 什麼都不會變"
+            case .commit:           return "看看有哪些會被移除"
+            case .sheetConfirm:     return "在那個畫面：移到「最近刪除」"
+            case .scans:            return "掃描 · 人臉 · 整理進相簿"
+            case .stop:             return "停下正在進行的事"
+            case .history:          return "移除過什麼，還能救回多久"
+            case .help:             return "這張小抄"
+            }
         }
     }
     func searchPrompt(_ smart: Bool) -> String {
@@ -313,9 +395,9 @@ struct L10n: Sendable {
 
     func gateRequestButton() -> String {
         switch language {
-        case .en: return "Grant access"
-        case .ja: return "アクセスを許可"
-        case .zhTW: return "授予存取權"
+        case .en: return "Allow access to Photos"
+        case .ja: return "写真へのアクセスを許可"
+        case .zhTW: return "允許存取照片"
         }
     }
     func gateDeniedBody() -> String {
@@ -333,9 +415,9 @@ struct L10n: Sendable {
     /// Body text shown when the user granted "Selected Photos" (limited) access.
     func gateLimitedBody() -> String {
         switch language {
-        case .en: return "snapsift needs Full Photos access to find and remove duplicates across your whole library.\n\nYou've currently granted \"Selected Photos\" — snapsift can't see or delete photos outside that selection. Open System Settings ▸ Privacy & Security ▸ Photos and set snapsift to Full Access."
-        case .ja: return "snapsift は重複写真をライブラリ全体で検索・削除するために、「すべての写真」へのアクセスが必要です。\n\n現在「選択した写真」のみが許可されています。システム設定 ▸ プライバシーとセキュリティ ▸ 写真 を開き、snapsift を「フルアクセス」に変更してください。"
-        case .zhTW: return "snapsift 需要「完整取用權限」，才能掃描整個圖庫並刪除重複照片。\n\n你目前授予的是「受限制的取用權限」—— snapsift 無法看到或刪除選取範圍以外的照片。請到 系統設定 ▸ 隱私權與安全性 ▸ 照片，把 snapsift 改成「完整取用權限」。"
+        case .en: return "Right now snapsift can only see the photos you picked, so it can't find — or remove — anything outside that selection.\n\nOpen System Settings ▸ Privacy & Security ▸ Photos and set snapsift to Full Access."
+        case .ja: return "いま snapsift に見えているのは、あなたが選んだ写真だけです。その外にある重複写真は、見つけることも削除することもできません。\n\nシステム設定 ▸ プライバシーとセキュリティ ▸ 写真 で、snapsift を「フルアクセス」にしてください。"
+        case .zhTW: return "你目前只讓 snapsift 看到你選取的那些照片，所以選取範圍以外的重複照片，它找不到也刪不掉。\n\n請到「系統設定」▸「隱私權與安全性」▸「照片」，把 snapsift 改成「完整取用權限」。"
         }
     }
 
@@ -505,9 +587,9 @@ struct L10n: Sendable {
     /// Alert title shown before deleting protected frames (after user toggled include-protected).
     func deleteProtectedAlertTitle() -> String {
         switch language {
-        case .en: return "Delete protected photos?"
-        case .ja: return "保護された写真を削除しますか？"
-        case .zhTW: return "確定刪除受保護的照片？"
+        case .en: return "Delete these? They're favorites, edited photos, or documents"
+        case .ja: return "削除しますか？ これらはお気に入り・編集済み・書類です"
+        case .zhTW: return "確定要刪除嗎？這幾張是你的最愛、有編輯過，或是文件"
         }
     }
 
@@ -565,18 +647,18 @@ struct L10n: Sendable {
     /// .isUnverifiable`). Points at the one place the human CAN act on it.
     func unverifiableHint() -> String {
         switch language {
-        case .en: return "Can't classify this one — sort into albums to review it in “Needs a look”"
-        case .ja: return "分類できません — 「アルバムに仕分け」すると「要確認」で確認できます"
-        case .zhTW: return "無法判定 —— 用「整理進相簿」收進「請你看看」再決定"
+        case .en: return "We can't tell about this one — sort into albums and it waits for you in “Please confirm”"
+        case .ja: return "これは判断できません — 「アルバムに仕分け」すると「要確認」で確認できます"
+        case .zhTW: return "這張我們判斷不了 —— 用「整理進相簿」收進「請你確認」再決定"
         }
     }
 
     /// Touch (iOS) variant of the unverifiable block.
     func unverifiableHintTouch() -> String {
         switch language {
-        case .en: return "Can't classify this one — see it in “Needs a look”"
-        case .ja: return "分類できません — 「要確認」で確認してください"
-        case .zhTW: return "無法判定 —— 到「請你看看」相簿確認"
+        case .en: return "We can't tell about this one — see it in “Please confirm”"
+        case .ja: return "これは判断できません — 「要確認」で確認してください"
+        case .zhTW: return "這張我們判斷不了 —— 到「請你確認」相簿看看"
         }
     }
 
@@ -635,13 +717,33 @@ struct L10n: Sendable {
         case .zhTW: return "選一個你想找的"
         }
     }
-    /// Honest, privacy-forward one-liner — verbs split so each Apple technology is
-    /// credited for what it actually does (scores pick; Apple Intelligence names).
-    func privacyPitch() -> String {
+    /// The privacy line, reduced to what the app can actually keep.
+    ///
+    /// It used to promise "nothing ever sent", which the updater's own
+    /// "Check for Updates…" breaks the moment anyone uses it. What is true, and
+    /// is the only thing she is asking about, is that her PHOTOS stay here.
+    ///
+    /// The second half is conditional for the same reason: the quality scores
+    /// are only there when the library's own scores are readable, and the gate
+    /// says this sentence before anything at all is known — so it promised a
+    /// feature that may not exist on her Mac.
+    func privacyPitch(qualityAvailable: Bool = false) -> String {
         switch language {
-        case .en: return "Native, fully offline, nothing ever sent. Picking uses Apple's photo quality scores; naming & search use Apple Intelligence — all on your Mac."
-        case .ja: return "ネイティブ・完全オフライン・データ送信なし。選定は Apple の写真品質スコア、命名と検索は Apple Intelligence — すべて Mac の中で。"
-        case .zhTW: return "純本機原生 App · 全程離線 · 不收發任何資料。挑選靠 Apple 照片品質分數，命名與搜尋靠 Apple Intelligence —— 全部在你的 Mac 上跑。"
+        case .en:
+            let base = "Your photos never leave this Mac."
+            return qualityAvailable
+                ? base + " Picking uses the quality scores your photo library already keeps; naming and search use Apple Intelligence — all of it here."
+                : base + " Naming and search use Apple Intelligence, here on your Mac."
+        case .ja:
+            let base = "あなたの写真がこの Mac から出ることはありません。"
+            return qualityAvailable
+                ? base + "1枚選ぶときは写真ライブラリ自身の品質スコアを、名前づけと検索は Apple Intelligence を使います。すべてこの Mac の中で。"
+                : base + "名前づけと検索は Apple Intelligence を使います。すべてこの Mac の中で。"
+        case .zhTW:
+            let base = "你的照片不會離開這台 Mac。"
+            return qualityAvailable
+                ? base + "挑哪一張時會用圖庫自己的品質分數，命名與搜尋用 Apple 智慧，全部都在這台 Mac 上。"
+                : base + "命名與搜尋用 Apple 智慧，就在這台 Mac 上。"
         }
     }
 
@@ -675,6 +777,56 @@ struct L10n: Sendable {
         case .zhTW: return "這張會被刪 —— 按一下改成留它"
         }
     }
+    /// For a card NOBODY has decided about. The tooltip used to hand these the
+    /// delete copy, which told a woman her untouched photo was going to be
+    /// deleted — in the very groups snapsift deliberately did not mark.
+    ///
+    /// It names the two verbs that change something — X and its mirror K — and
+    /// neither is a navigation key (SPEC §2: Return opens the preview now, it
+    /// does not keep; K is the verb that took over that job).
+    func tipUndecided() -> String {
+        switch language {
+        case .en: return "Not decided yet — X crosses this one out, K keeps it"
+        case .ja: return "まだ決まっていません — X で外す、K で残す"
+        case .zhTW: return "還沒決定 —— X 劃掉它，K 留下它"
+        }
+    }
+
+    /// WHY a photo is marked for removal. Keeping had seven answers available
+    /// and removing had none.
+    ///
+    /// `.userRejected` deliberately does NOT say which key she used: X on one
+    /// frame and D on the group are both "she marked it", and W1 has no
+    /// recorded state that tells them apart (review P2-1 — `deleteMarkReason`
+    /// has the detail). `.notPicked` is written and translated, and is
+    /// unreachable until W2 records the fact it claims.
+    ///
+    /// These are also the words the history panel speaks: `historyReasonName`
+    /// forwards to this function, so the chip, the tooltip, the VoiceOver label
+    /// and the log cannot describe one deletion four ways.
+    func deleteWhy(_ reason: DeleteMarkReason) -> String {
+        switch language {
+        case .en:
+            switch reason {
+            case .exactDuplicate: return "Same photo · copy 2"
+            case .notPicked:      return "Not the one picked"
+            case .userRejected:   return "You marked it"
+            }
+        case .ja:
+            switch reason {
+            case .exactDuplicate: return "同じ写真 · 2枚目"
+            case .notPicked:      return "選ばれなかった"
+            case .userRejected:   return "自分で外した"
+            }
+        case .zhTW:
+            switch reason {
+            case .exactDuplicate: return "同一張 · 第 2 份"
+            case .notPicked:      return "沒被選中"
+            case .userRejected:   return "你標的"
+            }
+        }
+    }
+
     func tipScan() -> String {
         switch language {
         case .en: return "Clears the burst of near-identical shots from holding the shutter — keeps the best one"
@@ -691,7 +843,7 @@ struct L10n: Sendable {
     }
     func tipFaces() -> String {
         switch language {
-        case .en: return "Re-picks the keeper to the frame where faces look best — eyes open. Only re-orders; never changes what can be deleted."
+        case .en: return "Re-picks which photo to keep — the one where faces look best, eyes open. Only re-orders; never changes what can be deleted."
         case .ja: return "顔がいちばん良く写った1枚（目が開いている）を残すよう選び直す。並べ替えだけで、削除対象は変わりません。"
         case .zhTW: return "改挑大家臉拍得最好、眼睛有張開的那張當保留。只重新排序，永遠不會改變哪些照片可被刪。"
         }
@@ -1020,9 +1172,9 @@ struct L10n: Sendable {
     /// can decide in Photos.app (ruling, chodaict, 2026-09-16).
     func albumNameNeedsLook() -> String {
         switch language {
-        case .en:   return "Needs a look"
+        case .en:   return "Please confirm"
         case .ja:   return "要確認"
-        case .zhTW: return "請你看看"
+        case .zhTW: return "請你確認"
         }
     }
 
@@ -1106,14 +1258,14 @@ struct L10n: Sendable {
     }
     private func albumsWrittenNeedsLook(_ n: Int) -> String {
         switch language {
-        case .en:   return "\(n) need\(n == 1 ? "s" : "") a look"
+        case .en:   return "\(n) to confirm"
         case .ja:   return "要確認 \(n)枚"
-        case .zhTW: return "請你看看 \(n) 張"
+        case .zhTW: return "請你確認 \(n) 張"
         }
     }
     private func albumsWrittenExact(_ n: Int) -> String {
         switch language {
-        case .en:   return "\(n) exact dup\(n == 1 ? "" : "s")"
+        case .en:   return "\(n) identical"
         case .ja:   return "完全重複 \(n)枚"
         case .zhTW: return "完全相同 \(n) 張"
         }
@@ -1133,8 +1285,8 @@ struct L10n: Sendable {
     /// "safe to remove" message, since these frames are genuinely interchangeable.
     func exactDupeBadge() -> String {
         switch language {
-        case .en:   return "EXACT DUP"
-        case .ja:   return "完全重複"
+        case .en:   return "Identical"
+        case .ja:   return "完全に同じ"
         case .zhTW: return "完全相同"
         }
     }
@@ -1337,6 +1489,45 @@ struct L10n: Sendable {
         case .zhTW: return "在「最近刪除」中 —— 可在 \(until) 前復原"
         }
     }
+    /// The panel's version of the recovery window: how many days are LEFT.
+    ///
+    /// "recoverable until 16 Oct 2026" makes her do the subtraction, and the
+    /// answer to the only question she has ("can I still get them back?") is
+    /// the number of days, not a date (ruling: the history panel is demoted to
+    /// when / how many / how long left).
+    func historyDaysLeft(_ days: Int) -> String {
+        switch language {
+        case .en:   return days == 1
+            ? "Still in Recently Deleted — today is the last day to get them back"
+            : "Still in Recently Deleted — \(days) days left to get them back"
+        case .ja:   return days == 1
+            ? "「最近削除した項目」にあります — 戻せるのは今日までです"
+            : "「最近削除した項目」にあります — あと \(days) 日戻せます"
+        case .zhTW: return days == 1
+            ? "還在「最近刪除」裡 —— 今天是最後一天可以救回來"
+            : "還在「最近刪除」裡 —— 還有 \(days) 天可以救回來"
+        }
+    }
+
+    /// Label of the history panel's secondary menu (the ⋯ button).
+    func historyMoreMenu() -> String {
+        switch language {
+        case .en:   return "More"
+        case .ja:   return "その他"
+        case .zhTW: return "更多"
+        }
+    }
+
+    /// Menu item that reveals the per-photo reasons — off by default, because
+    /// the panel's job is "when, how many, how long left", not an audit trail.
+    func historyShowReasons() -> String {
+        switch language {
+        case .en:   return "Show why each one went"
+        case .ja:   return "1枚ごとの理由を表示"
+        case .zhTW: return "顯示每一張的原因"
+        }
+    }
+
     func historyExpired() -> String {
         switch language {
         case .en:   return "Recovery window expired"
@@ -1391,7 +1582,7 @@ struct L10n: Sendable {
     }
     func historyKeeperLabel() -> String {
         switch language {
-        case .en:   return "keeper:"
+        case .en:   return "kept:"
         case .ja:   return "残した："
         case .zhTW: return "保留："
         }
@@ -1406,39 +1597,45 @@ struct L10n: Sendable {
     /// Human-readable, localized reason a photo was in a deletion batch. This is
     /// the surface where the app's honest attribution shows — app-seeded exact
     /// marks must read differently from the user's own force-removals.
+    /// The log's own wording for a deletion. The three reasons the review
+    /// surfaces also use FORWARD to `deleteWhy` rather than keeping a second
+    /// copy: the history panel is the fourth surface describing one deletion,
+    /// and it used to phrase all three differently.
+    /// (`.burstNonKeeper` is decode-compat only — never written; see
+    /// `DeletionAuditLog.DeletionReason`.)
     func historyReasonName(_ reason: DeletionReason) -> String {
         switch language {
         case .en:
             switch reason {
-            case .exactDuplicate:                 return "exact duplicate (app-marked)"
-            case .userRejected:                   return "you marked for removal"
+            case .exactDuplicate:                 return deleteWhy(.exactDuplicate)
+            case .userRejected:                   return deleteWhy(.userRejected)
             case .forceIncludedProtectedFavorite: return "you force-removed (favorite)"
             case .forceIncludedProtectedEdited:   return "you force-removed (edited)"
             case .forceIncludedProtectedDocument: return "you force-removed (document)"
             case .forceIncludedProtectedMultiple: return "you force-removed (protected)"
-            case .burstNonKeeper:                 return "burst non-keeper"
+            case .burstNonKeeper:                 return deleteWhy(.notPicked)
             case .blurry:                         return "blurry"
             }
         case .ja:
             switch reason {
-            case .exactDuplicate:                 return "完全な重複（App が検出）"
-            case .userRejected:                   return "自分で削除に指定"
+            case .exactDuplicate:                 return deleteWhy(.exactDuplicate)
+            case .userRejected:                   return deleteWhy(.userRejected)
             case .forceIncludedProtectedFavorite: return "強制削除（お気に入り）"
             case .forceIncludedProtectedEdited:   return "強制削除（編集済み）"
             case .forceIncludedProtectedDocument: return "強制削除（書類）"
             case .forceIncludedProtectedMultiple: return "強制削除（保護対象）"
-            case .burstNonKeeper:                 return "バースト非採用"
+            case .burstNonKeeper:                 return deleteWhy(.notPicked)
             case .blurry:                         return "ブレ"
             }
         case .zhTW:
             switch reason {
-            case .exactDuplicate:                 return "完全相同（App 標記）"
-            case .userRejected:                   return "你標記移除"
+            case .exactDuplicate:                 return deleteWhy(.exactDuplicate)
+            case .userRejected:                   return deleteWhy(.userRejected)
             case .forceIncludedProtectedFavorite: return "你強制移除（最愛）"
             case .forceIncludedProtectedEdited:   return "你強制移除（已編輯）"
             case .forceIncludedProtectedDocument: return "你強制移除（文件）"
             case .forceIncludedProtectedMultiple: return "你強制移除（受保護）"
-            case .burstNonKeeper:                 return "連拍非保留"
+            case .burstNonKeeper:                 return deleteWhy(.notPicked)
             case .blurry:                         return "模糊"
             }
         }
@@ -1798,16 +1995,16 @@ struct L10n: Sendable {
     /// the missing "X MB freed" estimate is explained instead of silently absent.
     func fdaHint() -> String {
         switch language {
-        case .en: return "Size estimates off — grant Full Disk Access"
-        case .ja: return "容量の見積もりは無効 — フルディスクアクセスを許可してください"
-        case .zhTW: return "沒有容量估算：請開啟「完整磁碟取用權限」"
+        case .en: return "Want to know how much space this frees? Turn on Full Disk Access"
+        case .ja: return "どれだけ空くか知りたいときは「フルディスクアクセス」を許可"
+        case .zhTW: return "想知道能省下多少空間？可以開啟「完整磁碟取用權限」"
         }
     }
     func fdaHintHelp() -> String {
         switch language {
-        case .en: return "snapsift reads your library's own quality scores and file sizes from Photos.sqlite (read-only). Without Full Disk Access those are unavailable, so scans still work but no reclaimable-space estimate is shown. Click to open System Settings."
-        case .ja: return "snapsift は Photos.sqlite（読み取り専用）からライブラリ自身の品質スコアとファイルサイズを読み取ります。フルディスクアクセスがないと利用できず、スキャンは動作しますが解放できる容量は表示されません。クリックでシステム設定を開きます。"
-        case .zhTW: return "snapsift 會從 Photos.sqlite（唯讀）讀取圖庫自己的品質分數與檔案大小。沒有完整磁碟取用權限時掃描仍可用，但不會顯示可釋放的空間。按一下開啟「系統設定」。"
+        case .en: return "Turn it on and snapsift can tell you how much space you would free, and use your photo library's own quality scores to pick the best shot. It reads two things only — how big each photo file is, and those scores — and touches no other file. Scans work without it; only the space figure is missing. Click to open System Settings."
+        case .ja: return "許可すると、どれだけ空くかを表示でき、写真ライブラリ自身の品質スコアでベストの1枚を選べます。読み取るのは写真ファイルのサイズとそのスコアだけで、ほかのファイルには触れません。許可しなくてもスキャンはできます。表示されないのは空き容量だけです。クリックでシステム設定を開きます。"
+        case .zhTW: return "開啟之後，snapsift 才能告訴你能省下多少空間，也才能用圖庫自己的品質分數挑出最好的一張。它只讀兩樣東西：每張照片檔案多大，以及那些分數，不會碰其他檔案。沒開也能掃描，少的只是那個空間數字。按一下開啟「系統設定」。"
         }
     }
 
@@ -1815,7 +2012,7 @@ struct L10n: Sendable {
 
     func loupeKeeper() -> String {
         switch language {
-        case .en: return "★ keeper"
+        case .en: return "★ keeping"
         case .ja: return "★ 残す"
         case .zhTW: return "★ 保留"
         }
@@ -1874,9 +2071,9 @@ struct L10n: Sendable {
     /// mutate the review state mid-delete.
     func deletingOverlay() -> String {
         switch language {
-        case .en: return "Deleting… confirm in the system dialog if asked"
-        case .ja: return "削除中… システムの確認が出たら応答してください"
-        case .zhTW: return "刪除中…如出現系統確認框請回應"
+        case .en: return "Moving your photos to Recently Deleted — you can get them back for 30 days. If Photos asks you to confirm, allow it and this carries on."
+        case .ja: return "写真を「最近削除した項目」に移動しています。30日以内なら元に戻せます。「写真」の確認画面が出たら、許可すると続きます。"
+        case .zhTW: return "正在把照片移到「最近刪除」，30 天內都可以復原。如果「照片」跳出確認框，按一下允許就會繼續。"
         }
     }
 
@@ -1884,9 +2081,9 @@ struct L10n: Sendable {
     /// overlay names how many photos and sets the expectation up front.
     func deletingOverlay(_ count: Int) -> String {
         switch language {
-        case .en: return "Deleting \(count) photo\(count == 1 ? "" : "s")… this can take a while for large batches. Confirm in the system dialog if asked."
-        case .ja: return "\(count) 枚を削除中… 枚数が多いと少し時間がかかります。システムの確認が出たら応答してください。"
-        case .zhTW: return "正在刪除 \(count) 張照片…數量多時可能需要一點時間。如出現系統確認框請回應。"
+        case .en: return "Moving \(count) photo\(count == 1 ? "" : "s") to Recently Deleted — you can get them back for 30 days. With this many it takes a moment. If Photos asks you to confirm, allow it and this carries on."
+        case .ja: return "\(count) 枚を「最近削除した項目」に移動しています。30日以内なら元に戻せます。枚数が多いので少し時間がかかります。「写真」の確認画面が出たら、許可すると続きます。"
+        case .zhTW: return "正在把 \(count) 張照片移到「最近刪除」，30 天內都可以復原。張數多時會需要一點時間。如果「照片」跳出確認框，按一下允許就會繼續。"
         }
     }
 
@@ -1906,8 +2103,8 @@ struct L10n: Sendable {
     /// they promised to keep no longer exists.
     func commitKeeperMissing(_ n: Int) -> String {
         switch language {
-        case .en: return "held \(n) group\(n == 1 ? "" : "s") — the photo they would keep is gone from your library; rescan to re-pick a keeper"
-        case .ja: return "\(n)グループを保留 — 残すはずの写真がライブラリにありません。再スキャンしてキーパーを選び直してください"
+        case .en: return "held \(n) group\(n == 1 ? "" : "s") — the photo they would keep is gone from your library; scan again to choose another one to keep"
+        case .ja: return "\(n)グループを保留 — 残すはずの写真がライブラリにありません。もう一度スキャンすると、残す1枚を選び直します"
         case .zhTW: return "有 \(n) 組暫緩 —— 原本要留下的那張已不在圖庫中，請重新掃描以重選要保留的照片"
         }
     }
@@ -1987,8 +2184,8 @@ struct L10n: Sendable {
     /// membership / a caption the keeper doesn't (or that couldn't be read).
     func uniqueMetadataWithheld(_ n: Int) -> String {
         switch language {
-        case .en: return "\(n) exact duplicate\(n == 1 ? "" : "s") left unmarked — that copy carries albums or a caption the keeper doesn't"
-        case .ja: return "\(n)枚の完全重複はマークしていません — そのコピーはキーパーにないアルバムや説明を持っています"
+        case .en: return "\(n) identical copy\(n == 1 ? "" : "s") left unmarked — that copy is in an album, or carries a caption, that the one we'd keep doesn't"
+        case .ja: return "\(n)枚の完全に同じ写真はマークしていません — そのコピーは、残す1枚にはないアルバムや説明を持っています"
         case .zhTW: return "有 \(n) 張完全重複沒有預先標記 —— 那一份帶有保留照片所沒有的相簿或說明"
         }
     }
@@ -2058,15 +2255,15 @@ struct L10n: Sendable {
         switch reason {
         case .keeperMissing:
             switch language {
-            case .en: return "Skipped — the photo to keep is gone; nothing here is deleted"
-            case .ja: return "スキップ — 残すはずの写真がありません。このグループは削除しません"
-            case .zhTW: return "略過 —— 要保留的那張已不存在，這組不會刪除任何東西"
+            case .en: return "Skipped — the one to keep isn't there any more, so nothing here is removed"
+            case .ja: return "スキップ — 残すはずの1枚がもうありません。このグループは削除しません"
+            case .zhTW: return "略過 —— 要留下的那張已經不在了，這組不會刪"
             }
         case .noSurvivorLeft:
             switch language {
-            case .en: return "Skipped — nothing here would be left; the photo that was staying is gone"
-            case .ja: return "スキップ — 残る写真が1枚もなくなります。残るはずだった写真がありません"
-            case .zhTW: return "略過 —— 這組會一張都不剩，原本會留下的那張已不存在"
+            case .en: return "Skipped — this group would have nothing left at all"
+            case .ja: return "スキップ — このグループに1枚も残らなくなります"
+            case .zhTW: return "略過 —— 這組會一張都不剩"
             }
         }
     }

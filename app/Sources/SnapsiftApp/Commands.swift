@@ -9,10 +9,16 @@ struct SnapsiftActions {
     var canRefineFaces: Bool
     var canWriteAlbums: Bool
     var canDelete: Bool
+    /// True while a scan / face pass is actually running — the only time ⌘.
+    /// has anything to stop.
+    var canCancelScan: Bool
     var scan: (LibraryModel.ScanKind) -> Void
     var refineFaces: () -> Void
     var writeAlbums: () -> Void
     var deleteMarked: () -> Void
+    /// Stop the in-flight scan (⌘.). Never touches a photo — see SPEC §2:
+    /// the ONLY key that changes data is ⌘⏎ inside the review sheet.
+    var cancelScan: () -> Void
     var showHistory: () -> Void
     var toggleHelp: () -> Void
     /// Sparkle "Check for Updates…" (macOS only; see SnapsiftUpdateCommands
@@ -64,6 +70,14 @@ struct SnapsiftMenuCommands: Commands {
             Button(t.sortIntoAlbums()) { actions?.writeAlbums() }
                 .keyboardShortcut("5", modifiers: .command)
                 .disabled(actions?.canWriteAlbums != true)
+            Divider()
+            // ⌘. — registered here, like every other ⌘ shortcut, so the cheat
+            // sheet and the binding cannot drift (designer item 14). It used to
+            // live on the scan screen's own button and therefore existed only
+            // while that view was on screen, and appeared in no documentation.
+            Button(t.menuStopScan()) { actions?.cancelScan() }
+                .keyboardShortcut(".", modifiers: .command)
+                .disabled(actions?.canCancelScan != true)
             Divider()
             Button(t.menuDeleteMarked()) { actions?.deleteMarked() }
                 .keyboardShortcut(.delete, modifiers: .command)

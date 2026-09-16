@@ -107,18 +107,17 @@ struct PreCommitReviewSheet: View {
             // MARK: Withdrawn groups (keeper gone since the scan)
             if withdrawnCount > 0 {
                 HStack(spacing: 8) {
-                    Image(systemName: "questionmark.folder")
-                        .foregroundStyle(Color.reefAmber)
+                    Image(systemName: "minus.circle")
+                        .foregroundStyle(Color.reefTextDim)
                     Text(t.preCommitWithdrawnWarning(withdrawnCount))
-                        .font(.callout.bold())
-                        .foregroundStyle(Color.reefAmber)
+                        .font(.callout)
+                        .foregroundStyle(Color.reefTextDim)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.reefAmber.opacity(0.08))
 
                 Divider().background(Color.reefBorder)
             }
@@ -206,11 +205,15 @@ private struct GroupPreCommitRow: View {
             // Keeper row — or the loud no-survivor banner when there is none.
             if let withdrawal = group.withdrawal {
                 HStack(spacing: 6) {
-                    Image(systemName: "questionmark.folder")
-                        .foregroundStyle(Color.reefAmber)
+                    // Calm on purpose: this group is being SKIPPED. Amber here
+                    // read as "something went wrong with your photos" on the one
+                    // screen where being frightened is most expensive — while
+                    // what actually happened is that snapsift declined to act.
+                    Image(systemName: "minus.circle")
+                        .foregroundStyle(Color.reefTextDim)
                     Text(t.preCommitWithdrawnRow(withdrawal))
-                        .font(.caption.bold())
-                        .foregroundStyle(Color.reefAmber)
+                        .font(.caption)
+                        .foregroundStyle(Color.reefTextDim)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }

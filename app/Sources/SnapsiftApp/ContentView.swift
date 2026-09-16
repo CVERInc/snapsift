@@ -14,6 +14,10 @@ struct ContentView: View {
     @State private var deleting = false
     @State private var deletingCount = 0          // photos in the in-flight commit (overlay copy)
     @State private var focusedFrame: String?     // uuid of the focused grid cell
+    /// Content width GroupReview measured for its justified rows, reported back
+    /// so the keyboard handler can walk the SAME geometry the gallery drew
+    /// (SPEC §2: ↑/↓ move by row). 0 until the first layout pass.
+    @State private var galleryWidth: CGFloat = 0
     @State private var previewID: String?        // big-preview overlay (loupe)
     @State private var loupeOpen = false          // true when loupe is showing
     @State private var protectedHintFrame: String? // frame showing "protected — ⇧X" hint
@@ -146,30 +150,15 @@ struct ContentView: View {
     // MARK: permission gate
 
     private func gate(message: String, button: String?) -> some View {
-        VStack(spacing: 18) {
-            Text("snapsift").font(.largeTitle.weight(.bold)).foregroundStyle(Color.reefMint)
-            Text(message)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(Color.reefTextDim)
-                .frame(maxWidth: 440)
-            if let button {
-                Button(button) {
-                    Task {
-                        await model.requestAccess()
-                        model.loadAlbums()
-                    }
-                }
-                .buttonStyle(.borderedProminent)
+        // Delegates to the action variant below so the gate — wordmark included —
+        // is built in exactly ONE place (SPEC §3 / designer item 12: the name
+        // appeared five times in one window).
+        gate(message: message, button: button) {
+            Task {
+                await model.requestAccess()
+                model.loadAlbums()
             }
         }
-        .padding(CVERSpacing.xxl)
-        .liquidGlassCard(cornerRadius: CVERRadius.panel)
-        .shadow(color: .black.opacity(0.25), radius: 12, y: 6)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(ReefBackdrop())
-        // The permission screen has no main toolbar, so carry the language menu
-        // here too — otherwise a non-default-language user is stuck on the gate.
-        .toolbar { ToolbarItem { languageMenu } }
     }
 
     // FIX 1: gate shown when the user granted "Selected Photos" (limited) access.
@@ -209,7 +198,10 @@ struct ContentView: View {
     /// gate() variant that also accepts an action closure for the button.
     private func gate(message: String, button: String?, action: @escaping () -> Void) -> some View {
         VStack(spacing: 18) {
-            Text("snapsift").font(.largeTitle.weight(.bold)).foregroundStyle(Color.reefMint)
+            // The ONE wordmark in the app (designer item 12). Signet owns the
+            // house style — lowercase, monospaced, bold, theme accent — so this
+            // stops being a hand-rolled .largeTitle that drifted mint vs white.
+            Text("snapsift").cverWordmark(size: 34)
             Text(message)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(Color.reefTextDim)
@@ -528,10 +520,12 @@ struct ContentView: View {
             canRefineFaces: !busy && !model.groups.isEmpty,
             canWriteAlbums: !busy && !writingAlbums && !model.groups.isEmpty,
             canDelete: !busy && model.totalDeletions > 0,
+            canCancelScan: model.isScanning || model.refiningFaces,
             scan: { requestScan($0) },
             refineFaces: { Task { await model.refineWithFaces(t) } },
             writeAlbums: { Task { await runWriteAlbums() } },
             deleteMarked: { Task { await runDelete() } },
+            cancelScan: { model.cancelScan() },
             showHistory: { showHistorySheet = true },
             toggleHelp: { toggleHelp() },
             canCheckForUpdates: updateChecker.checkAvailable,
@@ -612,7 +606,6 @@ struct ContentView: View {
                 // not canvas — the photo grid stays fully opaque for color truth).
                 .background(Color.reefDeep.opacity(0.55))
                 .background(.ultraThinMaterial)
-                .navigationTitle("snapsift")
                 .frame(minWidth: 240)
                 .overlay { if model.groups.isEmpty && model.categories.isEmpty { emptyState } }
                 .focusable(!model.groups.isEmpty || !model.categories.isEmpty)
@@ -652,6 +645,10 @@ struct ContentView: View {
 
     // MARK: keyboard — list zone
 
+    /// SPEC §2: navigation is arrow keys ONLY. Single letters (X A D R 1–9) are
+    /// verbs aimed at the focused item and never move focus, so a mistyped verb
+    /// can change the wrong thing OR lose your place — never both at once. The
+    /// old j/k/l/h vim aliases are gone for exactly that reason.
     private func handleListKey(_ kp: KeyPress, _ proxy: ScrollViewProxy) -> KeyPress.Result {
         guard !deleting else { return .handled }   // input locked mid-delete
         if kp.characters == "?" { toggleHelp(); return .handled }
@@ -659,12 +656,14 @@ struct ContentView: View {
         case .upArrow:    moveSelection(-1, proxy); return .handled
         case .downArrow:  moveSelection(1, proxy);  return .handled
         case .rightArrow, .return: enterGrid(); return .handled
+        case .escape:
+            // SPEC §2: Esc means "one level up, nothing changes". The sidebar IS
+            // the top level, so here it means nothing happens — and swallowing it
+            // is what keeps that "nothing" silent instead of a system beep.
+            return .handled
         default: break
         }
         switch kp.characters {
-        case "k": moveSelection(-1, proxy); return .handled
-        case "j": moveSelection(1, proxy);  return .handled
-        case "l": enterGrid(); return .handled
         case "a": if let id = selection { model.keepAll(group: id) }; return .handled
         case "d":
             if let id = selection {
@@ -704,20 +703,29 @@ struct ContentView: View {
         }
 
         switch kp.key {
-        case .leftArrow, .upArrow:   moveFrame(-1, g); return .handled
-        case .rightArrow, .downArrow: moveFrame(1, g); return .handled
+        case .leftArrow:
+            // SPEC §2: ← on the FIRST frame is the way back out to the row that
+            // owns this grid — the same gesture as Esc, reached without leaving
+            // the arrow keys. Anywhere else it is simply the previous frame.
+            if focusedFrame == g.photos.first?.uuid { sidebarFocused = true }
+            else { moveFrame(-1, g) }
+            return .handled
+        case .rightArrow: moveFrame(1, g); return .handled
+        case .upArrow:    moveFrameByRow(-1, g); return .handled
+        case .downArrow:  moveFrameByRow(1, g);  return .handled
         case .escape:
             sidebarFocused = true; return .handled
         case .return:
-            if let f = focusedFrame { model.promote(group: g.id, to: f) }
+            // SPEC §2: Return is "go one level in" in every zone — from the list
+            // into the grid, from the grid into the preview. Nominating a keeper
+            // is a verb, and verbs live on 1–9 and A.
+            if let f = focusedFrame { previewID = f; loupeOpen = true }
             return .handled
         case .delete:
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
         default: break
         }
         switch kp.characters {
-        case "h", "k": moveFrame(-1, g); return .handled
-        case "l", "j": moveFrame(1, g);  return .handled
         case " ":
             if let f = focusedFrame { previewID = f; loupeOpen = true }
             return .handled
@@ -726,6 +734,8 @@ struct ContentView: View {
             let withheld = model.rejectAll(group: g.id)
             if withheld > 0 { showBanner(t.bulkRejectWithheld(withheld)) }
             return .handled
+        case "k", "K":
+            handleKeepKey(g); return .handled
         case "x", "X":
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
         // FIX 3: display-only rotate. R = clockwise, ⇧R = counter-clockwise.
@@ -748,25 +758,28 @@ struct ContentView: View {
 
     /// Key handler while the loupe is open — same frame actions + prev/next + close.
     private func handleLoupeKey(_ kp: KeyPress, _ g: ReviewGroup) -> KeyPress.Result {
-        // Full nav parity with the grid: ↑/↓ and j/k work here too, so muscle
-        // memory doesn't break the moment the loupe opens.
+        // Full nav parity with the grid: ↑/↓ work here too, so muscle memory
+        // doesn't break the moment the loupe opens. (One photo at a time means
+        // there are no ROWS to walk here — all four arrows are prev/next.)
         switch kp.key {
         case .leftArrow, .upArrow:    moveFrame(-1, g); return .handled
         case .rightArrow, .downArrow: moveFrame(1, g);  return .handled
         case .escape:
             loupeOpen = false; previewID = nil; return .handled
         case .return:
-            if let f = focusedFrame { model.promote(group: g.id, to: f) }
+            // The preview is the innermost level: there is nothing further in,
+            // so Return does nothing here. Swallowed rather than ignored so the
+            // key that opened this overlay doesn't beep inside it.
             return .handled
         case .delete:
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
         default: break
         }
         switch kp.characters {
-        case "h", "k": moveFrame(-1, g); return .handled
-        case "l", "j": moveFrame(1, g);  return .handled
         case " ":
             loupeOpen = false; previewID = nil; return .handled
+        case "k", "K":
+            handleKeepKey(g); return .handled
         case "x", "X":
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
         // FIX 3: display-only rotate works in the loupe too.
@@ -801,6 +814,38 @@ struct ContentView: View {
     private func handleRotateKey(modifiers: EventModifiers) {
         guard let f = focusedFrame else { return }
         model.rotate(frameID: f, clockwise: !modifiers.contains(.shift))
+    }
+
+    /// SPEC §2 verb: K nominates the FOCUSED frame as the one this group keeps
+    /// — byte for byte what pressing that frame's 1–9 number does, except it
+    /// works past frame 9, where the numbers run out. Return used to carry this
+    /// and now opens the preview, so without K a group of 40 look-alikes had no
+    /// keyboard path to nominate its 12th frame.
+    ///
+    /// It is a verb, so it never moves focus (it acts ON the focused frame, so
+    /// there is nothing to move to), and it moves in the safe direction:
+    /// `promote` never INSERTS into `rejected` — it only removes the frame it
+    /// nominates — so no keystroke here can add a deletion.
+    ///
+    /// It is not a full undo of a ⇧X override, though: promoting a
+    /// force-rejected protected frame un-marks that frame, and `promote` also
+    /// clears the group's `includeProtected` flag once no protected frame is
+    /// marked any more (review P3-1) — but the flag is group-level, so a group
+    /// with ANOTHER force-rejected protected frame keeps it, correctly.
+    ///
+    /// DELIBERATELY NOT blocked on protected / unverifiable frames, unlike X.
+    /// X is blocked there because X DELETES and those frames may not be
+    /// deleted; K keeps, and keeping a protected photo is the outcome
+    /// protection exists to produce — `KeeperReason.favorite` is the top-
+    /// priority reason precisely because the starred frame is usually the one
+    /// to keep. Blocking it would put the commonest nomination out of reach of
+    /// the keyboard, contradict "same effect as its 1–9 number" (which has
+    /// never blocked), and show a hint that reads "⇧X to force-reject" in
+    /// answer to a request to KEEP. `LibraryModel.promote` has no protection
+    /// guard for the same reason.
+    private func handleKeepKey(_ g: ReviewGroup) {
+        guard let f = focusedFrame else { return }
+        model.promote(group: g.id, to: f)
     }
 
     /// Shared reject-key logic for grid and loupe.
@@ -842,6 +887,36 @@ struct ContentView: View {
     private func moveFrame(_ delta: Int, _ g: ReviewGroup) {
         let ids = g.photos.map(\.uuid)
         if let next = step(ids, current: focusedFrame, delta: delta) { focusedFrame = next }
+    }
+
+    /// SPEC §2: ↑/↓ move by ROW — "the photo above this one" — using the SAME
+    /// justified-layout geometry the gallery draws with, not index arithmetic.
+    /// In a justified gallery the frame above is only the previous frame by
+    /// coincidence, and only in a one-row group.
+    ///
+    /// `galleryWidth` is the width GroupReview measured for its own row packing;
+    /// until it reports one (first frame after a group change) there is no
+    /// geometry to walk, and stepping one frame is the honest fallback rather
+    /// than a guess at a layout nobody has laid out yet.
+    private func moveFrameByRow(_ delta: Int, _ g: ReviewGroup) {
+        guard let current = focusedFrame,
+              let index = g.photos.firstIndex(where: { $0.uuid == current }),
+              galleryWidth > 0 else {
+            moveFrame(delta, g)
+            return
+        }
+        let rows = JustifiedLayout.rows(
+            aspectRatios: g.photos.map { model.displayAspect(for: $0) },
+            containerWidth: Double(galleryWidth),
+            targetHeight: JustifiedLayout.targetHeight(forWidth: Double(galleryWidth)),
+            spacing: Double(GroupReview.gallerySpacing)
+        )
+        // nil = already on the first/last row. Staying put is the whole point:
+        // the old handler slid sideways into the next row instead.
+        if let next = JustifiedLayout.rowNeighbor(rows: rows, spacing: Double(GroupReview.gallerySpacing),
+                                                  from: index, delta: delta) {
+            focusedFrame = g.photos[next].uuid
+        }
     }
 
     // Manual selection (no List(selection:)) so the system accent highlight never
@@ -992,6 +1067,7 @@ struct ContentView: View {
             }
         } else if let id = selection, let g = model.groups.first(where: { $0.id == id }) {
             GroupReview(group: g, model: model, t: t,
+                        contentWidth: $galleryWidth,
                         focusedFrame: gridFocused ? focusedFrame : nil,
                         isExactDupeGroup: model.exactDupeGroupIDs.contains(g.id),
                         protectedHintFrame: protectedHintFrame,
@@ -1020,6 +1096,9 @@ struct ContentView: View {
                 .focusEffectDisabled()
                 .onKeyPress { kp in
                     if kp.characters == "?" { toggleHelp(); return .handled }
+                    // SPEC §2: this screen is the top level — Esc has nowhere to
+                    // go up to, so it does nothing, silently (not a beep).
+                    if kp.key == .escape { return .handled }
                     return .ignored
                 }
         } else {
@@ -1065,10 +1144,13 @@ struct ContentView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
             if model.isScanning || model.refiningFaces {
+                // ⌘. is registered on the MENU item (Commands.swift), not here:
+                // one shortcut, one owner, and the cheat sheet can document it
+                // (SPEC §2 — "任一 ⌘. 停止進行中的作業" works from any zone,
+                // not only while this hero view happens to be on screen).
                 Button(t.cancelScanButton()) { model.cancelScan() }
                     .buttonStyle(.bordered)
                     .controlSize(.regular)
-                    .keyboardShortcut(".", modifiers: .command)
                     .padding(.top, 6)
             }
         }
@@ -1086,13 +1168,10 @@ struct ContentView: View {
             } else {
                 Image(systemName: "rectangle.stack.badge.minus")
                     .font(.system(size: 52)).foregroundStyle(Color.reefMint)
-                Text("snapsift").font(.largeTitle.weight(.bold)).foregroundStyle(.white)
-                Text("v\(appVersion)")
-                    .font(.caption.monospaced())
-                    // One dilution step only (reefTextDim is already diluted) so
-                    // the version stays above AA contrast.
-                    .foregroundStyle(Color.reefTextDim)
-                Text(t.privacyPitch())
+                // No wordmark and no version here (designer item 12): the window
+                // already carries the name, and the version belongs in About,
+                // which macOS builds from Info.plist for free.
+                Text(t.privacyPitch(qualityAvailable: model.qualityAvailable))
                     .font(.callout)
                     .foregroundStyle(Color.reefTextDim)
                     .multilineTextAlignment(.center).frame(maxWidth: 520)
@@ -1378,12 +1457,6 @@ struct ContentView: View {
 
     // MARK: status bar (reclaim summary)
 
-    /// Build version pulled from CFBundleShortVersionString at runtime — single
-    /// source of truth is Info.plist; no literal that can drift.
-    private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-    }
-
     private var statusBar: some View {
         HStack(spacing: 10) {
             if model.totalDeletions > 0 {
@@ -1406,11 +1479,6 @@ struct ContentView: View {
                 .foregroundStyle(Color.reefTextDim)
                 .help(t.fdaHintHelp())
             }
-            Text("snapsift v\(appVersion)")
-                // reefTextDim is already a diluted token; a second .opacity step
-                // dropped this under AA contrast — one dilution reads secondary
-                // AND stays legible.
-                .foregroundStyle(Color.reefTextDim)
             // FIX 3: always-visible commit button in the status bar.
             // The toolbar Delete button is the last of ~6 primaryAction items and
             // collapses into the » overflow on narrow windows, making it
@@ -1726,6 +1794,11 @@ struct GroupReview: View {
     let group: ReviewGroup
     @ObservedObject var model: LibraryModel
     let t: L10n
+    // Pass 2a (FIX 2): measured content width for the justified-rows layout.
+    // Owned by ContentView (see `galleryWidth`) so the ↑/↓ row-walk and the
+    // gallery pack the SAME rows — a second copy of this number is a layout the
+    // keyboard would walk while the user looks at another.
+    @Binding var contentWidth: CGFloat
     var focusedFrame: String? = nil
     /// True when the parent confirmed this group as an exact-duplicate cluster.
     var isExactDupeGroup: Bool = false
@@ -1742,11 +1815,10 @@ struct GroupReview: View {
     // FIX C: confirmation alert state for including protected frames in deletion.
     @State private var showDeleteProtectedAlert = false
 
-    // Pass 2a (FIX 2): measured content width for the justified-rows layout.
-    @State private var contentWidth: CGFloat = 0
-
     /// Horizontal gap between frames in a row (and vertical gap between rows).
-    private let gallerySpacing: CGFloat = 8
+    /// Static: the keyboard handler needs the identical spacing to re-pack rows.
+    static let gallerySpacing: CGFloat = 8
+    private var gallerySpacing: CGFloat { Self.gallerySpacing }
 
     var body: some View {
         ScrollView {
@@ -1901,12 +1973,11 @@ struct GroupReview: View {
     // MARK: - Pass 2a — justified-rows gallery (FIX 2)
 
     /// Nominal row height, responsive to window width: a bit shorter on a slim
-    /// pane, taller on a wide one, clamped to a sensible band.
+    /// pane, taller on a wide one, clamped to a sensible band. The formula lives
+    /// in Core (`JustifiedLayout.targetHeight`) because the ↑/↓ row-walk has to
+    /// reproduce this exact layout — see `moveFrameByRow`.
     private var targetRowHeight: CGFloat {
-        let w = contentWidth
-        guard w > 0 else { return 200 }
-        // ~200pt baseline; scale gently with width so wide windows breathe.
-        return min(260, max(150, w / 4.2))
+        CGFloat(JustifiedLayout.targetHeight(forWidth: Double(contentWidth)))
     }
 
     /// The aspect-true gallery: pure JustifiedLayout math packs frames (using
@@ -2037,12 +2108,29 @@ struct GroupReview: View {
             else if let onDesktopTap { onDesktopTap(p.uuid) }
             else { model.promote(group: group.id, to: p.uuid) }
         }
+        // The last arm used to be a bare `t.tipDelete()`: any card that was not
+        // kept, not protected and not an exact dup got "this one gets deleted"
+        // — including cards nobody has marked at all, in the very groups whose
+        // whole point is that snapsift did NOT decide. It now branches on the
+        // same `del` the border and the badge use, and a marked card carries
+        // the same reason its chip and its VoiceOver label do.
+        //
+        // ORDER MATTERS (review P2-2). The two protected arms used to sit above
+        // `del` and swallow it, so a favorite the user had force-rejected with
+        // ⇧X — and confirmed — still read "won't be deleted unless you force
+        // it". She had just forced it. `del` is now tested before them, so the
+        // arm that fires is the one describing what will actually happen, and
+        // the chip, this tooltip and the VoiceOver label agree in that state
+        // too. `isExactSuggested` stays on top of `del` deliberately: those
+        // frames ARE marked, and `tipExactDupe` is the only place that names
+        // what the exact-duplicate comparison does and does not cover.
         .help(
-            p.isProtected && isExactDupeGroup ? t.tipExactDupeProtected()
+            isExactSuggested ? t.tipExactDupe()
+            : del ? "\(t.tipDelete()) · \(t.deleteWhy(deleteWhyReason(for: p)))"
+            : p.isProtected && isExactDupeGroup ? t.tipExactDupeProtected()
             : p.isProtected ? t.tipProtectedFrame()
-            : isExactSuggested ? t.tipExactDupe()
             : keep ? keeperWhyTooltip(for: p, group: group, t: t)
-            : t.tipDelete()
+            : t.tipUndecided()
         )
         // The card is a ZStack, not a Button — expose it to VoiceOver as one
         // labelled, actionable element carrying the frame's filename + decision
@@ -2054,6 +2142,16 @@ struct GroupReview: View {
                                                     exactSuggested: isExactSuggested))
     }
 
+    /// Why THIS card is marked for removal. A label over state that already
+    /// exists (`autoSeeded` = the exact-duplicate pass seeded it, `deleteAll` =
+    /// a whole-group action swept it); the chip, the tooltip and the VoiceOver
+    /// label all read it here so the three can never disagree again.
+    private func deleteWhyReason(for p: Photo) -> DeleteMarkReason {
+        deleteMarkReason(frameID: p.uuid,
+                         autoSeeded: group.autoSeeded,
+                         wholeGroupMarked: group.deleteAll)
+    }
+
     /// One spoken line for a frame card: filename · decision · protection reasons.
     /// Reuses the loupe HUD's localized state tokens so VoiceOver and the visible
     /// HUD stay in lockstep.
@@ -2063,7 +2161,13 @@ struct GroupReview: View {
         var parts: [String] = []
         if keep { parts.append(t.loupeKeeper()) }
         else if exactSuggested { parts.append(t.exactDupeBadge()) }
-        else if del { parts.append(t.loupeReject()) }
+        else if del {
+            // Spoken WITH its reason, so VoiceOver and the tooltip say the same
+            // thing about the same card (they disagreed before: one said "will
+            // be deleted", the other "no decision").
+            parts.append(t.loupeReject())
+            parts.append(t.deleteWhy(deleteWhyReason(for: p)))
+        }
         else { parts.append(t.loupeNoDecision()) }
         if p.favorite   { parts.append(t.loupeFav()) }
         if p.edited     { parts.append(t.loupeEdited()) }
@@ -2095,7 +2199,11 @@ struct GroupReview: View {
             if keep { chip(symbol: "checkmark", text: t.keep(), .reefGreen, Color(hex: 0x04110a)) }
             // FIX D: exact-dup badge is teal, not amber — "safe to remove" ≠ "protected".
             if exactSuggested { chip(symbol: "doc.on.doc", text: t.exactDupeBadge(), .reefTeal, Color(hex: 0x04181a)) }
-            else if del { chip(symbol: "xmark", text: t.delete(), .reefRed, .white) }
+            // KEEP had seven reasons on offer and DELETE had none — the badge
+            // just said "DELETE". It now says WHY, derived from state that
+            // already existed (Core `deleteMarkReason`); nothing about which
+            // photos are deleted changed.
+            else if del { chip(symbol: "xmark", text: t.deleteWhy(deleteWhyReason(for: p)), .reefRed, .white) }
             // FIX A + FIX 4: per-reason protection chips (amber) — each applicable
             // reason shown independently with an icon so it's never guessed.
             if p.favorite   { chip(symbol: "star.fill",        text: nil, .reefAmber, Color(hex: 0x1a1203)) }

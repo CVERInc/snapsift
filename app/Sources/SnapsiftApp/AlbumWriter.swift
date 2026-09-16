@@ -80,6 +80,27 @@ enum AlbumWriter {
         Language.allCases.map { prefix + suffix(L10n($0)) }
     }
 
+    /// Titles an EARLIER snapsift gave this same bucket, before the 2026-09-16
+    /// rename (ruling, chodaict). They are NOT dead history: a dogfooded library
+    /// already has albums under these names, and every place that resolves the
+    /// bucket has to keep recognising them — otherwise the next sort creates a
+    /// second, parallel album beside the one the user has been using, and
+    /// reconcile stops seeing the frames already filed there.
+    ///
+    /// Retired names only ever get appended here; nothing is removed.
+    static let legacyNeedsLookTitles: [String] = [
+        prefix + "Needs a look",   // en-US, until 2026-09-16
+        prefix + "請你看看",        // zh-TW, until 2026-09-16
+        // ja-JP 「要確認」 was not renamed, so it needs no legacy entry.
+    ]
+
+    /// Every title this bucket answers to: the current one in each language,
+    /// plus the retired ones. Album RESOLUTION uses this; album CREATION still
+    /// uses the active language's current title.
+    static var allNeedsLookTitles: [String] {
+        allTitles { $0.albumNameNeedsLook() } + legacyNeedsLookTitles
+    }
+
     /// Every title ANY snapsift build has ever created or could create, across
     /// every bucket and every language — used to exclude the tool's OWN
     /// organizational albums from signals that must reflect only the USER's
@@ -90,7 +111,7 @@ enum AlbumWriter {
             + allTitles { $0.albumNameBlurry() }
             + allTitles { $0.albumNameDocs() }
             + allTitles { $0.albumNameExact() }
-            + allTitles { $0.albumNameNeedsLook() })
+            + allNeedsLookTitles)
     }
 
     // MARK: - Write
@@ -188,7 +209,7 @@ enum AlbumWriter {
             fromAlbumTitles: allTitles { $0.albumNameExact() })
         result.moved += try await removeAssets(
             ids: plan.needsLookRemove,
-            fromAlbumTitles: allTitles { $0.albumNameNeedsLook() })
+            fromAlbumTitles: allNeedsLookTitles)
 
         let exactToAdd = Set(plan.exactAdd)
         let exactAddAssets = exactAssets.filter { exactToAdd.contains($0.localIdentifier) }
@@ -200,7 +221,7 @@ enum AlbumWriter {
         if !needsLookAssets.isEmpty {
             result.needsLook = try await addAssets(needsLookAssets,
                                                     toAlbumNamed: albumNeedsLook(t),
-                                                    candidateTitles: allTitles { $0.albumNameNeedsLook() })
+                                                    candidateTitles: allNeedsLookTitles)
         }
         return result
     }

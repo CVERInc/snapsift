@@ -114,4 +114,65 @@ public enum JustifiedLayout {
         flush(stretch: false)
         return rows
     }
+
+    /// The nominal row height for a container of `containerWidth` points.
+    ///
+    /// Lives here, not in the view, because TWO callers need the identical
+    /// number: the gallery that draws the rows, and the keyboard handler that
+    /// walks them. Two copies of this formula would mean ↑/↓ walking a layout
+    /// nobody is looking at.
+    public static func targetHeight(forWidth containerWidth: Double) -> Double {
+        guard containerWidth > 0 else { return 200 }
+        // ~200pt baseline; scale gently with width so wide windows breathe.
+        return min(260, max(150, containerWidth / 4.2))
+    }
+
+    /// Walk exactly ONE ROW up (`delta < 0`) or down (`delta > 0`) from the frame
+    /// at `index`, keeping the horizontal position: the answer is the frame in
+    /// the neighbouring row whose horizontal span contains this frame's centre
+    /// (or, if the rows don't overlap there, the frame whose centre is nearest).
+    ///
+    /// This is what makes ↑/↓ mean "the photo above / below" rather than
+    /// "the previous / next photo" — in a justified gallery the two are the same
+    /// thing only by accident, and only in a single-row group.
+    ///
+    /// Returns `nil` when there is no such row (already on the first/last row),
+    /// when `index` isn't placed, or when `delta` is 0 — the caller then leaves
+    /// focus where it is rather than inventing a move.
+    public static func rowNeighbor(rows: [Row], spacing: Double = 8,
+                                   from index: Int, delta: Int) -> Int? {
+        guard delta != 0 else { return nil }
+        let gap = max(0, spacing)
+        // Locate the frame and its horizontal centre within its own row.
+        var sourceRow: Int? = nil
+        var centre = 0.0
+        for (r, row) in rows.enumerated() {
+            var x = 0.0
+            for item in row.items {
+                if item.index == index {
+                    sourceRow = r
+                    centre = x + item.width / 2
+                    break
+                }
+                x += item.width + gap
+            }
+            if sourceRow != nil { break }
+        }
+        guard let from = sourceRow else { return nil }
+        let target = from + delta
+        guard target >= 0, target < rows.count, !rows[target].items.isEmpty else { return nil }
+
+        // Pick the frame in the target row that sits under (or nearest to) the
+        // same horizontal position.
+        var x = 0.0
+        var best = rows[target].items[0].index
+        var bestDistance = Double.greatestFiniteMagnitude
+        for item in rows[target].items {
+            if centre >= x && centre <= x + item.width { return item.index }
+            let d = abs((x + item.width / 2) - centre)
+            if d < bestDistance { bestDistance = d; best = item.index }
+            x += item.width + gap
+        }
+        return best
+    }
 }
