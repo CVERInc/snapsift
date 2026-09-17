@@ -268,7 +268,7 @@ struct ContentView: View {
                     // W1.5: pane focus reads as dimming, not a coloured frame.
                     // Sidebar-focused ⇒ content dims slightly; toolbar (a
                     // sibling, set via .toolbar{} below) is untouched.
-                    .opacity(sidebarFocused ? 0.85 : 1)
+                    .opacity(sidebarFocused ? 0.7 : 1)
                     .animation(.easeInOut(duration: 0.15), value: sidebarFocused)
                 if showHelp {
                     Divider()
@@ -1025,7 +1025,7 @@ struct ContentView: View {
             )
             // W1.5: content pane has focus ⇒ sidebar rows dim (selected row
             // stays readable so "where am I" survives the dim).
-            .opacity(contentActive && !sel ? 0.55 : 1)
+            .opacity(contentActive && !sel ? 0.35 : 1)
             .animation(.easeInOut(duration: 0.15), value: contentActive)
         }
     }
@@ -1071,7 +1071,7 @@ struct ContentView: View {
           )
           // W1.5: same as categoryRow — dim non-selected rows while the
           // content pane holds focus.
-          .opacity(contentActive && !sel ? 0.55 : 1)
+          .opacity(contentActive && !sel ? 0.35 : 1)
           .animation(.easeInOut(duration: 0.15), value: contentActive)
         }
         .id(g.id)
