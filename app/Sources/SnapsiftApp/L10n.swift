@@ -688,13 +688,24 @@ struct L10n: Sendable {
         case .zhTW: return "跨距 \(s) 秒 · 刪除 \(delete)"
         }
     }
+    /// Group header. The sidebar row already says how many frames and the time
+    /// span, and the window title names the section — so this line carries only
+    /// what nothing else on screen says: how many stay and how many go (owner
+    /// ruling 2026-09-17: a fact shown once per screen). `keep` is computed, not
+    /// the literal "1" it used to be — a keep-all group keeps them all.
     func clusterHeader(count: Int, span: Double, delete: Int) -> String {
-        let s = String(format: "%.1f", span)
+        let keep = max(count - delete, 0)
         switch language {
-        case .en: return "\(count) frames · spans \(s)s · keep 1, delete \(delete)"
-        case .ja: return "\(count)枚 · 約\(s)秒 · 1枚を残し\(delete)枚を削除"
-        case .zhTW: return "\(count) 張 · 跨距 \(s) 秒 · 留 1 刪 \(delete)"
+        case .en: return "Keep \(keep) · delete \(delete)"
+        case .ja: return "残す \(keep) · 削除 \(delete)"
+        case .zhTW: return "留 \(keep) · 刪 \(delete)"
         }
+    }
+    func sectionConfidentName() -> String {
+        switch language { case .en: return "Near-identical"; case .ja: return "ほぼ同じ"; case .zhTW: return "幾乎一樣" }
+    }
+    func sectionPendingName() -> String {
+        switch language { case .en: return "A bit alike — you choose"; case .ja: return "少し似ている — あなたが選ぶ"; case .zhTW: return "有點像 · 你決定" }
     }
     func appleRanked() -> String {
         switch language {

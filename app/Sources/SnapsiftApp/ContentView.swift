@@ -1113,6 +1113,7 @@ struct ContentView: View {
                         contentWidth: $galleryWidth,
                         focusedFrame: contentActive ? focusedFrame : nil,
                         isExactDupeGroup: model.exactDupeGroupIDs.contains(g.id),
+                        sectionTitle: model.confidentGroups.contains(where: { $0.id == g.id }) ? t.sectionConfidentName() : t.sectionPendingName(),
                         protectedHintFrame: protectedHintFrame,
                         onOpenLoupe: touchOpenLoupe,
                         onDesktopTap: { uuid in
@@ -1861,6 +1862,9 @@ struct GroupReview: View {
     var focusedFrame: String? = nil
     /// True when the parent confirmed this group as an exact-duplicate cluster.
     var isExactDupeGroup: Bool = false
+    /// Window title = the section this group lives in (the frame count is on the
+    /// sidebar row; it is not repeated here).
+    var sectionTitle: String = ""
     /// Frame currently showing the "protected — ⇧X to force" hint (from keyboard handler).
     var protectedHintFrame: String? = nil
     /// Touch platforms: tapping a thumbnail opens the loupe here instead of
@@ -1982,7 +1986,7 @@ struct GroupReview: View {
             .padding(CVERSpacing.lg)
         }
         .background(Color.reefGround)
-        .navigationTitle(t.frames(group.photos.count))
+        .navigationTitle(sectionTitle)
         // FIX C: confirmation alert before protected frames enter the deletion set.
         // The model is only updated when the user explicitly confirms — Cancel is a
         // full no-op so accidentally tapping "Include protected" is reversible.
