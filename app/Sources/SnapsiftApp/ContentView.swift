@@ -31,6 +31,14 @@ struct ContentView: View {
     @State private var showHelp = false
     @FocusState private var sidebarFocused: Bool
     @FocusState private var gridFocused: Bool
+    /// The content pane is the active zone. Deliberately NOT `gridFocused`:
+    /// measured 2026-09-17 with an os.Logger probe — after entering the grid by
+    /// keyboard, every key press is delivered to `handleGridKey` while the
+    /// `@FocusState` binding still reads false and never flips to true (it only
+    /// became true on the mouse path, where our own code assigns it). The
+    /// sidebar losing focus IS reported reliably, so the ring and the pane
+    /// dimming key off that plus the logical `focusedFrame`.
+    private var contentActive: Bool { gridFocused || (!sidebarFocused && focusedFrame != nil) }
     @State private var banner: String?
     // Only the most-recent banner's dismiss timer may clear it. Without this,
     // an earlier banner's 3.2s timer truncates whatever banner replaced it.
@@ -1017,8 +1025,8 @@ struct ContentView: View {
             )
             // W1.5: content pane has focus ⇒ sidebar rows dim (selected row
             // stays readable so "where am I" survives the dim).
-            .opacity(gridFocused && !sel ? 0.55 : 1)
-            .animation(.easeInOut(duration: 0.15), value: gridFocused)
+            .opacity(contentActive && !sel ? 0.55 : 1)
+            .animation(.easeInOut(duration: 0.15), value: contentActive)
         }
     }
 
@@ -1063,8 +1071,8 @@ struct ContentView: View {
           )
           // W1.5: same as categoryRow — dim non-selected rows while the
           // content pane holds focus.
-          .opacity(gridFocused && !sel ? 0.55 : 1)
-          .animation(.easeInOut(duration: 0.15), value: gridFocused)
+          .opacity(contentActive && !sel ? 0.55 : 1)
+          .animation(.easeInOut(duration: 0.15), value: contentActive)
         }
         .id(g.id)
     }
@@ -1103,7 +1111,7 @@ struct ContentView: View {
         } else if let id = selection, let g = model.groups.first(where: { $0.id == id }) {
             GroupReview(group: g, model: model, t: t,
                         contentWidth: $galleryWidth,
-                        focusedFrame: gridFocused ? focusedFrame : nil,
+                        focusedFrame: contentActive ? focusedFrame : nil,
                         isExactDupeGroup: model.exactDupeGroupIDs.contains(g.id),
                         protectedHintFrame: protectedHintFrame,
                         onOpenLoupe: touchOpenLoupe,
