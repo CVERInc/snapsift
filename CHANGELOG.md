@@ -3,6 +3,27 @@
 All notable changes to snapsift. Versions follow semantic versioning; 1.0.0 is
 reserved for the first signed and notarized build.
 
+## [Unreleased]
+
+### Added
+- **⇧K — "keep only this one."** In a group of five, one keystroke nominates the
+  focused photo as the keeper and crosses out the rest, instead of pressing `X`
+  four times (or `D` then `K`, which passes through a state where every photo is
+  marked). `K` : `⇧K` is the same relationship as `X` : `⇧X` — the plain verb and
+  the stronger one. Works in the grid and in the preview, and appears in the `?`
+  cheat sheet in English, Japanese and Traditional Chinese.
+  - It **marks only**: nothing leaves the library until the pre-commit sheet is
+    confirmed, and `K` or `A` afterwards undo it the ordinary way.
+  - Protected photos (favorite / edited / document) and anything snapsift could
+    not classify are **never** crossed out by ⇧K — only the per-photo ⇧X path,
+    which asks first, can cross out a known protection. The set it marks is the
+    same `bulkRejectCandidates` rule `D` and the exact-duplicate pass already
+    use; there is no second definition of "deletable".
+  - It does not undo your decisions either: a protected photo you had already
+    force-crossed-out yourself with ⇧X **stays** crossed out.
+  - Marks made this way are attributed as "marked by you" in the audit log,
+    never as an app suggestion.
+
 ## [0.10.0] — 2026-09-18
 
 The safety release. Everything below was reviewed in three adversarial rounds

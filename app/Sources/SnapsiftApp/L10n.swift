@@ -217,10 +217,10 @@ struct L10n: Sendable {
         // List zone
         case listMove, listEnter, listKeepAll, listRejectAll
         // Grid zone
-        case gridMove, gridRowMove, gridBackOut, gridCrown, gridKeep, gridPreview
+        case gridMove, gridRowMove, gridBackOut, gridCrown, gridKeep, gridKeepOnly, gridPreview
         case gridReject, gridForceReject, gridRotate, gridSaveRotation
         // Preview (loupe)
-        case loupeMove, loupeCrown, loupeKeep, loupeReject, loupeForceReject
+        case loupeMove, loupeCrown, loupeKeep, loupeKeepOnly, loupeReject, loupeForceReject
         case loupeRotate, loupeClose
         // Anywhere
         case escape, commit, sheetConfirm, scans, stop, history, help
@@ -238,6 +238,7 @@ struct L10n: Sendable {
             case .gridBackOut:      return "←"
             case .gridCrown:        return "1–9"
             case .gridKeep:         return "K"
+            case .gridKeepOnly:     return "⇧K"
             case .gridPreview:      return "Space / ⏎"
             case .gridReject:       return "X / ⌫"
             case .gridForceReject:  return "⇧X"
@@ -246,6 +247,7 @@ struct L10n: Sendable {
             case .loupeMove:        return "← → ↑ ↓"
             case .loupeCrown:       return "1–9"
             case .loupeKeep:        return "K"
+            case .loupeKeepOnly:    return "⇧K"
             case .loupeReject:      return "X / ⌫"
             case .loupeForceReject: return "⇧X"
             case .loupeRotate:      return "R / ⇧R"
@@ -279,6 +281,7 @@ struct L10n: Sendable {
             case .gridBackOut:      return "On the first photo: back to the list"
             case .gridCrown:        return "Keep the nth photo"
             case .gridKeep:         return "Keep THIS one — the way to reach photo 10 and beyond"
+            case .gridKeepOnly:     return "Keep ONLY this one — crosses out the rest of the group (nothing is removed yet)"
             case .gridPreview:      return "Open the preview"
             case .gridReject:       return "Cross this one out · press again to undo"
             case .gridForceReject:  return "Cross out a protected photo (asks first)"
@@ -287,6 +290,7 @@ struct L10n: Sendable {
             case .loupeMove:        return "Preview: previous / next photo"
             case .loupeCrown:       return "Preview: keep the nth photo"
             case .loupeKeep:        return "Preview: keep THIS one"
+            case .loupeKeepOnly:    return "Preview: keep ONLY this one — crosses out the rest"
             case .loupeReject:      return "Preview: cross out · press again to undo"
             case .loupeForceReject: return "Preview: cross out a protected photo (asks first)"
             case .loupeRotate:      return "Preview: turn it — on screen only"
@@ -310,6 +314,7 @@ struct L10n: Sendable {
             case .gridBackOut:      return "先頭の写真で押すとリストへ戻る"
             case .gridCrown:        return "n 番目を残す"
             case .gridKeep:         return "この1枚を残す — 10枚目以降はこれで"
+            case .gridKeepOnly:     return "この1枚だけを残す — 同じグループの残りを外す（まだ削除はされません）"
             case .gridPreview:      return "プレビューを開く"
             case .gridReject:       return "この1枚を外す・もう一度で取り消し"
             case .gridForceReject:  return "保護された写真も外す（確認あり）"
@@ -318,6 +323,7 @@ struct L10n: Sendable {
             case .loupeMove:        return "プレビュー：前／次"
             case .loupeCrown:       return "プレビュー：n 番目を残す"
             case .loupeKeep:        return "プレビュー：この1枚を残す"
+            case .loupeKeepOnly:    return "プレビュー：この1枚だけを残す — 残りを外す"
             case .loupeReject:      return "プレビュー：外す・もう一度で取り消し"
             case .loupeForceReject: return "プレビュー：保護された写真も外す（確認あり）"
             case .loupeRotate:      return "プレビュー：回す — 画面の中だけ"
@@ -341,6 +347,7 @@ struct L10n: Sendable {
             case .gridBackOut:      return "在第一張上按，回到清單"
             case .gridCrown:        return "把第 n 張留下"
             case .gridKeep:         return "留下這一張 —— 第 10 張以後就靠它"
+            case .gridKeepOnly:     return "只留這張 —— 同一群其餘的都劃掉（還不會刪除）"
             case .gridPreview:      return "打開預覽"
             case .gridReject:       return "劃掉這張 · 再按一次取消"
             case .gridForceReject:  return "連受保護的也劃掉（會先問你）"
@@ -349,6 +356,7 @@ struct L10n: Sendable {
             case .loupeMove:        return "預覽：上一張／下一張"
             case .loupeCrown:       return "預覽：把第 n 張留下"
             case .loupeKeep:        return "預覽：留下這一張"
+            case .loupeKeepOnly:    return "預覽：只留這張 —— 其餘都劃掉"
             case .loupeReject:      return "預覽：劃掉這張 · 再按一次取消"
             case .loupeForceReject: return "預覽：連受保護的也劃掉（會先問你）"
             case .loupeRotate:      return "預覽：轉一下 —— 只有畫面上"

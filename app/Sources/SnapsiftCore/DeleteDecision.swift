@@ -122,6 +122,78 @@ public func bulkRejectWithheld(photos: [Photo], keeperID: String) -> Set<String>
     Set(photos.filter { $0.uuid != keeperID && $0.isUnverifiable && !$0.isProtected }.map(\.uuid))
 }
 
+// MARK: - Nomination verbs (K and ⇧K), as state transitions
+
+/// The two fields a nomination verb may move: who this group keeps, and which
+/// frames are marked. Everything else about a group (`autoSeeded`,
+/// `includeProtected`) is App-layer bookkeeping and stays there.
+public struct GroupMarkState: Equatable {
+    public let keeperID: String
+    public let rejected: Set<String>
+    public init(keeperID: String, rejected: Set<String>) {
+        self.keeperID = keeperID
+        self.rejected = rejected
+    }
+}
+
+/// `K` / `1–9` — nominate `frameID` as keeper. The SAFE direction, by
+/// construction: it only ever REMOVES from `rejected`, never inserts, so no
+/// nomination keystroke can widen a deletion. `LibraryModel.promote` calls this
+/// and then does its own `autoSeeded` / `includeProtected` bookkeeping.
+public func promoteState(_ state: GroupMarkState, to frameID: String) -> GroupMarkState {
+    GroupMarkState(keeperID: frameID, rejected: state.rejected.subtracting([frameID]))
+}
+
+/// `⇧K` — "keep only this one": nominate `keeperID` AND mark every other frame
+/// in the group that may be marked.
+///
+/// K : ⇧K :: X : ⇧X — plain verb, stronger verb. The stronger one here is
+/// still only a MARKING action: nothing leaves the library until the pre-commit
+/// sheet is confirmed, and `K` / `A` undo it the ordinary way.
+///
+/// What it marks is `bulkRejectCandidates` — THE one composition rule, shared
+/// with `d` (reject-all) and the exact-duplicate auto-seed. That is the whole
+/// reason this function exists rather than a second filter written at the call
+/// site: "deletable" is defined once (`Photo.isDeletable`), so ⇧K itself never
+/// ADDS a mark to a protected (favorite / edited / document) or UNVERIFIABLE
+/// frame. Only the per-frame ⇧X informed-consent path can force a KNOWN
+/// protection.
+///
+/// …and it never REMOVES one the owner made himself either (ruling 2026-09-18).
+/// "They stay as they are" cuts both ways: a favorite the owner deliberately
+/// force-marked with ⇧X, having read the confirmation, is a decision this verb
+/// has no business quietly undoing — and an undo that shows up as FEWER marks is
+/// still an undo the owner did not ask for. So the result CARRIES those marks
+/// over: `bulkRejectCandidates` ∪ (already-rejected protected frames), minus the
+/// new keeper. `promote`'s own removal is what un-marks the nominated frame, so
+/// ⇧K on a force-marked favorite still keeps it, as the verb promises.
+///
+/// The carry-over set is `isProtected` only, NOT `isDeletable`'s other half: an
+/// unverifiable frame cannot legitimately be in `rejected` to begin with
+/// (`toggleReject` refuses to insert one, `forceReject` guards against it, and
+/// `isEffectiveDeletion` would refuse it unconditionally), so carrying one would
+/// preserve a mark that can never fire and no surface explains. Where it somehow
+/// exists, ⇧K drops it — the honest direction.
+///
+/// `includeProtected` is untouched here by design: ⇧K adds nothing that needs
+/// consent, and the flag is group-level state the App layer owns
+/// (`LibraryModel.keepOnly` applies `promote`'s existing rule, which can only
+/// turn the override OFF, and only when no protected frame is marked any more).
+///
+/// Idempotent: feeding its own output back in yields the same state. On an
+/// exact-duplicate group that already carries pre-seeded marks it lands on
+/// keeper-plus-rest with the focused frame as keeper.
+public func keepOnlyState(photos: [Photo],
+                          keeperID: String,
+                          rejected: Set<String>) -> GroupMarkState {
+    let ownProtectedMarks = Set(photos.filter { $0.isProtected && rejected.contains($0.uuid) }
+                                      .map(\.uuid))
+    let marks = bulkRejectCandidates(photos: photos, keeperID: keeperID)
+        .union(ownProtectedMarks)
+        .subtracting([keeperID])
+    return GroupMarkState(keeperID: keeperID, rejected: marks)
+}
+
 // MARK: - Commit-time sweep
 
 /// One group as it enters the final commit.

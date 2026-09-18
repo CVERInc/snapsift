@@ -1244,8 +1244,14 @@ final class LibraryModel: ObservableObject {
     /// ⏎ action in grid and loupe.
     func promote(group groupID: ReviewGroup.ID, to photoID: String) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
-        groups[i].keeperID = photoID
-        groups[i].rejected.remove(photoID)   // un-reject the new keeper
+        // Core `promoteState` is the rule: keeper := photoID, and the ONLY
+        // change to `rejected` is removing that frame. Shared with ⇧K's undo
+        // path so the test suite and the app run the same transition.
+        let next = promoteState(GroupMarkState(keeperID: groups[i].keeperID,
+                                               rejected: groups[i].rejected),
+                                to: photoID)
+        groups[i].keeperID = next.keeperID
+        groups[i].rejected = next.rejected
         groups[i].autoSeeded.remove(photoID)
         // Same rule `toggleReject` applies when it un-marks a frame
         // (see its "a lingering flag would silently re-arm the next ⇧X"
@@ -1256,6 +1262,47 @@ final class LibraryModel: ObservableObject {
         // no longer had anything to describe. Never widens a deletion —
         // it can only turn the override OFF, and only when nothing is
         // relying on it.
+        if groups[i].protectedDeletionCount == 0 {
+            groups[i].includeProtected = false
+        }
+        scheduleSnapshotSave()
+    }
+
+    /// "Keep only this one" — ⇧K in grid and loupe.
+    ///
+    /// One keystroke for the thing the owner was doing with four: in a group of
+    /// five, nominate the focused frame AND mark the rest. K : ⇧K :: X : ⇧X.
+    /// It never passes through D's "everything is marked" state, because the
+    /// keeper is nominated and excluded in the SAME transition.
+    ///
+    /// MARKING ONLY. Nothing is deleted here; the pre-commit sheet is still the
+    /// only door to `performChanges`, and K (re-nominate) or A (keep all) undo
+    /// it the ordinary way.
+    ///
+    /// The marked set comes from Core `keepOnlyState` → `bulkRejectCandidates`,
+    /// the same composition rule `d` and the exact-duplicate auto-seed use, so
+    /// this verb never ADDS a mark to a PROTECTED or UNVERIFIABLE frame — and
+    /// (ruling 2026-09-18) never REMOVES a protected mark the owner made himself
+    /// with ⇧X either: `keepOnlyState` carries those over. Only the frame being
+    /// nominated is un-marked, by `promote`'s ordinary rule.
+    ///
+    /// `includeProtected` therefore keeps following its ONE existing rule — the
+    /// override must not outlive its last protected rejection — applied below.
+    /// It can only turn the override OFF, and a group that still has a
+    /// force-marked protected frame (including one ⇧K just carried over) keeps
+    /// it, correctly: that frame still needs the confirmation it was given.
+    ///
+    /// The marks are the USER's, not the app's suggestion: `autoSeeded` is
+    /// cleared so the audit log attributes them as "marked by you"
+    /// (`DeleteMarkReason.userRejected`) and never as `.exactDuplicate`.
+    func keepOnly(group groupID: ReviewGroup.ID, frame frameID: String) {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        guard groups[i].photos.contains(where: { $0.uuid == frameID }) else { return }
+        let next = keepOnlyState(photos: groups[i].photos, keeperID: frameID,
+                                 rejected: groups[i].rejected)
+        groups[i].keeperID = next.keeperID
+        groups[i].rejected = next.rejected
+        groups[i].autoSeeded = []   // user decision — never an app suggestion
         if groups[i].protectedDeletionCount == 0 {
             groups[i].includeProtected = false
         }
