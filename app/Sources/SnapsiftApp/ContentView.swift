@@ -770,7 +770,7 @@ struct ContentView: View {
             if withheld > 0 { showBanner(t.bulkRejectWithheld(withheld)) }
             return .handled
         case "k", "K":
-            handleKeepKey(g); return .handled
+            handleKeepKey(g, modifiers: kp.modifiers); return .handled
         case "x", "X":
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
         // FIX 3: display-only rotate. R = clockwise, ⇧R = counter-clockwise.
@@ -814,7 +814,7 @@ struct ContentView: View {
         case " ":
             loupeOpen = false; previewID = nil; return .handled
         case "k", "K":
-            handleKeepKey(g); return .handled
+            handleKeepKey(g, modifiers: kp.modifiers); return .handled
         case "x", "X":
             handleRejectKey(g, modifiers: kp.modifiers); return .handled
         // FIX 3: display-only rotate works in the loupe too.
@@ -878,9 +878,26 @@ struct ContentView: View {
     /// never blocked), and show a hint that reads "⇧X to force-reject" in
     /// answer to a request to KEEP. `LibraryModel.promote` has no protection
     /// guard for the same reason.
-    private func handleKeepKey(_ g: ReviewGroup) {
+    ///
+    /// ⇧K is the stronger form of the same verb — "keep ONLY this one": nominate
+    /// the focused frame AND mark every other frame in the group that may be
+    /// marked (K : ⇧K :: X : ⇧X). It replaces "press X four times" in a group of
+    /// five, and unlike D-then-K it never passes through a state where every
+    /// frame is marked. Still marking only — the pre-commit sheet is unchanged —
+    /// and K or A afterwards undo it the ordinary way.
+    ///
+    /// ⇧K does NOT need the ⇧X confirmation, because unlike ⇧X it never marks a
+    /// protected or unverifiable frame: `LibraryModel.keepOnly` composes its set
+    /// with Core `bulkRejectCandidates`, so there is nothing to consent to. And
+    /// like plain K it is not blocked on the focused frame's own protection —
+    /// keeping a favorite is the outcome protection exists to produce.
+    private func handleKeepKey(_ g: ReviewGroup, modifiers: EventModifiers) {
         guard let f = focusedFrame else { return }
-        model.promote(group: g.id, to: f)
+        if modifiers.contains(.shift) {
+            model.keepOnly(group: g.id, frame: f)
+        } else {
+            model.promote(group: g.id, to: f)
+        }
     }
 
     /// Shared reject-key logic for grid and loupe.

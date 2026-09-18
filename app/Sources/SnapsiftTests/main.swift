@@ -1505,6 +1505,111 @@ do {
 // watching it fail, then restoring it (receipts in REPORT-fix-r1).
 // ─────────────────────────────────────────────────────────────────────────────
 
+print("⇧K — keep ONLY this one (2026-09-18)")
+do {
+    // One five-frame group, the shape the owner actually meets: three ordinary
+    // frames, one favorite (PROTECTED) and one whose edit state could not be
+    // read (UNVERIFIABLE). ⇧K nominates the focused frame and marks the rest —
+    // where "the rest" is Core `bulkRejectCandidates`, the SAME rule `d` and the
+    // exact-duplicate auto-seed use. No second definition of "deletable".
+    let plainA = ph(1, 0, quality: 0.9)
+    let plainB = ph(2, 1)
+    let fav    = ph(3, 2, fav: true)
+    let unver  = ph(4, 3, editedUnknown: true)
+    let plainC = ph(5, 4)
+    let photos = [plainA, plainB, fav, unver, plainC]
+
+    // (focused frame, marks ALREADY standing → the marks ⇧K must leave).
+    // ⇧K never ADDS a mark to U3 (protected) or U4 (unverifiable), and never
+    // REMOVES one the owner made himself with ⇧X.
+    let table: [(String, Set<String>, Set<String>)] = [
+        ("U1", [], ["U2", "U5"]),
+        ("U2", [], ["U1", "U5"]),
+        ("U5", [], ["U1", "U2"]),
+        // ⇧K on the favorite itself is allowed — keeping a protected photo is
+        // the outcome protection exists to produce (same stance as plain K).
+        ("U3", [], ["U1", "U2", "U5"]),
+        // …and on the unverifiable frame: it may be KEPT, just never marked.
+        ("U4", [], ["U1", "U2", "U5"]),
+        // RULING 2026-09-18 — the owner force-marked the favorite with ⇧X
+        // earlier, having read the confirmation. ⇧K on another frame must not
+        // quietly undo that decision: the mark is CARRIED OVER.
+        ("U1", ["U3"], ["U2", "U3", "U5"]),
+        ("U5", ["U3"], ["U1", "U2", "U3"]),
+        // …and when the force-marked favorite is the frame being KEPT, the
+        // ordinary nomination rule wins: the keeper is never marked.
+        ("U3", ["U3"], ["U1", "U2", "U5"]),
+        // Pre-seeded ordinary marks are neither here nor there — the set is
+        // recomposed, so a stale mark on the new keeper goes away.
+        ("U2", ["U1", "U2"], ["U1", "U5"]),
+        // A mark on an UNVERIFIABLE frame is not a decision the owner could
+        // have made (toggleReject/forceReject both refuse to insert one) and it
+        // could never fire. Where it somehow exists, ⇧K drops it rather than
+        // preserving a mark no commit will honour.
+        ("U1", ["U4"], ["U2", "U5"]),
+    ]
+    for (focus, prior, expected) in table {
+        let s = keepOnlyState(photos: photos, keeperID: focus, rejected: prior)
+        let tag = "⇧K on \(focus) (standing: \(prior.sorted()))"
+        check(s.keeperID == focus, "\(tag): that frame is the keeper")
+        check(s.rejected == expected, "\(tag): marks exactly \(expected.sorted())")
+        check(!s.rejected.contains(focus), "\(tag): the keeper is never marked")
+        check(!s.rejected.contains("U4"), "\(tag): the UNVERIFIABLE frame is never marked")
+        // The protected frame is marked HERE only if the owner had marked it
+        // himself and it is not the keeper — never because ⇧K decided so.
+        check(s.rejected.contains("U3") == (prior.contains("U3") && focus != "U3"),
+              "\(tag): the FAVORITE's mark is the owner's, unchanged")
+    }
+
+    // Pressing it twice changes nothing — it is a state, not a toggle-in-place.
+    // Fed its OWN output back in, including the carried-over protected mark.
+    let once = keepOnlyState(photos: photos, keeperID: "U1", rejected: ["U3"])
+    let twice = keepOnlyState(photos: photos, keeperID: "U1", rejected: once.rejected)
+    check(once == twice, "⇧K twice on the same frame is idempotent (carry-over included)")
+
+    // K AFTERWARDS un-marks the newly kept frame and NOTHING else — the
+    // ordinary undo path, running the same `promoteState` LibraryModel.promote
+    // calls.
+    let plain = keepOnlyState(photos: photos, keeperID: "U1", rejected: [])
+    let after = promoteState(plain, to: "U2")
+    check(after.keeperID == "U2", "K after ⇧K: the newly kept frame is keeper")
+    check(after.rejected == ["U5"], "K after ⇧K: only the newly kept frame is un-marked")
+    check(plain.rejected.subtracting(after.rejected) == ["U2"],
+          "K after ⇧K: nothing else changed state")
+    check(after.rejected.isSubset(of: plain.rejected), "K after ⇧K never ADDS a mark")
+    // …and K is also the undo for a carried-over force-mark: pressing K on the
+    // favorite un-marks it, exactly as it always did.
+    check(!promoteState(once, to: "U3").rejected.contains("U3"),
+          "K on the force-marked favorite still un-marks it")
+
+    // An exact-duplicate group arrives with marks already seeded. ⇧K on a frame
+    // that was itself pre-marked lands on the same keeper-plus-rest state — the
+    // pre-seed is not a special case to unwind.
+    let seeded = keepOnlyState(photos: photos, keeperID: "U5", rejected: ["U1", "U2", "U5"])
+    check(seeded == keepOnlyState(photos: photos, keeperID: "U5", rejected: []),
+          "⇧K on a pre-seeded exact-duplicate group is the same keeper-plus-rest state")
+    check(!seeded.rejected.contains("U5"), "⇧K clears the focused frame's own pre-seeded mark")
+
+    // A ⇧K mark can never become a deletion for a frame that may not be deleted.
+    // The composition rule and the commit-time predicate are checked TOGETHER,
+    // so a hole in one cannot hide behind the other. The favorite IS in
+    // `once.rejected` (carried over) — and still survives unless the group
+    // carries the ⇧X override it was given, which is `includeProtected`'s job,
+    // not ⇧K's.
+    check(!isEffectiveDeletion(unver, rejected: once.rejected, includeProtected: true),
+          "⇧K + includeProtected still never deletes the unverifiable frame U4")
+    check(!isEffectiveDeletion(fav, rejected: once.rejected, includeProtected: false),
+          "a carried-over favorite mark alone still deletes nothing (no override)")
+
+    // NEGATIVE CONTROL: relax `bulkRejectCandidates` from `$0.isDeletable` to
+    // `!$0.isProtected` (the pre-Core rule) and "the UNVERIFIABLE frame is never
+    // marked" goes red on every row where U4 is not itself the keeper — verified
+    // by making that change, watching the failures, and restoring it.
+    // SECOND CONTROL: drop `.union(ownProtectedMarks)` from `keepOnlyState` and
+    // the three carry-over rows go red — the owner's own ⇧X decision vanishing
+    // is exactly what the ruling forbids.
+}
+
 print("Commit decision — keeper liveness (P1-1)")
 do {
     let keep = ph(1, 0, quality: 0.9)
