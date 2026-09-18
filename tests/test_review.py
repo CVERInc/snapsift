@@ -1,6 +1,6 @@
 """review.py group-annotation logic (no server / no library needed)."""
 import json
-from review import build_groups
+from review import PAGE, build_groups
 
 
 def _groups_file(tmp_path, groups):
@@ -43,4 +43,30 @@ def test_shape_is_minimal_and_serialisable(tmp_path):
     out = build_groups(_groups_file(tmp_path, g))
     json.dumps(out)                    # must be JSON-serialisable for the API
     assert set(out[0]["photos"][0]) == {
-        "uuid", "filename", "uti", "favorite", "quality", "taken_iso", "is_keeper"}
+        "uuid", "filename", "uti", "favorite", "protected", "quality",
+        "taken_iso", "is_keeper"}
+
+
+def test_protected_flag_covers_edited_and_document(tmp_path):
+    # The review UI's delete guard keys off `protected` (favorite/edited/
+    # document), so build_groups must surface it for each photo. A protected
+    # frame must never be a candidate for the export list.
+    g = [{"size": 4, "span_sec": 1, "photos": [
+        _photo("a", quality=0.9),                 # plain keeper
+        _photo("b", favorite=True),               # protected: favorite
+        _photo("c", edited=True),                 # protected: edited
+        _photo("d", is_document=True),            # protected: document
+    ]}]
+    out = build_groups(_groups_file(tmp_path, g))
+    by = {p["uuid"]: p for p in out[0]["photos"]}
+    assert by["a"]["protected"] is False
+    assert by["b"]["protected"] and by["c"]["protected"] and by["d"]["protected"]
+
+
+def test_filename_is_not_injected_via_innerhtml():
+    # p.filename comes straight from Photos' ZORIGINALFILENAME and is
+    # attacker-influenceable (AirDrop/Messages/downloaded images can carry
+    # any filename, e.g. `<img src=x onerror=...>`). It must never reach
+    # innerHTML unescaped — the safe pattern assigns it via textContent.
+    assert "${p.filename" not in PAGE            # old vulnerable interpolation gone
+    assert "meta.textContent" in PAGE            # safe DOM-text assignment used instead

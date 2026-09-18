@@ -3,11 +3,12 @@ from scan import Photo, cluster, quality_score
 
 
 def p(pk, taken_at, *, w=4032, h=3024, size=2_000_000, uti="public.heic",
-      kind=0, fav=False, quality=0.0):
+      kind=0, fav=False, edited=False, quality=0.0):
     """Build a Photo with sensible burst-frame defaults."""
     return Photo(pk=pk, uuid=f"U{pk}", filename=f"IMG_{pk}.heic",
                  taken_at=float(taken_at), width=w, height=h, size=size,
-                 uti=uti, kind=kind, favorite=fav, quality=quality)
+                 uti=uti, kind=kind, favorite=fav, edited=edited,
+                 quality=quality)
 
 
 def sizes(groups):
@@ -52,6 +53,21 @@ def test_max_span_caps_chained_drift():
     # each cluster bounded to a 2s span → 0,1,2 then 3,4,5
     assert all((g[-1].taken_at - g[0].taken_at) <= 2 for g in capped)
     assert sum(sizes(capped)) <= 6 and len(capped) >= 2
+
+
+def test_null_dimensions_never_cluster_together():
+    # NULL width/height (unprocessed/corrupt import row) must not compare
+    # equal to another NULL row — None == None is True in Python and would
+    # otherwise silently merge two unrelated dimension-less photos.
+    photos = [p(1, 0, w=None, h=None), p(2, 1, w=None, h=None)]
+    assert list(cluster(photos, gap_sec=3, size_tol=0.10)) == []
+
+
+def test_null_dimensions_dont_join_a_real_burst():
+    # A dimension-less frame sandwiched between two real-dimension frames
+    # must not bridge them into one cluster, and must not join either side.
+    photos = [p(1, 0), p(2, 1, w=None, h=None), p(3, 2)]
+    assert list(cluster(photos, gap_sec=3, size_tol=0.10)) == []
 
 
 def test_quality_score_positive_minus_negative():

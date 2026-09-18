@@ -5,8 +5,9 @@ snapsift / review.py  (visual review UI)
 
 Eyeball every cluster before you delete anything. Opens a local web page that
 shows each near-duplicate group side by side, with snapsift's proposed keeper
-highlighted. Click a different frame to promote it; favorites are locked and
-can never be deleted. When you're happy, "Export" writes a delete-uuids.txt
+highlighted. Click a different frame to promote it; protected frames (favorites,
+edited frames, and documents/scans) are locked and can never be deleted. When
+you're happy, "Export" writes a delete-uuids.txt
 that you feed straight to delete.applescript.
 
 It reads the SAME groups.json that scan.py and hash.py emit, so it works for
@@ -24,12 +25,18 @@ Usage:
 """
 
 from __future__ import annotations
-import argparse, io, json, webbrowser
+import argparse, io, json, re, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-from pick import keeper                 # default keeper choice
+# Photos asset UUIDs are uppercase hex-and-dash, 36 chars. Everything that
+# arrives over HTTP is validated against this before touching the filesystem
+# or the export file — a stray "../" would otherwise reach Path.glob (which
+# raises on "..") and the uuid list is later fed to delete tooling.
+UUID_RE = re.compile(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\Z")
+
+from pick import keeper, is_protected   # default keeper choice + protection guard
 from hash import resolve_thumb          # locate a thumbnail for a uuid
 
 
@@ -105,18 +112,23 @@ function render() {
     sec.appendChild(h);
     const row = document.createElement('div'); row.className = 'row';
     g.photos.forEach((p, pi) => {
-      const del = !p.is_keeper && !p.favorite;
+      const del = !p.is_keeper && !p.protected;
       if (del) ndel++;
       const card = document.createElement('div');
       card.className = 'card' + (p.is_keeper ? ' keep' : del ? ' delete' : '')
-                              + (p.favorite ? ' fav' : '');
+                              + (p.protected ? ' fav' : '');
       card.innerHTML =
         (p.is_keeper ? '<span class="badge k">KEEP</span>' : '') +
         (del ? '<span class="badge d">DELETE</span>' : '') +
         (p.favorite ? '<span class="badge f">★</span>' : '') +
-        `<img loading="lazy" src="/thumb?uuid=${p.uuid}">` +
-        `<div class="meta">${p.filename || p.uuid.slice(0,8)}` +
-        `${p.quality ? ' · q'+p.quality.toFixed(1) : ''}</div>`;
+        `<img loading="lazy" src="/thumb?uuid=${p.uuid}">`;
+      // filename comes straight from Photos' ZORIGINALFILENAME and is
+      // attacker-influenceable (AirDrop/Messages/downloads) — use textContent
+      // so it can never be parsed as markup, unlike the innerHTML above.
+      const meta = document.createElement('div'); meta.className = 'meta';
+      meta.textContent = (p.filename || p.uuid.slice(0,8)) +
+        (p.quality ? ' · q'+p.quality.toFixed(1) : '');
+      card.appendChild(meta);
       card.onclick = () => { promote(gi, pi); };
       row.appendChild(card);
     });
@@ -127,14 +139,14 @@ function render() {
 }
 function promote(gi, pi) {
   const g = GROUPS[gi];
-  if (g.photos[pi].favorite) return;        // favorites already always kept
+  if (g.photos[pi].protected) return;       // protected frames are always kept
   g.photos.forEach((p, i) => p.is_keeper = (i === pi));
   render();
 }
 async function exportList() {
   const deletes = [];
   GROUPS.forEach(g => g.photos.forEach(p => {
-    if (!p.is_keeper && !p.favorite) deletes.push(p.uuid);
+    if (!p.is_keeper && !p.protected) deletes.push(p.uuid);
   }));
   const r = await (await fetch('/api/export', {method:'POST',
     headers:{'content-type':'application/json'}, body:JSON.stringify({deletes})})).json();
@@ -178,6 +190,8 @@ class Handler(BaseHTTPRequestHandler):
                               "application/json; charset=utf-8")
         if u.path == "/thumb":
             uuid = (parse_qs(u.query).get("uuid") or [""])[0]
+            if not UUID_RE.fullmatch(uuid):
+                return self._send(404, b"", "image/jpeg")
             return self._send_thumb(uuid)
         return self._send(404, "not found")
 
@@ -203,7 +217,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, "not found")
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length) or b"{}")
-        uuids = [x for x in payload.get("deletes", []) if x]
+        # Fail-closed protection guard: a protected frame (favorite / edited /
+        # document) must NEVER reach the delete list, even from a stale or
+        # tampered client POST. We re-derive the protected set server-side from
+        # the groups we loaded and strip any such uuid before writing.
+        protected = {p["uuid"] for g in self.groups for p in g["photos"]
+                     if p["protected"]}
+        uuids = [x for x in payload.get("deletes", [])
+                 if isinstance(x, str) and UUID_RE.fullmatch(x)
+                 and x not in protected]
         self.uuid_out.write_text("\n".join(uuids) + ("\n" if uuids else ""))
         self._send(200, json.dumps({"written": len(uuids),
                                     "path": str(self.uuid_out)}),
@@ -225,6 +247,10 @@ def build_groups(groups_file: Path):
                 "filename":  p.get("filename", ""),
                 "uti":       p.get("uti", ""),
                 "favorite":  bool(p.get("favorite")),
+                # Protected = favorite OR edited OR document — never deletable,
+                # the same single guard the Core and the app use. (edited /
+                # is_document are absent on older groups.json → falsy → no-op.)
+                "protected": is_protected(p),
                 "quality":   p.get("quality") or 0.0,
                 "taken_iso": p.get("taken_iso", ""),
                 "is_keeper": p["uuid"] == keep["uuid"],
@@ -253,7 +279,7 @@ def main():
     Handler.thumb_px = args.thumb_px
 
     ndel = sum(1 for g in Handler.groups for p in g["photos"]
-               if not p["is_keeper"] and not p["favorite"])
+               if not p["is_keeper"] and not p["protected"])
     url = f"http://127.0.0.1:{args.port}"
     print(f"📷 snapsift review — {len(Handler.groups):,} groups, "
           f"{ndel:,} proposed deletions")

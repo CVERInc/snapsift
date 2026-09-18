@@ -1,9 +1,28 @@
 import Foundation
 
 /// UTI keep-priority — higher wins. Mirrors Python `pick.UTI_PRIORITY`.
+///
+/// RAW formats rank at 90 — above JPEG (80) but below HEIC (100).
+/// Rationale: a RAW file is the highest-fidelity capture available; it is never
+/// a re-compressed derivative. HEIC beats RAW only because HEIC is the iPhone
+/// native format and represents the processed result with Apple's ISP tuning
+/// (which is typically preferred for viewing). If the user shot RAW+JPEG the
+/// RAW is the keeper. DNG uses `com.adobe.raw-image` (the canonical UTI Apple
+/// registers for DNG in the system UTI database).
 public let utiPriority: [String: Int] = [
     "public.heic": 100,
     "public.heif": 100,
+    // RAW formats — above JPEG, below HEIC
+    "com.adobe.raw-image": 90,          // DNG (Adobe / Apple canonical)
+    "public.camera-raw-image": 90,      // generic RAW abstract base type
+    "com.canon.cr2-raw-image": 90,      // Canon CR2
+    "com.canon.cr3-raw-image": 90,      // Canon CR3
+    "com.nikon.raw-image": 90,          // Nikon NEF
+    "com.nikon.nrw-raw-image": 90,      // Nikon NRW (compact Nikon RAW)
+    "com.sony.arw-raw-image": 90,       // Sony ARW
+    "com.fuji.raf-raw-image": 90,       // Fujifilm RAF
+    "com.panasonic.rw2-raw-image": 90,  // Panasonic RW2
+    "com.dng": 90,                       // alternative DNG UTI seen on some imports
     "public.jpeg": 80,
     "public.png": 60,
     "public.tiff": 50,
@@ -19,28 +38,222 @@ public let utiPriority: [String: Int] = [
 /// means noise-level quality differences fall through to format/size.
 public func qualityBucket(_ quality: Double) -> Int { Int((quality * 10 + 0.5).rounded(.down)) }
 
-/// Sort key for "most worth keeping" — higher is better. Favorites first, then
-/// Apple's quality score quantised to 1 decimal (so noise-level differences
-/// don't override the format/size signal), then UTI priority, file size, and
-/// finally the earliest take. Mirrors Python `pick.rank`.
-public func rankKey(_ p: Photo) -> (Int, Int, Int, Int, Double) {
-    (p.favorite ? 1 : 0,
-     qualityBucket(p.quality),
-     utiPriority[p.uti] ?? 0,
-     p.size,
-     -p.takenAt)
+/// Sort key for "most worth keeping" — higher is better. Mirrors Python
+/// `pick.rank` exactly (the CLI and the app MUST pick the same keeper).
+///
+/// Priority, highest first:
+///   1. favorite           — the user starred it; always wins.
+///   2. quality (bucketed) — Apple's own aesthetic score, quantised to tenths so
+///                           noise-level differences fall through to the signals
+///                           below rather than splitting hairs.
+///   3. originalCamera     — a genuine camera capture (intact EXIF Make/Model)
+///                           beats an EXIF-stripped social-app re-save. Sits
+///                           ABOVE sharpness/format/size on purpose: "newer or
+///                           larger" must NOT beat "the real original", and a
+///                           re-compressed re-save is rarely the better keeper.
+///   4. sharpness (bucketed) — within an otherwise-tied group, prefer the
+///                           crisper frame. Quantised to tenths like quality so
+///                           sensor noise can't dominate, and slotted BELOW
+///                           quality so it can never override the real quality
+///                           signal. This is the ONLY thing sharpness does: it
+///                           reorders the keeper within a real multi-frame group.
+///                           It is NEVER a standalone delete trigger (see
+///                           `deletions`, which keys off `isProtected`, not blur).
+///   5. UTI priority       — original-format files (HEIC > JPG > …).
+///   6. file size          — bigger same-format file = less compression.
+///   7. earliest take      — the original capture if all else is equal.
+///
+/// A named `Comparable` struct (not a tuple — Swift tuples only compare up to six
+/// elements) so the seven-way priority above is lexicographic and explicit.
+public struct RankKey: Comparable {
+    public let favorite: Int
+    public let quality: Int
+    public let originalCamera: Int
+    public let sharpness: Int
+    public let uti: Int
+    public let size: Int
+    public let negTakenAt: Double
+    /// Final deterministic tie-break: when every real signal (including
+    /// takenAt) ties, keeper identity must not depend on input order — the
+    /// same library must always pick the same keeper across scans.
+    public let uuid: String
+
+    public static func < (a: RankKey, b: RankKey) -> Bool {
+        if a.favorite != b.favorite { return a.favorite < b.favorite }
+        if a.quality != b.quality { return a.quality < b.quality }
+        if a.originalCamera != b.originalCamera { return a.originalCamera < b.originalCamera }
+        if a.sharpness != b.sharpness { return a.sharpness < b.sharpness }
+        if a.uti != b.uti { return a.uti < b.uti }
+        if a.size != b.size { return a.size < b.size }
+        if a.negTakenAt != b.negTakenAt { return a.negTakenAt < b.negTakenAt }
+        return a.uuid < b.uuid
+    }
 }
 
-/// The single frame to keep from a cluster.
+public func rankKey(_ p: Photo) -> RankKey {
+    RankKey(favorite: p.favorite ? 1 : 0,
+            quality: qualityBucket(p.quality),
+            originalCamera: p.originalCamera ? 1 : 0,
+            sharpness: qualityBucket(p.sharpness),
+            uti: utiPriority[p.uti] ?? 0,
+            size: p.size,
+            negTakenAt: -p.takenAt,
+            uuid: p.uuid)
+}
+
+/// The single frame to keep from a cluster. Precondition: the cluster is
+/// non-empty (clustering never emits empty groups); an empty input traps here
+/// rather than returning a fabricated keeper.
 public func keeper(_ group: [Photo]) -> Photo {
     group.max { rankKey($0) < rankKey($1) }!
 }
 
-/// UUIDs to delete from a cluster: everything that is neither the keeper nor a
-/// favorite. Favorites are sacred — an all-favorite cluster deletes nothing.
+/// Photos to delete from a cluster: everything that is neither the keeper nor a
+/// PROTECTED frame. A frame is protected if it is a favorite, an edited frame,
+/// or a document/scan (`Photo.isProtected`) — such frames are sacred and NEVER
+/// deleted, so a cluster of all-protected frames deletes nothing. This single
+/// predicate is the whole app's protection guard; the App layer's `ReviewGroup`
+/// routes through `isProtected` too so a protected frame can never end up
+/// pre-marked anywhere. Ranking signals (sharpness, originalCamera) only choose
+/// WHICH frame is the keeper — they can never put a frame into this set.
+///
+/// Degenerate inputs degrade to "delete nothing" — the only safe answer for the
+/// function whose output feeds the delete pipeline: an empty group has nothing
+/// to delete (and must not crash picking a keeper from nobody), and a
+/// single-frame group keeps its one frame.
 public func deletions(_ group: [Photo]) -> [Photo] {
-    let keep = keeper(group)
-    return group.filter { $0.uuid != keep.uuid && !$0.favorite }
+    guard let keep = group.max(by: { rankKey($0) < rankKey($1) }) else { return [] }
+    // `isDeletable` == !protected && !unverifiable. The second half matters as
+    // much as the first: a frame whose edit state could not be read, or whose
+    // document eval ran on an unavailable original, is UNKNOWN — and unknown is
+    // protected. Writing `!$0.isProtected` here again would silently re-open
+    // that door for every caller of this function.
+    return group.filter { $0.uuid != keep.uuid && $0.isDeletable }
+}
+
+// MARK: - Keeper "Why" transparency
+
+/// The dominant reason a frame was chosen as the keeper.
+/// Ordered from highest to lowest priority, matching `RankKey`.
+public enum KeeperReason: String, Sendable, Equatable {
+    case favorite        // user starred it — always wins
+    case quality         // highest Apple quality bucket
+    case originalCamera  // intact EXIF Make/Model — not a re-save
+    case sharpness       // sharpest within an otherwise-tied group
+    case format          // best format (HEIC > JPEG > …)
+    case size            // largest file (less compression)
+    case earliest        // earliest capture — the original take
+}
+
+/// Derive the dominant reason a keeper was chosen from the signals in `RankKey`.
+/// Returns the highest-priority signal where the keeper strictly beats at least one
+/// other frame in the group — so the label always reflects a real decision.
+///
+/// If the group has only one member (degenerate), defaults to `.earliest`.
+public func keeperReason(photos: [Photo], keeperID: String) -> KeeperReason {
+    guard let keeper = photos.first(where: { $0.uuid == keeperID }) else { return .earliest }
+    let others = photos.filter { $0.uuid != keeperID }
+    guard !others.isEmpty else { return .earliest }
+
+    // Check priority from highest to lowest — first signal where keeper wins vs any other.
+    // Favorite only counts as the reason when it actually broke a tie: in an
+    // all-favorite group the star decided nothing, so fall through.
+    if keeper.favorite && others.contains(where: { !$0.favorite }) { return .favorite }
+
+    let kQ = qualityBucket(keeper.quality)
+    if others.contains(where: { qualityBucket($0.quality) < kQ }) { return .quality }
+
+    if keeper.originalCamera && others.contains(where: { !$0.originalCamera }) { return .originalCamera }
+
+    let kS = qualityBucket(keeper.sharpness)
+    if others.contains(where: { qualityBucket($0.sharpness) < kS }) { return .sharpness }
+
+    let kU = utiPriority[keeper.uti] ?? 0
+    if others.contains(where: { (utiPriority[$0.uti] ?? 0) < kU }) { return .format }
+
+    if others.contains(where: { $0.size < keeper.size }) { return .size }
+
+    return .earliest
+}
+
+// MARK: - Delete "Why" transparency
+
+/// Why a frame is marked for removal — the DELETE-side counterpart to
+/// ``KeeperReason``. The frame that gets kept had seven reasons on offer and
+/// the frame that gets spent had none; this closes that asymmetry.
+public enum DeleteMarkReason: String, Sendable, Equatable {
+    case exactDuplicate   // the app seeded it: a byte-verified second copy
+    /// Swept by a whole-group action rather than singled out. NOT PRODUCED YET:
+    /// W1 has no recorded state that says so (review P2-1) — `deleteMarkReason`
+    /// explains what W2 has to write before this can be returned truthfully.
+    /// Kept defined so the label, its three translations and the audit log's
+    /// reserved `.burstNonKeeper` all stay in place for that wave.
+    case notPicked
+    case userRejected     // the person crossed this one out by hand
+}
+
+/// LABEL ONLY. This function never decides whether a frame is deleted — it is
+/// handed a frame that some OTHER rule (`isEffectiveDeletion`) already marked,
+/// and reports which existing piece of state put the mark there:
+///
+///   * `autoSeeded` — the exact-duplicate pass seeded it (`ReviewGroup.autoSeeded`,
+///     the same set the audit log uses to attribute `.exactDuplicate`);
+///   * otherwise — the person marked it, with X on one frame or D on the group.
+///
+/// No new inputs, no new thresholds: if this function disappeared, not one
+/// photo's fate would change.
+///
+/// ## Why `wholeGroupMarked` is accepted and NOT consulted (review P2-1)
+///
+/// It was consulted, to tell "swept by a group action" (`.notPicked`) apart from
+/// "crossed out one by one" (`.userRejected`). Its only available source is
+/// `ReviewGroup.deleteAll`, which is not a record of what the person did — it is
+/// a live predicate, `bulkRejectCandidates ⊆ rejected`, recomputed on every
+/// change. So the label flipped on actions that had nothing to do with it:
+/// crossing out the LAST frame by hand turned the whole group's chips to
+/// "not picked"; un-crossing one frame after D turned the rest to "you marked
+/// it"; nominating a new keeper after D did the same. And the audit log, a
+/// fourth surface, can only ever write `.exactDuplicate` or `.userRejected`
+/// (`DeletionAuditLog.reason`), so the history panel contradicted the chip.
+///
+/// The parameter stays so the call site keeps naming the state it has, and
+/// `.notPicked` stays defined, because W2 gives this a REAL input: a recorded
+/// `bulkMarked` set written by `rejectAll` and cleared per-frame by
+/// `toggleReject`. Until that exists, a frame marked by a person is labelled as
+/// marked by a person, which is true of both keys.
+public func deleteMarkReason(frameID: String,
+                             autoSeeded: Set<String>,
+                             wholeGroupMarked: Bool) -> DeleteMarkReason {
+    _ = wholeGroupMarked   // deliberately unread until W2 records it — see above
+    if autoSeeded.contains(frameID) { return .exactDuplicate }
+    return .userRejected
+}
+
+// MARK: - No-survivor guard
+
+/// Count the number of review groups that would be completely emptied —
+/// every frame marked for deletion, leaving zero survivors — after applying
+/// the given per-group rejected sets.
+///
+/// A group has no survivor when ALL its photos are in `rejected` AND
+/// `includeProtected` is true for that group (otherwise protected frames survive).
+///
+/// This is a pure, testable helper that takes the minimum inputs required
+/// by the UI guard so it doesn't need to import the App layer.
+///
+/// Parameters match the App layer's `ReviewGroup`:
+///   - `groups`: sequence of (photos, rejected, includeProtected) tuples
+public func noSurvivorGroupCount(
+    _ groups: [(photos: [Photo], rejected: Set<String>, includeProtected: Bool)]
+) -> Int {
+    // ONE definition of "survives", shared with the pre-commit sheet's keeper
+    // row and the App's `ReviewGroup` (see `survivors` in DeleteDecision.swift).
+    // Two copies of this rule is how the confirmation surface ended up printing
+    // "no photo left" for a group the model counted as having a survivor.
+    groups.filter { g in
+        survivors(photos: g.photos, rejected: g.rejected,
+                  includeProtected: g.includeProtected).isEmpty
+    }.count
 }
 
 /// The carry-forward state of a reviewed cluster after some of its frames were

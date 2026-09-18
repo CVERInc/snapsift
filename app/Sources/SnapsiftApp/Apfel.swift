@@ -7,14 +7,18 @@ import Foundation
 /// just substrings. If apfel is missing or Apple Intelligence is off, every
 /// caller falls back to plain substring matching; nothing breaks.
 enum Apfel {
-    /// Located apfel binary, if any.
+    /// Located apfel binary, if any. Subprocesses don't exist on iOS —
+    /// `url == nil` there routes every caller onto the substring fallback,
+    /// exactly like a Mac without apfel installed.
     static let url: URL? = {
+        #if os(macOS)
         let fm = FileManager.default
         for path in ["/opt/homebrew/bin/apfel", "/usr/local/bin/apfel",
                      (fm.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/apfel")).path]
         where fm.isExecutableFile(atPath: path) {
             return URL(fileURLWithPath: path)
         }
+        #endif
         return nil
     }()
 
@@ -45,12 +49,26 @@ enum Apfel {
     /// A short, friendly album name for a set of photos described by Vision tags
     /// (e.g. ["cat","basket","indoor"] → "Cat in a basket"). nil if apfel can't
     /// run — caller falls back to the top tag.
-    static func albumName(tags: [String]) async -> String? {
+    static func albumName(tags: [String], language: Language) async -> String? {
         guard url != nil, !tags.isEmpty else { return nil }
-        let system = """
-            You name a photo album in 2–4 words from content tags. Reply with ONLY \
-            the name — no quotes, no punctuation, Title Case. Be natural, not a tag list.
-            """
+        let system: String
+        switch language {
+        case .en:
+            system = """
+                You name a photo album in 2–4 words from content tags. Reply with ONLY \
+                the name — no quotes, no punctuation, Title Case. Be natural, not a tag list.
+                """
+        case .ja:
+            system = """
+                内容タグから写真アルバムの名前を付けます。名前だけを返してください \
+                — 引用符や句読点なし、日本語で、自然に（2〜6語程度）。タグの羅列にしないこと。
+                """
+        case .zhTW:
+            system = """
+                根據內容標籤為相簿取一個簡短名稱。只回覆名稱本身 —— 不要引號或標點， \
+                用繁體中文，自然一點，別像在列標籤。
+                """
+        }
         let prompt = "TAGS: \(tags.joined(separator: ", "))"
         guard let out = await run(["-q", "--temperature", "0.3", "-s", system, prompt]) else { return nil }
         let name = out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -60,6 +78,9 @@ enum Apfel {
     }
 
     private static func run(_ args: [String]) async -> String? {
+        #if !os(macOS)
+        return nil   // Process is unavailable on iOS; callers fall back
+        #else
         guard let url else { return nil }
         return await withCheckedContinuation { cont in
             let process = Process()
@@ -78,5 +99,6 @@ enum Apfel {
                 cont.resume(returning: String(data: data, encoding: .utf8))
             }
         }
+        #endif
     }
 }

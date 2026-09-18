@@ -1,18 +1,23 @@
 """Keeper / delete-selection logic from pick.py — favorites are sacred."""
 import pytest
-from pick import keeper, rank, quality_bucket
+from pick import keeper, rank, quality_bucket, is_protected
 
 
 def ph(uuid, *, uti="public.jpeg", size=1_000_000, taken_at=0.0,
-       fav=False, quality=0.0):
+       fav=False, quality=0.0, edited=False, is_document=False,
+       sharpness=0.0, original_camera=False):
     return {"uuid": uuid, "uti": uti, "size": size, "taken_at": taken_at,
-            "favorite": fav, "quality": quality}
+            "favorite": fav, "quality": quality, "edited": edited,
+            "is_document": is_document, "sharpness": sharpness,
+            "original_camera": original_camera}
 
 
 def deletes(group):
+    # Mirrors pick.main()'s production rule exactly: a frame is deleted only if
+    # it is neither the keeper nor protected (favorite / edited / document).
     keep = keeper(group)
     return [p for p in group
-            if p["uuid"] != keep["uuid"] and not p.get("favorite")]
+            if p["uuid"] != keep["uuid"] and not is_protected(p)]
 
 
 def test_format_priority_beats_size():
@@ -63,6 +68,93 @@ def test_all_favorite_cluster_deletes_nothing():
     assert deletes(group) == []
 
 
+# ── expanded protection class (slice 1) ──────────────────────────────────────
+# A photo must NEVER be in deletions if it is favorite OR edited OR a document.
+# False-positive over-protection is the SAFE direction; the #1 rule is to never
+# mark a frame a human likely wants to keep.
+
+def test_edited_frame_is_never_deleted():
+    keep = ph("a", uti="public.heic", size=9_000_000)
+    edited = ph("b", edited=True)           # user adjusted it → sacred
+    junk = ph("c")
+    deleted = {d["uuid"] for d in deletes([keep, edited, junk])}
+    assert "b" not in deleted               # edited survives even as non-keeper
+    assert "c" in deleted
+
+
+def test_document_frame_is_never_deleted():
+    keep = ph("a", uti="public.heic", size=9_000_000)
+    doc = ph("b", is_document=True)         # scan / receipt / ID → kept deliberately
+    junk = ph("c")
+    deleted = {d["uuid"] for d in deletes([keep, doc, junk])}
+    assert "b" not in deleted
+    assert "c" in deleted
+
+
+def test_all_protected_cluster_deletes_nothing():
+    group = [ph("a", edited=True), ph("b", is_document=True)]
+    assert deletes(group) == []
+
+
+# ── sharpness is a within-group ranking signal ONLY (slice 1) ────────────────
+# Blur orders the keeper within a real multi-frame group; it must NEVER be a
+# standalone delete trigger and must NEVER grow the deletion set.
+
+def test_sharper_frame_is_keeper_within_group():
+    blur = ph("a", sharpness=0.2)
+    sharp = ph("b", sharpness=0.9)
+    assert keeper([blur, sharp])["uuid"] == "b"
+
+
+def test_sharpness_does_not_override_quality():
+    good = ph("a", uti="public.heic", quality=0.9, sharpness=0.0)
+    sharp_but_worse = ph("b", uti="public.jpeg", quality=0.1, sharpness=1.0)
+    assert keeper([good, sharp_but_worse])["uuid"] == "a"
+
+
+def test_lone_blurry_photo_is_never_deleted():
+    # A single-member group produces zero deletions, blur or not.
+    assert deletes([ph("a", sharpness=0.0)]) == []
+
+
+def test_blur_reorders_keeper_but_never_grows_deletions():
+    # Same two frames, sharpness swapped → the deletion COUNT is identical (one
+    # non-keeper either way); blur only changes *which* frame is kept.
+    sharp_keeper = {d["uuid"] for d in deletes(
+        [ph("a", taken_at=0.0, sharpness=0.9), ph("b", taken_at=1.0, sharpness=0.1)])}
+    blur_keeper = {d["uuid"] for d in deletes(
+        [ph("a", taken_at=0.0, sharpness=0.1), ph("b", taken_at=1.0, sharpness=0.9)])}
+    assert sharp_keeper == {"b"} and blur_keeper == {"a"}
+
+
+# ── social re-save vs original camera capture (slice 1) ──────────────────────
+# Prefer the frame with original camera metadata over an EXIF-stripped social
+# re-save, even when the re-save is newer / larger. newer != better.
+
+def test_original_camera_beats_larger_social_resave():
+    original = ph("a", size=1_000_000, taken_at=0.0, original_camera=True)
+    resave = ph("b", size=5_000_000, taken_at=1.0, original_camera=False)
+    assert keeper([original, resave])["uuid"] == "a"
+
+
+def test_edited_social_resave_is_still_protected():
+    original = ph("a", original_camera=True)
+    edited_resave = ph("b", original_camera=False, edited=True)
+    deleted = {d["uuid"] for d in deletes([original, edited_resave])}
+    assert "b" not in deleted
+
+
+def test_original_camera_all_false_falls_through_to_size():
+    # PENDING (originalCamera App detection): the app's PhotoFlags.originalCamera()
+    # still returns False (no cheap on-device EXIF Make/Model yet — see its TODO),
+    # so in practice every frame is original_camera=False and the signal is a
+    # no-op that falls through to format/size — never a delete trigger, so safe.
+    # This pins that all-false fallback; flip it when the App detector lands.
+    big = ph("a", size=5_000_000, original_camera=False)
+    small = ph("b", size=1_000_000, original_camera=False)
+    assert keeper([big, small])["uuid"] == "a"
+
+
 def test_rank_is_total_order():
     # rank must return comparable tuples for max()/sorted()
     group = [ph("a", quality=0.5), ph("b", quality=0.9), ph("c", fav=True)]
@@ -96,3 +188,86 @@ def test_keeper_half_boundary_quality_is_deterministic():
     a = ph("a", uti="public.heic", size=1_000_000, taken_at=0.0, quality=0.25)
     b = ph("b", uti="public.heic", size=2_000_000, taken_at=1.0, quality=0.22)
     assert keeper([a, b])["uuid"] == "a"
+
+
+# ── fail-closed on a groups.json with no `edited` flags ──────────────────────
+# A groups.json written by an older scan.py has no `edited` key, and
+# `is_protected` reads a missing key as False — so every edited photo in it
+# would land in delete-uuids.txt. The README's own five-step flow invites
+# running the steps on different days, so a stale groups.json is a NORMAL
+# input. The guard used to be one line on stderr, printed ABOVE two ✅ lines.
+# A warning you have to notice to be protected by protects nobody.
+
+def _groups_file(tmp_path, photos, *, drop_edited=False):
+    import json
+    for p in photos:
+        if drop_edited:
+            p.pop("edited", None)
+    path = tmp_path / "groups.json"
+    path.write_text(json.dumps({"groups": [
+        {"size": len(photos), "span_sec": 1, "photos": photos}]}))
+    return path
+
+
+def _run_pick(monkeypatch, tmp_path, gpath, *extra):
+    import pick as pick_mod
+    plan = tmp_path / "plan.json"
+    uuids = tmp_path / "del.txt"
+    monkeypatch.setattr("sys.argv", ["pick.py", "--input", str(gpath),
+                                     "--output", str(plan),
+                                     "--uuid-out", str(uuids), *extra])
+    rc = pick_mod.main()
+    return rc, plan, uuids
+
+
+def test_pick_refuses_groups_without_edited_flag(monkeypatch, tmp_path, capsys):
+    gpath = _groups_file(tmp_path, [ph("a"), ph("b")], drop_edited=True)
+    rc, plan, uuids = _run_pick(monkeypatch, tmp_path, gpath)
+    assert rc != 0                       # non-zero exit, not a warning
+    assert not uuids.exists()            # NOTHING was written to delete
+    assert not plan.exists()
+    assert "Refusing" in capsys.readouterr().err
+
+
+def test_pick_refuses_when_only_some_photos_lack_the_flag(monkeypatch, tmp_path, capsys):
+    # A hand-merged / concatenated groups.json can carry the flag in its first
+    # cluster and not in its last. A first-photo sample check waves exactly this
+    # file through; the guard counts every photo.
+    good = ph("a")
+    bad = ph("b")
+    bad.pop("edited")
+    gpath = _groups_file(tmp_path, [good, bad])
+    rc, _, uuids = _run_pick(monkeypatch, tmp_path, gpath)
+    assert rc != 0
+    assert not uuids.exists()
+
+
+def test_allow_legacy_groups_opts_in_and_says_so_loudly(monkeypatch, tmp_path, capsys):
+    gpath = _groups_file(tmp_path, [ph("a", uti="public.heic", size=9_000_000),
+                                    ph("b")], drop_edited=True)
+    rc, plan, uuids = _run_pick(monkeypatch, tmp_path, gpath, "--allow-legacy-groups")
+    assert rc == 0
+    assert uuids.read_text().split() == ["b"]
+    err = capsys.readouterr().err
+    assert "FAVORITES ONLY" in err       # the degradation is named, in capitals
+    assert "favorites-only protection was in force" in err   # …and repeated at the end
+
+
+def test_current_format_groups_need_no_flag(monkeypatch, tmp_path):
+    # The guard must not fire on well-formed input — a fail-closed rule that
+    # fires on everything is just an outage.
+    gpath = _groups_file(tmp_path, [ph("a", uti="public.heic", size=9_000_000), ph("b")])
+    rc, _, uuids = _run_pick(monkeypatch, tmp_path, gpath)
+    assert rc == 0
+    assert uuids.read_text().split() == ["b"]
+
+
+def test_edited_photo_in_current_format_is_never_in_the_delete_file(monkeypatch, tmp_path):
+    # End-to-end through main(), not through the mirror `deletes()` helper: this
+    # is the assertion that fails if pick.main() stops calling is_protected.
+    gpath = _groups_file(tmp_path, [ph("a", uti="public.heic", size=9_000_000),
+                                    ph("b", edited=True),
+                                    ph("c")])
+    rc, _, uuids = _run_pick(monkeypatch, tmp_path, gpath)
+    assert rc == 0
+    assert uuids.read_text().split() == ["c"]   # "b" (edited) is NOT there

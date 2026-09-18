@@ -6,7 +6,16 @@
       "location" : "https://github.com/CVERInc/signet",
       "state" : {
         "branch" : "main",
-        "revision" : "e29d6246c95da2dc61ade22e5b82ef340443b430"
+        "revision" : "2a6e2aefc41ae4d0cbba859b81c0f304f31e161b"
+      }
+    },
+    {
+      "identity" : "sparkle",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sparkle-project/Sparkle",
+      "state" : {
+        "revision" : "eef1a539a373c1f1a320624b1130fc5de7b2e100",
+        "version" : "2.10.0"
       }
     }
   ],

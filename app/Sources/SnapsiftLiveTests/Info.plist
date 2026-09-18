@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>snapsift-livetest</string>
+    <key>CFBundleIdentifier</key>
+    <string>net.cver.snapsift.livetest</string>
+    <!-- Without this string embedded in the binary, TCC cannot attribute a
+         Photos prompt and PHPhotoLibrary.requestAuthorization silently hangs
+         (a bare SwiftPM executable has no Info.plist). Run from a real Terminal
+         so the prompt has a GUI session to appear in. -->
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>snapsift's live test harness imports a few throwaway test images and verifies the delete-safety pipeline against them. It never touches your existing photos.</string>
+</dict>
+</plist>
