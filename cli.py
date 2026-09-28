@@ -66,6 +66,24 @@ def _run_module(module_name: str, argv: list[str]) -> int:
         sys.argv = saved
 
 
+def _delete_script() -> Path:
+    """Where delete.applescript lives: next to cli.py in a source checkout, or
+    wherever pip put the `data-files` copy for an installed package (under the
+    install scheme's data dir — a venv, --user or --prefix all differ, so ask
+    the installed distribution's RECORD rather than guessing the prefix)."""
+    beside = _ROOT / "delete.applescript"
+    if beside.exists():
+        return beside
+    try:
+        from importlib.metadata import PackageNotFoundError, distribution
+        for f in distribution("snapsift").files or ():
+            if f.name == "delete.applescript":
+                return Path(f.locate()).resolve()
+    except PackageNotFoundError:
+        pass
+    return beside            # not found anywhere: report the checkout path
+
+
 def _run_delete(argv: list[str]) -> int:
     """`delete` is an AppleScript, not a Python module — shell out to osascript.
     Forwards the uuid-file path (and any extra args) straight through."""
@@ -74,7 +92,7 @@ def _run_delete(argv: list[str]) -> int:
               "Moves every listed UUID to Photos' Recently Deleted (recoverable\n"
               "30 days), in batches. Photos.app must be running.")
         return 0
-    script = _ROOT / "delete.applescript"
+    script = _delete_script()
     if not script.exists():
         print(f"❌ missing {script}", file=sys.stderr)
         return 1
