@@ -29,6 +29,10 @@ build-backend = "setuptools.build_meta"
 # package, so tell the build backend to ship exactly them as py-modules.
 [tool.setuptools]
 py-modules = ["cli", "scan", "pick", "hash", "review"]
+# delete.applescript is not a Python module, so py-modules alone never ships
+# it and an installed `snapsift delete` can't find it. Install it as data under
+# <prefix>/share/snapsift/; cli.py looks there when it isn't beside cli.py.
+data-files = { "share/snapsift" = ["delete.applescript"] }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

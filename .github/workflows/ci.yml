@@ -17,8 +17,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install test deps
-        # Runtime is stdlib-only; tests pull pytest + Pillow (for the L3 hash pass).
-        run: pip install pytest "Pillow>=9"
+        # Runtime is stdlib-only; the [dev] extra pulls pytest + Pillow (for the
+        # L3 hash pass). Installing the project itself also proves it builds;
+        # tests/test_packaging.py then drives the installed `snapsift` command
+        # from a fresh venv, since the rest of the suite imports from source.
+        run: pip install ".[dev]"
       - name: Run tests
         run: pytest -q
 
