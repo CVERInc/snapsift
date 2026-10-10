@@ -70,19 +70,27 @@ struct FolderPreCommitReviewSheet: View {
 
     private func groupRow(_ group: ReviewGroup) -> some View {
         let withdrawal = payload.summary.withdrawals.first { $0.groupID == group.id }
+        let keptPhotos = group.photos.filter { !group.isDelete($0) }
         return VStack(alignment: .leading, spacing: 8) {
             if let withdrawal {
                 Label(t.folderWithdrawal(withdrawal.reason), systemImage: "minus.circle").foregroundStyle(Color.reefAmber)
-            } else if let kept = group.photos.first(where: { group.isKeeper($0) }) {
-                HStack(spacing: 10) {
-                    model.reviewThumbnail(for: kept, box: CGSize(width: 64, height: 64))
-                        .clipShape(RoundedRectangle(cornerRadius: CVERRadius.chip))
-                        .overlay(RoundedRectangle(cornerRadius: CVERRadius.chip).strokeBorder(Color.reefGreen, lineWidth: 2))
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(t.preCommitKept()).font(.caption.bold()).foregroundStyle(Color.reefGreen)
-                        Text(kept.filename).lineLimit(1).truncationMode(.middle)
-                        if let item = model.item(for: kept.uuid) { Text(item.primary.url.path).textSelection(.enabled) }
+            } else if !keptPhotos.isEmpty {
+                ForEach(keptPhotos) { kept in
+                    HStack(spacing: 10) {
+                        model.reviewThumbnail(for: kept, box: CGSize(width: 64, height: 64))
+                            .clipShape(RoundedRectangle(cornerRadius: CVERRadius.chip))
+                            .overlay(RoundedRectangle(cornerRadius: CVERRadius.chip).strokeBorder(Color.reefGreen, lineWidth: 2))
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(t.preCommitKept()).font(.caption.bold()).foregroundStyle(Color.reefGreen)
+                            HStack {
+                                if let format = model.reviewFormat(for: kept.uuid) {
+                                    FolderFormatBadge(format: format, t: t).layoutPriority(1)
+                                }
+                                Text(kept.filename).lineLimit(1).truncationMode(.middle)
+                            }
+                            if let item = model.item(for: kept.uuid) { Text(item.primary.url.path).textSelection(.enabled) }
+                        }
                     }
                 }
             } else {
@@ -97,7 +105,12 @@ struct FolderPreCommitReviewSheet: View {
                         .overlay { if photo.isProtected { Image(systemName: "lock.fill").foregroundStyle(Color.reefAmber) } }
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(photo.filename).font(.caption.bold())
+                        HStack {
+                            if let format = model.reviewFormat(for: photo.uuid) {
+                                FolderFormatBadge(format: format, t: t).layoutPriority(1)
+                            }
+                            Text(photo.filename).font(.caption.bold()).lineLimit(1).truncationMode(.middle)
+                        }
                         if let item = model.item(for: photo.uuid) {
                             ForEach(item.members, id: \.url) { Text($0.url.path).textSelection(.enabled) }
                         }

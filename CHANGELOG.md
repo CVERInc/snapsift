@@ -16,6 +16,9 @@ reserved for the first signed and notarized build.
   Folder history records original and Trash paths, recovers interrupted
   removals at launch, and offers Put Back without overwriting existing files.
   Partial moves, changed files and history failures are reported.
+  Review tiles and the pre-commit sheet show distinct file-format labels,
+  highlight RAW and grouped RAW companions, and flag mixed RAW/processed
+  groups where an export may be worth keeping. Ranking and marking are unchanged.
 - **⇧K — "keep only this one."** In a group of five, one keystroke nominates the
   focused photo as the keeper and crosses out the rest, instead of pressing `X`
   four times (or `D` then `K`, which passes through a state where every photo is

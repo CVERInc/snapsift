@@ -205,6 +205,9 @@ final class FolderLibraryModel: ObservableObject, GroupReviewModel {
         guard let item = itemsByID[id], item.members.count > 1 else { return nil }
         return t.folderMembers(item.members.count, kinds: item.members.map { $0.url.pathExtension.uppercased() }.joined(separator: " + "))
     }
+    func reviewFormat(for id: String) -> FolderReviewFormat? {
+        itemsByID[id].map { folderReviewFormat(for: $0) }
+    }
     func promote(group: ReviewGroup.ID, to id: String) { if !isBusy { review.apply(.promote(id), to: group) } }
     func keepOnly(group: ReviewGroup.ID, frame id: String) { if !isBusy { review.apply(.keepOnly(id), to: group) } }
     func keepAll(group: ReviewGroup.ID) { if !isBusy { review.apply(.keepAll, to: group) } }

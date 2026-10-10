@@ -1,6 +1,7 @@
 import SwiftUI
 import Photos
 import SnapsiftCore
+import SnapsiftAppSupport
 import Signet
 
 struct ContentView: View {
@@ -2087,6 +2088,12 @@ struct GroupReview<Model: GroupReviewModel>: View {
                 // their real shape; the pure JustifiedLayout helper packs them into
                 // rows that fill the width. Width is captured via a background reader
                 // so the row math reflows on window resize.
+                if model.isFolderReview,
+                   folderGroupHasMixedFormats(group.photos.compactMap { model.reviewFormat(for: $0.uuid) }) {
+                    Label(t.folderMixedFormats(), systemImage: "info.circle")
+                        .font(.callout).foregroundStyle(Color.reefAmber)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 justifiedGallery
             }
             .padding(CVERSpacing.lg)
@@ -2234,6 +2241,9 @@ struct GroupReview<Model: GroupReviewModel>: View {
             // Filename caption overlaid on a gradient strip so the card height
             // stays equal to the row height (justified rows need uniform height).
             VStack(alignment: .leading, spacing: 2) {
+                if model.isFolderReview, let format = model.reviewFormat(for: p.uuid) {
+                    FolderFormatBadge(format: format, t: t)
+                }
                 Text(p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
                 if let details = model.reviewDetails(for: p.uuid, t: t) { Text(details) }
             }
@@ -2342,6 +2352,10 @@ struct GroupReview<Model: GroupReviewModel>: View {
         if p.edited     { parts.append(t.loupeEdited()) }
         if p.isDocument { parts.append(t.loupeDoc()) }
         if model.isFolderReview {
+            if let format = model.reviewFormat(for: p.uuid) {
+                parts.append(t.folderFormatAccessibility(t.folderFormatLabel(format)))
+                if format.includesRAW && format.includesProcessed { parts.append(t.folderRAWIncluded()) }
+            }
             if let details = model.reviewDetails(for: p.uuid, t: t) { parts.append(details) }
             if model.uniqueMetadataIDs.contains(p.uuid) { parts.append(t.folderUniqueMetadata()) }
             if p.isUnverifiable { parts.append(t.folderUnverifiable()) }

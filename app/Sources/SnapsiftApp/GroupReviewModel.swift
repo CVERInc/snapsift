@@ -1,5 +1,6 @@
 import SwiftUI
 import SnapsiftCore
+import SnapsiftAppSupport
 
 /// The gallery's concrete Photos and Folder adapters share review controls,
 /// while image access, decisions and persistence stay with their own model.
@@ -13,10 +14,15 @@ protocol GroupReviewModel: ObservableObject {
     func displayAspect(for photo: Photo) -> Double
     func reviewThumbnail(for photo: Photo, box: CGSize) -> AnyView
     func reviewDetails(for id: String, t: L10n) -> String?
+    func reviewFormat(for id: String) -> FolderReviewFormat?
     func promote(group: ReviewGroup.ID, to: String)
     func keepAll(group: ReviewGroup.ID)
     func toggleDeleteAll(group: ReviewGroup.ID)
     func setIncludeProtected(group: ReviewGroup.ID, value: Bool)
+}
+
+extension GroupReviewModel {
+    func reviewFormat(for id: String) -> FolderReviewFormat? { nil }
 }
 
 extension LibraryModel: GroupReviewModel {

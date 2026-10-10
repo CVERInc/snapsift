@@ -145,6 +145,35 @@ struct L10n: Sendable {
         case .zhTW: return "帶有 Finder 標籤或註解，不會預先標記"
         }
     }
+    func folderFormatLabel(_ format: FolderReviewFormat) -> String {
+        if let label = format.label { return label }
+        switch language {
+        case .en: return "Image"
+        case .ja: return "画像"
+        case .zhTW: return "影像"
+        }
+    }
+    func folderFormatAccessibility(_ label: String) -> String {
+        switch language {
+        case .en: return "File format: \(label)"
+        case .ja: return "ファイル形式：\(label)"
+        case .zhTW: return "檔案格式：\(label)"
+        }
+    }
+    func folderRAWIncluded() -> String {
+        switch language {
+        case .en: return "Includes RAW — all member files move to the Trash and Put Back together."
+        case .ja: return "RAWを含みます。構成ファイルはまとめてゴミ箱へ移動し、元に戻します。"
+        case .zhTW: return "包含 RAW，所有成員檔案會一起移至垃圾桶，並一起放回原處。"
+        }
+    }
+    func folderMixedFormats() -> String {
+        switch language {
+        case .en: return "This group contains separate RAW and processed items. One may be an export you want to keep."
+        case .ja: return "このグループには別々のRAWと現像済み画像の項目があります。残しておきたい書き出し画像が含まれている可能性があります。"
+        case .zhTW: return "此群組包含分開的 RAW 與已處理影像項目，其中一個可能是您想保留的匯出版本。"
+        }
+    }
     func folderProtectedTitle() -> String {
         switch language {
         case .en: return "Mark protected items?"
