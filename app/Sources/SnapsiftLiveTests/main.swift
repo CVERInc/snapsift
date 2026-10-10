@@ -1,18 +1,18 @@
 import Foundation
 import Photos
 import Vision
-import CryptoKit
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 import SnapsiftCore
+import SnapsiftPhotoKit
+import SnapsiftVision
 
 // Live-machine harness: exercises the REAL PhotoKit / Vision / byte-gate paths
 // against throwaway assets it generates and imports itself. It never touches
 // existing photos. All verdict logic (predicates, keeper, suggestions) is
-// imported from SnapsiftCore — the real thing; only the thin XPC plumbing is
-// mirrored inline (the app's OriginalHasher/PhotoKitSyncLane live in the app
-// executable target and aren't importable from here).
+// imported from the shared libraries. Only the harness-specific original-bitmap
+// fetch stays inline: freshly imported assets have no cached thumbnail yet.
 //
 //   swift run SnapsiftLiveTests            import + verify (non-destructive)
 //   swift run SnapsiftLiveTests --delete   … then delete the test assets
@@ -54,38 +54,7 @@ func writeJPEG(_ image: CGImage, to url: URL, quality: Double) {
     guard CGImageDestinationFinalize(dest) else { die("couldn't write \(url.lastPathComponent)") }
 }
 
-// ── thin mirrors of the app's plumbing ───────────────────────────────────────
-
-/// SHA-256 of the primary original resource — same semantics as the app's
-/// OriginalHasher (local only, no network, multi-resource → nil).
-func sha256(asset: PHAsset) async -> String? {
-    if asset.mediaSubtypes.contains(.photoLive) { return nil }
-    let resources = PHAssetResource.assetResources(for: asset)
-    guard resources.filter({ $0.type != .adjustmentData }).count <= 1 else { return nil }
-    guard let res = resources.first(where: { $0.type == .photo }) ?? resources.first else { return nil }
-    let opts = PHAssetResourceRequestOptions()
-    opts.isNetworkAccessAllowed = false
-    final class Box: @unchecked Sendable {
-        var hasher = SHA256()
-        let lock = NSLock()
-    }
-    let box = Box()
-    return await withCheckedContinuation { cont in
-        PHAssetResourceManager.default().requestData(
-            for: res, options: opts,
-            dataReceivedHandler: { d in box.lock.lock(); box.hasher.update(data: d); box.lock.unlock() },
-            completionHandler: { error in
-                if error == nil {
-                    box.lock.lock()
-                    let hex = box.hasher.finalize().map { String(format: "%02x", $0) }.joined()
-                    box.lock.unlock()
-                    cont.resume(returning: hex)
-                } else {
-                    cont.resume(returning: nil)
-                }
-            })
-    }
-}
+// ── original bitmap fixtures + shared analysis ──────────────────────────────
 
 /// Decode an asset's original bitmap via its image DATA + ImageIO — not
 /// `requestImage`, which returns nil for a just-imported asset whose cached
@@ -121,23 +90,10 @@ func dHashOf(_ image: CGImage) -> UInt64 {
     return dHash(grayRowMajor: pixels.map(Int.init))
 }
 
-func featurePrint(_ image: CGImage) -> VNFeaturePrintObservation? {
+func featurePrint(_ image: CGImage) async -> VNFeaturePrintObservation? {
     let req = VNGenerateImageFeaturePrintRequest()
-    let handler = VNImageRequestHandler(cgImage: image)
-    try? handler.perform([req])
+    guard await VisionGuards.perform([req], on: image) else { return nil }
     return req.results?.first as? VNFeaturePrintObservation
-}
-
-/// Mirror of the wedge-proof lane's shape: run one sync PhotoKit metadata call
-/// on a dedicated queue racing a timeout. Verifies the daemon answers promptly.
-func timedSyncXPC(asset: PHAsset, timeout: TimeInterval) -> Int? {
-    let sem = DispatchSemaphore(value: 0)
-    var count: Int?
-    DispatchQueue(label: "livetest-lane").async {
-        count = PHAssetResource.assetResources(for: asset).count
-        sem.signal()
-    }
-    return sem.wait(timeout: .now() + timeout) == .success ? count : nil
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -209,8 +165,8 @@ Task {
 
     // 3. Byte gate — the doctrine's final arbiter.
     print("Byte gate (SHA-256 over originals)")
-    let dA = await sha256(asset: aA), dCopy = await sha256(asset: aCopy)
-    let dReenc = await sha256(asset: aReenc), dB = await sha256(asset: aB)
+    let dA = await OriginalHasher.sha256(asset: aA), dCopy = await OriginalHasher.sha256(asset: aCopy)
+    let dReenc = await OriginalHasher.sha256(asset: aReenc), dB = await OriginalHasher.sha256(asset: aB)
     check(dA != nil && dA == dCopy, "byte-identical pair digests EQUAL (would qualify as exact)")
     check(dReenc != nil && dReenc != dA, "re-encoded copy digests DIFFER (re-save can NEVER be exact)")
     check(dB != nil && dB != dA, "distinct image digests differ")
@@ -226,8 +182,8 @@ Task {
     check(hamCopy == 0, "dHash(A, byte-copy) hamming == 0 (got \(hamCopy))")
     check(hamB > ExactDuplicatePredicate.hammingThreshold, "dHash(A, distinct) hamming > 0 (got \(hamB))")
     var featCopy: Float = .infinity, featReenc: Float = .infinity, featB: Float = .infinity
-    if let fA = featurePrint(bmA), let fC = featurePrint(bmCopy),
-       let fR = featurePrint(bmReenc), let fB = featurePrint(bmB) {
+    if let fA = await featurePrint(bmA), let fC = await featurePrint(bmCopy),
+       let fR = await featurePrint(bmReenc), let fB = await featurePrint(bmB) {
         try? fA.computeDistance(&featCopy, to: fC)
         try? fA.computeDistance(&featReenc, to: fR)
         try? fA.computeDistance(&featB, to: fB)
@@ -267,7 +223,7 @@ Task {
           "non-keeper unprotected frame is the only suggestion")
 
     // 6. Sync-XPC health probe (the wedge class the lane guards against).
-    let resCount = timedSyncXPC(asset: aA, timeout: 10)
+    let resCount: Int? = await PhotoKitSyncLane.call { PHAssetResource.assetResources(for: aA).count }
     check(resCount != nil, "sync assetResources answered within 10 s (photolibraryd healthy; count=\(resCount ?? -1))")
 
     // 7. Optional destructive pass — throwaway assets only, recoverable 30 days.

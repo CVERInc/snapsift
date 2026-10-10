@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import CryptoKit
+import SnapsiftCore
 
 /// SHA-256 over an asset's original file, streamed via PHAssetResourceManager.
 /// Used as the final, non-perceptual gate of the exact-duplicate pass: a
@@ -9,7 +10,15 @@ import CryptoKit
 /// Never touches the network (`isNetworkAccessAllowed = false`): an
 /// iCloud-evicted original returns nil, and nil means "cannot verify" — the
 /// caller must treat that as NOT exact, never download gigabytes to find out.
-public enum OriginalHasher {
+public struct OriginalHasher: OriginalBytesHasher {
+    private let asset: (String) -> PHAsset?
+
+    public init(asset: @escaping (String) -> PHAsset?) { self.asset = asset }
+
+    public func sha256(itemIdentifier: String) async -> String? {
+        guard let asset = asset(itemIdentifier) else { return nil }
+        return await Self.sha256(asset: asset)
+    }
 
     /// Streaming hash box so the escaping data handler can accumulate chunks.
     private final class HashBox: @unchecked Sendable {

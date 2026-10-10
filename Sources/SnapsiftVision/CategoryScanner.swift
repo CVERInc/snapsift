@@ -1,12 +1,12 @@
 import Foundation
-import Photos
+import CoreGraphics
 import Vision
 
 /// On-device semantic classification (Vision's VNClassifyImageRequest) used by
 /// the "Similar sets" pass to bucket the whole library by what's in each photo —
 /// cat, document, food, people… — across time, no uploads. Picks the most
 /// specific reliable label, skipping over-generic ancestors like "animal".
-enum CategoryScanner {
+public enum CategoryScanner {
 
     /// Over-generic taxonomy ancestors — we'd rather bucket by "cat" than "animal".
     private static let generic: Set<String> = [
@@ -16,18 +16,16 @@ enum CategoryScanner {
     ]
 
     /// The chosen bucket label for an asset, or nil if nothing is reliable.
-    static func category(for asset: PHAsset, manager: PHCachingImageManager) async -> String? {
-        await labels(for: asset, manager: manager).first
+    public static func category(for itemIdentifier: String, provider: any ImageProvider) async -> String? {
+        await labels(for: itemIdentifier, provider: provider).first
     }
 
     /// Up to `limit` reliable, specific content labels for an asset (most
     /// specific first; over-generic ancestors dropped). Used to name a set.
-    static func labels(for asset: PHAsset, manager: PHCachingImageManager, limit: Int = 3) async -> [String] {
+    public static func labels(for itemIdentifier: String, provider: any ImageProvider, limit: Int = 3) async -> [String] {
         // Timeout-guarded + off-pool Vision via VisionGuards — one stuck
         // iCloud asset can't stall the similar-sets naming pass.
-        guard let cg = await VisionGuards.cgImage(asset, manager,
-                                                  target: CGSize(width: 256, height: 256),
-                                                  mode: .aspectFit, resize: .fast)
+        guard let cg = await provider.image(for: itemIdentifier, profile: .categoryLabels)
         else { return [] }
         let request = VNClassifyImageRequest()
         guard await VisionGuards.perform([request], on: cg) else { return [] }
@@ -37,7 +35,7 @@ enum CategoryScanner {
     }
 
     /// A label like "interior_room" → "Interior room" for display.
-    static func displayName(_ identifier: String) -> String {
+    public static func displayName(_ identifier: String) -> String {
         identifier.replacingOccurrences(of: "_", with: " ").capitalized
     }
 

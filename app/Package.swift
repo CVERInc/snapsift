@@ -34,6 +34,7 @@ let package = Package(
         // tools-5.9 default (Swift 5) language mode cleanly.
         .executableTarget(name: "SnapsiftApp", dependencies: [
             .product(name: "SnapsiftCore", package: "snapsift"),
+            .product(name: "SnapsiftVision", package: "snapsift"),
             .product(name: "SnapsiftPhotoKit", package: "snapsift"),
             .product(name: "Signet", package: "signet"),
             // Sparkle and its call sites are macOS-only.
@@ -41,6 +42,7 @@ let package = Package(
         ]),
         .executableTarget(name: "SnapsiftTests", dependencies: [
             .product(name: "SnapsiftCore", package: "snapsift"),
+            .product(name: "SnapsiftVision", package: "snapsift"),
             .product(name: "SnapsiftFolder", package: "snapsift"),
         ]),
         // Live-machine harness (`swift run SnapsiftLiveTests`): exercises the
@@ -53,6 +55,8 @@ let package = Package(
         // hangs). MUST be run from a real Terminal for the prompt to surface.
         .executableTarget(name: "SnapsiftLiveTests", dependencies: [
             .product(name: "SnapsiftCore", package: "snapsift"),
+            .product(name: "SnapsiftVision", package: "snapsift"),
+            .product(name: "SnapsiftPhotoKit", package: "snapsift"),
         ],
             exclude: ["Info.plist"],   // section-embedded via the linker, not a bundle resource
             linkerSettings: [.unsafeFlags([

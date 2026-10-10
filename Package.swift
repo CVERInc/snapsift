@@ -8,12 +8,14 @@ let package = Package(
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "SnapsiftCore", targets: ["SnapsiftCore"]),
+        .library(name: "SnapsiftVision", targets: ["SnapsiftVision"]),
         .library(name: "SnapsiftPhotoKit", targets: ["SnapsiftPhotoKit"]),
         .library(name: "SnapsiftFolder", targets: ["SnapsiftFolder"]),
     ],
     targets: [
         .target(name: "SnapsiftCore"),
-        .target(name: "SnapsiftPhotoKit", dependencies: ["SnapsiftCore"]),
+        .target(name: "SnapsiftVision", dependencies: ["SnapsiftCore"]),
+        .target(name: "SnapsiftPhotoKit", dependencies: ["SnapsiftCore", "SnapsiftVision"]),
         .target(name: "SnapsiftFolder", dependencies: ["SnapsiftCore"]),
     ]
 )

@@ -1,5 +1,5 @@
 import Foundation
-import Photos
+import CoreGraphics
 import Vision
 import SnapsiftCore
 
@@ -13,7 +13,14 @@ import SnapsiftCore
 ///      (VNGenerateImageFeaturePrint + computeDistance) for precision.
 /// Feature prints are only computed for assets that survive stage 1, so the
 /// expensive neural step runs on a small fraction of the library.
-enum LookAlikeScanner {
+public enum LookAlikeScanner {
+
+    public enum Progress {
+        case hashing(Int, Int)
+        case confirming(Int, Int, loaded: Int)
+        case skippedClusters(Int)
+        case verifying(Int, Int)
+    }
 
     // MARK: - per-scan compute cache
 
@@ -45,32 +52,27 @@ enum LookAlikeScanner {
     private static let cache = Cache()
 
     /// Must be called when a new scan begins (LibraryModel does this).
-    static func clearCache() async { await cache.clear() }
+    public static func clearCache() async { await cache.clear() }
 
-    static func scan(assets: [PHAsset],
-                     manager: PHCachingImageManager,
-                     t: L10n,
-                     dHashDistance: Int = 8,
-                     featureDistance: Float = 0.15,   // ≈0.0 for a true re-saved
+    public static func scan(itemIdentifiers: [String],
+                           provider: any ImageProvider,
+                           dHashDistance: Int = 8,
+                           featureDistance: Float = 0.15,   // ≈0.0 for a true re-saved
                                                       // copy; 0.15 excludes merely
                                                       // similar shots (cats ≈0.3)
-                     maxCluster: Int = 80,            // a stage-1 dHash cluster
+                           maxCluster: Int = 80,            // a stage-1 dHash cluster
                                                       // bigger than this is noise
                                                       // (solid colours, screenshots
                                                       // all colliding). Confirming
                                                       // it means thousands of neural
                                                       // prints + O(n²) — the freeze.
-                     progress: @escaping (String, Double?) -> Void) async -> [[String]] {
-
-        var byID: [String: PHAsset] = [:]
-        for a in assets { byID[a.localIdentifier] = a }
+                           progress: @escaping (Progress, Double?) -> Void) async -> [[String]] {
 
         // Stage 1 — dHash all thumbnails, 8-wide (timeout-guarded). Serial reads
         // over a six-figure library were a bottleneck of their own.
         // The fraction is scan-internal 0…1: hashing 0…0.6, confirming 0.6…1.
-        let hashes = await dHashes(assets.map(\.localIdentifier), asset: { byID[$0] },
-                                   manager: manager) { done, total in
-            progress(t.progHashing(done, total),
+        let hashes = await dHashes(itemIdentifiers, provider: provider) { done, total in
+            progress(.hashing(done, total),
                      total > 0 ? 0.6 * Double(done) / Double(total) : nil)
         }
         let candidates = groupByHash(hashes.map { ($0.value, $0.key) }, maxDistance: dHashDistance)
@@ -85,11 +87,11 @@ enum LookAlikeScanner {
 
         // Compute every surviving member's feature print ONCE, across the whole
         // workload with bounded concurrency — this saturates the cores instead of
-        // trickling one small cluster at a time, and the per-image timeout in
-        // cgImage means a stuck thumbnail can never stall the batch.
+        // trickling one small cluster at a time, and the provider's per-image
+        // timeout means a stuck thumbnail can never stall the batch.
         let ids = Array(Set(surviving.flatMap { $0 }))
-        let prints = await featurePrints(ids, byID: byID, manager: manager) { done, loaded in
-            progress(t.progConfirming(done, ids.count, loaded: loaded),
+        let prints = await featurePrints(ids, provider: provider) { done, loaded in
+            progress(.confirming(done, ids.count, loaded: loaded),
                      ids.isEmpty ? 1 : 0.6 + 0.4 * Double(done) / Double(ids.count))
         }
 
@@ -100,25 +102,20 @@ enum LookAlikeScanner {
                 confirmed.append(group)
             }
         }
-        if skipped > 0 { progress(t.progSkippedClusters(skipped), nil) }
+        if skipped > 0 { progress(.skippedClusters(skipped), nil) }
         return confirmed
     }
 
-    /// Public wrapper so LibraryModel's exact-duplicate pass can hash a specific
-    /// set of asset IDs without duplicating the implementation. The private
-    /// `dHashes` variant uses a closure lookup; this variant takes the direct
-    /// `byID` dictionary, matching the pattern used by `featureSpreads`.
-    static func dHashesPublic(_ ids: [String],
-                              byID: [String: PHAsset],
-                              manager: PHCachingImageManager) async -> [String: UInt64] {
-        await dHashes(ids, asset: { byID[$0] }, manager: manager) { _, _ in }
+    /// Hash specific item IDs, sharing the current scan's success/failure cache.
+    public static func dHashesPublic(_ ids: [String],
+                                     provider: any ImageProvider) async -> [String: UInt64] {
+        await dHashes(ids, provider: provider) { _, _ in }
     }
 
-    /// dHash a set of assets with bounded concurrency (timeout per thumbnail in
-    /// cgImage). Unreadable assets are simply absent from the result.
+    /// dHash a set of items with bounded concurrency (provider timeout per
+    /// thumbnail). Unreadable items are simply absent from the result.
     private static func dHashes(_ ids: [String],
-                                asset: @escaping (String) -> PHAsset?,
-                                manager: PHCachingImageManager,
+                               provider: any ImageProvider,
                                 progress: @escaping (Int, Int) -> Void) async -> [String: UInt64] {
         // Serve cache hits first; only compute what this scan hasn't seen yet.
         // Assets already known unreadable this scan are skipped, not re-fetched.
@@ -138,9 +135,9 @@ enum LookAlikeScanner {
                 // by the caller.
                 while !Task.isCancelled, next < missing.count {
                     let id = missing[next]; next += 1
-                    guard let a = asset(id) else { continue }
+                    guard provider.itemIdentifiers.contains(id) else { continue }
                     group.addTask {
-                        if let px = await grayPixels9x8(a, manager) { return (id, dHash(grayRowMajor: px)) }
+                        if let px = await grayPixels9x8(id, provider) { return (id, dHash(grayRowMajor: px)) }
                         return (id, nil)
                     }
                     return
@@ -169,8 +166,7 @@ enum LookAlikeScanner {
     /// can't-read-the-library.
     private static let featureConcurrency = 8
     private static func featurePrints(_ ids: [String],
-                                      byID: [String: PHAsset],
-                                      manager: PHCachingImageManager,
+                                     provider: any ImageProvider,
                                       progress: @escaping (Int, Int) -> Void)
         async -> [String: VNFeaturePrintObservation] {
         // Serve cache hits first; only compute what this scan hasn't seen yet.
@@ -188,8 +184,8 @@ enum LookAlikeScanner {
             func add() {
                 while !Task.isCancelled, next < missing.count {   // cooperative cancel
                     let id = missing[next]; next += 1
-                    guard let a = byID[id] else { continue }   // unknown id — skip
-                    group.addTask { (id, await featurePrint(a, manager)) }
+                    guard provider.itemIdentifiers.contains(id) else { continue }   // unknown id — skip
+                    group.addTask { (id, await featurePrint(id, provider)) }
                     return
                 }
             }
@@ -216,13 +212,12 @@ enum LookAlikeScanner {
     /// neural confirmation runs concurrently instead of one cluster at a time —
     /// the difference between minutes and the hour-long serial stall on a library
     /// where ~a third of thumbnails aren't locally available.
-    static func featureSpreads(_ clusters: [[String]],
-                               byID: [String: PHAsset],
-                               manager: PHCachingImageManager,
+    public static func featureSpreads(_ clusters: [[String]],
+                                     provider: any ImageProvider,
                                progress: @escaping (_ done: Int, _ total: Int, _ loaded: Int) -> Void)
         async -> [Float?] {
         let ids = Array(Set(clusters.flatMap { $0 }))
-        let prints = await featurePrints(ids, byID: byID, manager: manager) { done, loaded in
+        let prints = await featurePrints(ids, provider: provider) { done, loaded in
             progress(done, ids.count, loaded)
         }
         return clusters.map { cluster in
@@ -251,20 +246,18 @@ enum LookAlikeScanner {
     /// frames (a confident, redundant burst); larger spread ⇒ the subject moved
     /// (a session the user may want to keep). `spread == Int.max` means the
     /// cluster couldn't be hashed and was left unverified.
-    struct VerifiedCluster { let photos: [Photo]; let spread: Int }
+    public struct VerifiedCluster { public let photos: [Photo]; public let spread: Int }
 
-    static func verifyByContent(_ clusters: [[Photo]],
-                                asset: @escaping (String) -> PHAsset?,
-                                manager: PHCachingImageManager,
-                                maxDistance: Int,
-                                t: L10n,
-                                progress: @escaping (String, Double?) -> Void) async -> [VerifiedCluster] {
+    public static func verifyByContent(_ clusters: [[Photo]],
+                                      provider: any ImageProvider,
+                                       maxDistance: Int,
+                                progress: @escaping (Progress, Double?) -> Void) async -> [VerifiedCluster] {
         // dHash every clustered frame up front, 8-wide — the only I/O here. The
         // re-split below is then pure in-memory work. (Was a serial per-frame loop
         // that stalled 2s on each thumbnail Photos couldn't serve locally.)
         let ids = Array(Set(clusters.flatMap { $0.map(\.uuid) }))
-        let hashes = await dHashes(ids, asset: asset, manager: manager) { done, total in
-            progress(t.progVerifying(done, total),
+        let hashes = await dHashes(ids, provider: provider) { done, total in
+            progress(.verifying(done, total),
                      total > 0 ? Double(done) / Double(total) : nil)
         }
 
@@ -314,58 +307,9 @@ enum LookAlikeScanner {
 
     // MARK: - image helpers
 
-    /// One-shot continuation that resumes exactly once — whichever of the image
-    /// callback or the timeout fires first wins; the loser is a no-op. This is the
-    /// hard guarantee that a single non-responding `requestImage` (PhotoKit can,
-    /// on an iCloud-optimised library, simply never call back) can't freeze the
-    /// whole scan: after the deadline the frame is treated as unreadable and we
-    /// move on. Leak-free — the continuation always resumes via the timer.
-    private final class ImageBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var cont: CheckedContinuation<PlatformImage?, Never>?
-        func set(_ c: CheckedContinuation<PlatformImage?, Never>) { lock.lock(); cont = c; lock.unlock() }
-        func finish(_ img: PlatformImage?) {
-            lock.lock(); let c = cont; cont = nil; lock.unlock()
-            c?.resume(returning: img)
-        }
-    }
-
-    /// Seconds a single thumbnail request may take before we give up on it. With
-    /// the work now running 8-wide these overlap, but a tighter bound still trims
-    /// the tail spent on assets with no locally cached thumbnail.
-    private static let imageTimeoutNs: UInt64 = 2_000_000_000
-
-    private static func cgImage(_ asset: PHAsset, _ manager: PHCachingImageManager,
-                                target: CGSize, mode: PHImageContentMode) async -> CGImage? {
-        let opts = PHImageRequestOptions()
-        // Never pull originals down from iCloud. On a library with "Optimize Mac
-        // Storage", a request larger than the cached thumbnail with .fastFormat
-        // just *waits* for a download it isn't allowed to do — it neither serves
-        // the smaller cached image nor returns nil, so it stalls until our
-        // timeout. .opportunistic instead hands back whatever is cached locally
-        // *right now* (even if smaller than asked), which is exactly what dHash /
-        // feature prints need. First (cached) callback wins via ImageBox.
-        opts.isNetworkAccessAllowed = false
-        opts.deliveryMode = .opportunistic
-        opts.resizeMode = .fast
-
-        let box = ImageBox()
-        let img: PlatformImage? = await withCheckedContinuation { cont in
-            box.set(cont)
-            manager.requestImage(for: asset, targetSize: target,
-                                 contentMode: mode, options: opts) { image, _ in
-                box.finish(image)
-            }
-            Task { try? await Task.sleep(nanoseconds: imageTimeoutNs); box.finish(nil) }
-        }
-        guard let img else { return nil }
-        return img.cgImageForProcessing
-    }
-
     /// Flat 9×8 grayscale buffer for Core's dHash.
-    private static func grayPixels9x8(_ asset: PHAsset, _ manager: PHCachingImageManager) async -> [Int]? {
-        guard let cg = await cgImage(asset, manager,
-                                     target: CGSize(width: 9, height: 8), mode: .aspectFill)
+    private static func grayPixels9x8(_ id: String, _ provider: any ImageProvider) async -> [Int]? {
+        guard let cg = await provider.image(for: id, profile: .dHash)
         else { return nil }
         let w = 9, h = 8
         var data = [UInt8](repeating: 0, count: w * h)
@@ -387,12 +331,11 @@ enum LookAlikeScanner {
     private static let visionQueue = DispatchQueue(label: "net.cver.snapsift.vision",
                                                    qos: .userInitiated, attributes: .concurrent)
 
-    private static func featurePrint(_ asset: PHAsset, _ manager: PHCachingImageManager) async -> VNFeaturePrintObservation? {
+    private static func featurePrint(_ id: String, _ provider: any ImageProvider) async -> VNFeaturePrintObservation? {
         // 160px (down from 256): far likelier to fall within the locally cached
         // thumbnail on an iCloud-optimised library, so it returns instantly
         // instead of stalling. Plenty of detail for a near-duplicate feature print.
-        guard let cg = await cgImage(asset, manager,
-                                     target: CGSize(width: 160, height: 160), mode: .aspectFit)
+        guard let cg = await provider.image(for: id, profile: .featurePrint)
         else { return nil }
         return await withCheckedContinuation { cont in
             visionQueue.async {
