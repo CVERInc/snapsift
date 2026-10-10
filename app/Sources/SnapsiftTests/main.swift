@@ -2603,6 +2603,7 @@ await checkCommitOrchestration()
 await checkExactDuplicatePass()
 await checkImageProviderSeam()
 await checkFolderSource()
+await checkFolderCommitAndHistory()
 
 print("Folder volume capability")
 do {

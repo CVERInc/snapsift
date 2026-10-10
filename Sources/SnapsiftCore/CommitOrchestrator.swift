@@ -19,6 +19,9 @@ public struct CommitPorts<Item, JournalEntry> {
     public var makeJournalEntry: (String, [DeletionRecord]) -> JournalEntry
     public var writeIntent: (JournalEntry) -> Bool
     public var delete: @MainActor ([Item]) async throws -> Void
+    /// Optional partial-success performer. Only returned, requested IDs are
+    /// audited/reported. Absent this port, delete retains its all-or-throw contract.
+    public var deleteReporting: (@MainActor ([(id: String, item: Item)]) async throws -> Set<String>)?
     public var appendAudit: (JournalEntry) -> Bool
     public var clearIntent: () -> Void
 
@@ -31,7 +34,8 @@ public struct CommitPorts<Item, JournalEntry> {
                 writeIntent: @escaping (JournalEntry) -> Bool,
                 delete: @escaping @MainActor ([Item]) async throws -> Void,
                 appendAudit: @escaping (JournalEntry) -> Bool,
-                clearIntent: @escaping () -> Void) {
+                clearIntent: @escaping () -> Void,
+                deleteReporting: (@MainActor ([(id: String, item: Item)]) async throws -> Set<String>)? = nil) {
         self.fetchLive = fetchLive
         self.editedNow = editedNow
         self.favoriteNow = favoriteNow
@@ -40,6 +44,7 @@ public struct CommitPorts<Item, JournalEntry> {
         self.makeJournalEntry = makeJournalEntry
         self.writeIntent = writeIntent
         self.delete = delete
+        self.deleteReporting = deleteReporting
         self.appendAudit = appendAudit
         self.clearIntent = clearIntent
     }
@@ -240,15 +245,24 @@ public final class CommitOrchestrator {
         if !auditRecords.isEmpty, !ports.writeIntent(entry) {
             throw CommitError.journalWriteFailed
         }
+        var committedIDs = resolvable
         do {
-            try await ports.delete(items.map(\.item))
+            if let deleteReporting = ports.deleteReporting {
+                committedIDs = try await deleteReporting(items).intersection(resolvable)
+            } else {
+                try await ports.delete(items.map(\.item))
+            }
         } catch {
             ports.clearIntent()
             throw error
         }
-        let auditFailed = !auditRecords.isEmpty && !ports.appendAudit(entry)
+        let committedRecords = auditRecords.filter { committedIDs.contains($0.assetIdentifier) }
+        let committedEntry = ports.deleteReporting == nil ? entry
+            : ports.makeJournalEntry(timestamp, committedRecords)
+        let auditFailed = !committedRecords.isEmpty && !ports.appendAudit(committedEntry)
         ports.clearIntent()
-        callbacks.onCommitted?(CommitResult(deletedIDs: items.map(\.id), auditFailed: auditFailed))
-        return items.count
+        let deletedIDs = items.map(\.id).filter { committedIDs.contains($0) }
+        callbacks.onCommitted?(CommitResult(deletedIDs: deletedIDs, auditFailed: auditFailed))
+        return deletedIDs.count
     }
 }
