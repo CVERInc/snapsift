@@ -38,6 +38,10 @@ reserved for the first signed and notarized build.
 - Shared Core and PhotoKit libraries are now published from the root Swift
   package for macOS 14 and iOS 17. The macOS app and its tools continue to build
   from `app/`, consuming the same libraries locally.
+- **Deleting from Apple Photos now stops if its recovery journal cannot be
+  written.** Previously the deletion went ahead without the journal; now
+  nothing is deleted and the usual "nothing was deleted" alert appears, so an
+  interrupted deletion always leaves a record.
 
 ## [0.10.0] — 2026-09-18
 
