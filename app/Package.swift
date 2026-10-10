@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .executable(name: "SnapsiftApp", targets: ["SnapsiftApp"]),
         .executable(name: "SnapsiftTests", targets: ["SnapsiftTests"]),
+        .executable(name: "SnapsiftFolderLiveTests", targets: ["SnapsiftFolderLiveTests"]),
     ],
     dependencies: [
         // Explicit name binds product references independently of the checkout
@@ -46,6 +47,12 @@ let package = Package(
             "SnapsiftAppSupport",
             .product(name: "SnapsiftCore", package: "snapsift"),
             .product(name: "SnapsiftVision", package: "snapsift"),
+            .product(name: "SnapsiftFolder", package: "snapsift"),
+        ]),
+        // Manual Folder Mode harness. It intentionally uses the real system
+        // Trash, but only for uniquely named generated fixtures.
+        .executableTarget(name: "SnapsiftFolderLiveTests", dependencies: [
+            .product(name: "SnapsiftCore", package: "snapsift"),
             .product(name: "SnapsiftFolder", package: "snapsift"),
         ]),
         .target(name: "SnapsiftAppSupport", dependencies: [
