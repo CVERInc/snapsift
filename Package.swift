@@ -9,9 +9,11 @@ let package = Package(
     products: [
         .library(name: "SnapsiftCore", targets: ["SnapsiftCore"]),
         .library(name: "SnapsiftPhotoKit", targets: ["SnapsiftPhotoKit"]),
+        .library(name: "SnapsiftFolder", targets: ["SnapsiftFolder"]),
     ],
     targets: [
         .target(name: "SnapsiftCore"),
         .target(name: "SnapsiftPhotoKit", dependencies: ["SnapsiftCore"]),
+        .target(name: "SnapsiftFolder", dependencies: ["SnapsiftCore"]),
     ]
 )

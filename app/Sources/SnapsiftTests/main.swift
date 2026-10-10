@@ -1,5 +1,6 @@
 import Foundation
 import SnapsiftCore
+import SnapsiftFolder
 
 // Framework-free test runner: `swift run SnapsiftTests`.
 // Exits non-zero on any failure so it can gate CI. Mirrors the Python pytest
@@ -2598,6 +2599,133 @@ func checkCommitOrchestration() async {
 }
 
 await checkCommitOrchestration()
+
+print("Folder volume capability")
+do {
+    func facts(local: Bool? = true, readOnly: Bool? = false,
+               mountedReadOnly: Bool? = false, fileSystem: String? = "apfs",
+               root: Bool? = false) -> VolumeFacts {
+        VolumeFacts(isLocal: local, isReadOnly: readOnly,
+                    mntRdOnly: mountedReadOnly, fileSystemType: fileSystem,
+                    isRootFileSystem: root)
+    }
+
+    let researchRows: [(String, VolumeFacts, VolumeCapability)] = [
+        ("startup APFS", facts(root: true), .removalSupported),
+        ("external APFS", facts(fileSystem: "apfs"), .removalSupported),
+        ("external HFS+", facts(fileSystem: "hfs"), .removalSupported),
+        ("external ExFAT", facts(fileSystem: "exfat"), .removalSupported),
+        ("external FAT32", facts(fileSystem: "msdos"), .removalSupported),
+        ("read-only ExFAT", facts(readOnly: true, mountedReadOnly: true,
+                                   fileSystem: "exfat"), .scanOnly(.readOnly)),
+        ("read-only APFS", facts(readOnly: true, mountedReadOnly: true,
+                                  fileSystem: "apfs"), .scanOnly(.readOnly)),
+        ("MNT_RDONLY alone", facts(readOnly: false, mountedReadOnly: true),
+         .scanOnly(.readOnly)),
+        ("Foundation read-only alone", facts(readOnly: true, mountedReadOnly: false),
+         .scanOnly(.readOnly)),
+    ]
+    for (name, row, expected) in researchRows {
+        check(classifyVolume(row) == expected, "research volume row: \(name)")
+    }
+
+    let unsupportedRows: [(String, VolumeFacts, VolumeCapability)] = [
+        ("NTFS", facts(fileSystem: "ntfs"), .scanOnly(.unsupportedFilesystemType)),
+        ("SMB", facts(local: false, fileSystem: "smbfs"), .scanOnly(.networkVolume)),
+        ("NFS", facts(local: false, fileSystem: "nfs"), .scanOnly(.networkVolume)),
+        ("AFP", facts(local: false, fileSystem: "afp"), .scanOnly(.networkVolume)),
+        ("unknown filesystem", facts(fileSystem: "futurefs"),
+         .scanOnly(.unsupportedFilesystemType)),
+    ]
+    for (name, row, expected) in unsupportedRows {
+        check(classifyVolume(row) == expected, "unsupported volume row: \(name)")
+    }
+
+    let complete = facts()
+    let unavailableRows: [(String, VolumeFacts)] = [
+        ("isLocal", VolumeFacts(isLocal: nil, isReadOnly: complete.isReadOnly,
+                                 mntRdOnly: complete.mntRdOnly,
+                                 fileSystemType: complete.fileSystemType,
+                                 isRootFileSystem: complete.isRootFileSystem)),
+        ("isReadOnly", VolumeFacts(isLocal: complete.isLocal, isReadOnly: nil,
+                                   mntRdOnly: complete.mntRdOnly,
+                                   fileSystemType: complete.fileSystemType,
+                                   isRootFileSystem: complete.isRootFileSystem)),
+        ("MNT_RDONLY", VolumeFacts(isLocal: complete.isLocal,
+                                   isReadOnly: complete.isReadOnly, mntRdOnly: nil,
+                                   fileSystemType: complete.fileSystemType,
+                                   isRootFileSystem: complete.isRootFileSystem)),
+        ("filesystem type", VolumeFacts(isLocal: complete.isLocal,
+                                        isReadOnly: complete.isReadOnly,
+                                        mntRdOnly: complete.mntRdOnly,
+                                        fileSystemType: nil,
+                                        isRootFileSystem: complete.isRootFileSystem)),
+        ("root filesystem", VolumeFacts(isLocal: complete.isLocal,
+                                        isReadOnly: complete.isReadOnly,
+                                        mntRdOnly: complete.mntRdOnly,
+                                        fileSystemType: complete.fileSystemType,
+                                        isRootFileSystem: nil)),
+    ]
+    for (name, row) in unavailableRows {
+        check(classifyVolume(row) == .scanOnly(.signalsUnavailable),
+              "nil signal forces scan-only: \(name)")
+    }
+
+    let sourceKey = VolumeKey(rawValue: "volume-a")
+    check(!validateTrashResult(
+        sourceVolumeKey: sourceKey,
+        result: TrashResultFacts(hasResultingURL: false, itemExists: false, volumeKey: nil)
+    ), "Trash validator rejects a nil result URL")
+    check(!validateTrashResult(
+        sourceVolumeKey: sourceKey,
+        result: TrashResultFacts(hasResultingURL: true, itemExists: false, volumeKey: sourceKey)
+    ), "Trash validator rejects a missing item")
+    check(!validateTrashResult(
+        sourceVolumeKey: sourceKey,
+        result: TrashResultFacts(hasResultingURL: true, itemExists: true,
+                                 volumeKey: VolumeKey(rawValue: "volume-b"))
+    ), "Trash validator rejects a different volume")
+    check(validateTrashResult(
+        sourceVolumeKey: sourceKey,
+        result: TrashResultFacts(hasResultingURL: true, itemExists: true, volumeKey: sourceKey)
+    ), "Trash validator accepts an existing item on the same volume")
+
+    // Probe where user files live. On macOS 10.15+ `/` is the sealed, read-only
+    // system volume (MNT_RDONLY set), so it is correctly scan-only; the
+    // writable startup Data volume is what a user folder resolves to.
+    let startup = probeVolume(at: FileManager.default.temporaryDirectory)
+    check(startup.capability == .removalSupported
+          && startup.facts.fileSystemType?.lowercased() == "apfs"
+          && startup.facts.isLocal == true
+          && startup.facts.isReadOnly == false
+          && startup.facts.mntRdOnly == false,
+          "real startup-volume probe: the temporary directory is on writable local APFS; got \(startup.capability), \(startup.facts)")
+
+    let temporaryDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("snapsift-volume-\(UUID().uuidString)", isDirectory: true)
+    do {
+        try FileManager.default.createDirectory(at: temporaryDirectory,
+                                                withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let existingItem = temporaryDirectory.appendingPathComponent("trash-result")
+        let missingItem = temporaryDirectory.appendingPathComponent("missing-result")
+        try Data("temporary volume validator fixture".utf8).write(to: existingItem)
+        if let sourceVolumeKey = startup.volumeKey {
+            check(!validateTrashResult(sourceVolumeKey: sourceVolumeKey, resultingURL: nil),
+                  "Trash probe wrapper rejects a nil URL")
+            check(!validateTrashResult(sourceVolumeKey: sourceVolumeKey,
+                                       resultingURL: missingItem),
+                  "Trash probe wrapper rejects a missing item")
+            check(validateTrashResult(sourceVolumeKey: sourceVolumeKey,
+                                      resultingURL: existingItem),
+                  "Trash probe wrapper accepts an existing same-volume item")
+        } else {
+            check(false, "Trash probe wrapper has a startup volume key")
+        }
+    } catch {
+        check(false, "temporary Trash validator fixture setup: \(error)")
+    }
+}
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

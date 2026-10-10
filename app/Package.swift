@@ -41,6 +41,7 @@ let package = Package(
         ]),
         .executableTarget(name: "SnapsiftTests", dependencies: [
             .product(name: "SnapsiftCore", package: "snapsift"),
+            .product(name: "SnapsiftFolder", package: "snapsift"),
         ]),
         // Live-machine harness (`swift run SnapsiftLiveTests`): exercises the
         // REAL PhotoKit/Vision/sidecar paths against dedicated throwaway assets
