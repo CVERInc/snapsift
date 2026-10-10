@@ -1,5 +1,25 @@
+import Foundation
+import CoreGraphics
+import ImageIO
 import UniformTypeIdentifiers
 import SnapsiftAppSupport
+import SnapsiftFolder
+
+private enum FolderReviewFormatTestError: Error { case imageWrite }
+
+private func writeReviewFormatJPEG(at url: URL) throws {
+    guard let context = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8,
+                                 bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+          let image = context.makeImage(),
+          let destination = CGImageDestinationCreateWithURL(url as CFURL,
+                                                             UTType.jpeg.identifier as CFString,
+                                                             1, nil) else {
+        throw FolderReviewFormatTestError.imageWrite
+    }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else { throw FolderReviewFormatTestError.imageWrite }
+}
 
 func folderReviewFormatTests(_ check: (Bool, String) -> Void) {
     print("Folder review file formats")
@@ -42,10 +62,34 @@ func folderReviewFormatTests(_ check: (Bool, String) -> Void) {
     check(unknown.label == nil && unknown.includesProcessed && !unknown.includesRAW, "generic image type uses a localized fallback")
     check(FolderReviewFormat(primaryType: nil, memberTypes: []).label == nil, "missing member types use a localized fallback")
 
+    do {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("snapsift-review-format-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("RAW fixture".utf8).write(to: root.appendingPathComponent("PAIR.dng"))
+        try writeReviewFormatJPEG(at: root.appendingPathComponent("PAIR.jpg"))
+        try writeReviewFormatJPEG(at: root.appendingPathComponent("single.jpg"))
+        let enumeration = try FolderEnumerator.enumerate(root: root)
+        let pairItem = enumeration.items.first { $0.primary.url.lastPathComponent.lowercased() == "pair.jpg" }
+        let singleItem = enumeration.items.first { $0.primary.url.lastPathComponent.lowercased() == "single.jpg" }
+        let pairFormat = pairItem.map { folderReviewFormat(for: $0) }
+        let singleFormat = singleItem.map { folderReviewFormat(for: $0) }
+        check(enumeration.issues.isEmpty && enumeration.items.count == 2 && pairItem?.members.count == 2
+              && pairFormat?.label == "JPEG + RAW" && pairFormat?.includesRAW == true
+              && pairFormat?.includesProcessed == true && singleFormat?.label == "JPEG"
+              && singleFormat?.includesProcessed == true && singleFormat?.includesRAW == false,
+              "real folder items resolve JPEG and DNG formats from filename extensions")
+    } catch {
+        check(false, "real folder items resolve JPEG and DNG formats from filename extensions")
+    }
+
     check(folderGroupHasMixedFormats([dng, jpeg]), "separate RAW and JPEG items show the mixed-format notice")
     check(folderGroupHasMixedFormats([jpeg, canon]), "mixed-group detection is independent of item order and RAW subtype")
     check(folderGroupHasMixedFormats([dng, heic]), "separate RAW and HEIC items show the mixed-format notice")
     check(!folderGroupHasMixedFormats([pair]), "one RAW+JPEG item alone is not a mixed group")
+    check(!folderGroupHasMixedFormats([pair, pair]), "two RAW+JPEG pair items do not show the mixed-format notice")
+    check(!folderGroupHasMixedFormats([pair, heicPair]), "RAW+JPEG and RAW+HEIC pair items do not show the mixed-format notice")
     check(!folderGroupHasMixedFormats([jpeg, jpeg]), "all-JPEG group has no mixed-format notice")
     check(!folderGroupHasMixedFormats([jpeg, heic, png, tiff]), "processed formats alone have no RAW export notice")
     check(!folderGroupHasMixedFormats([dng, canon]), "all-RAW group has no mixed-format notice")

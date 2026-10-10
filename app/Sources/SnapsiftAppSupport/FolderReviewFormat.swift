@@ -39,15 +39,19 @@ public func folderReviewFormat(for item: FolderItem) -> FolderReviewFormat {
                       memberTypes: item.members.compactMap { UTType(filenameExtension: $0.url.pathExtension) })
 }
 
-/// A paired item alone is not a mixed group: the two formats must occur on
-/// separate items before suggesting that one may be an export worth keeping.
+/// A mixed-group notice requires a processed-only item alongside an item that
+/// includes RAW, or a RAW-only item alongside an item with a processed format.
+/// Pair items alone do not qualify.
 public func folderGroupHasMixedFormats(_ formats: [FolderReviewFormat]) -> Bool {
-    var seenRAW = false
-    var seenProcessed = false
+    var hasRAW = false
+    var hasProcessed = false
+    var hasRAWOnly = false
+    var hasProcessedOnly = false
     for format in formats {
-        if (format.includesRAW && seenProcessed) || (format.includesProcessed && seenRAW) { return true }
-        seenRAW = seenRAW || format.includesRAW
-        seenProcessed = seenProcessed || format.includesProcessed
+        hasRAW = hasRAW || format.includesRAW
+        hasProcessed = hasProcessed || format.includesProcessed
+        hasRAWOnly = hasRAWOnly || (format.includesRAW && !format.includesProcessed)
+        hasProcessedOnly = hasProcessedOnly || (format.includesProcessed && !format.includesRAW)
     }
-    return false
+    return (hasProcessedOnly && hasRAW) || (hasRAWOnly && hasProcessed)
 }
