@@ -1,6 +1,7 @@
 import Foundation
 import SnapsiftCore
 import SnapsiftFolder
+import SnapsiftAppSupport
 
 // Framework-free test runner: `swift run SnapsiftTests`.
 // Exits non-zero on any failure so it can gate CI. Mirrors the Python pytest
@@ -2729,6 +2730,8 @@ do {
         check(false, "temporary Trash validator fixture setup: \(error)")
     }
 }
+
+folderAppIntegrationTests(check)
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

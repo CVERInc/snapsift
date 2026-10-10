@@ -5,6 +5,11 @@ import Signet
 
 struct ContentView: View {
     @StateObject private var model = LibraryModel()
+    @StateObject private var folderModel = FolderLibraryModel()
+    @State private var mode: ScanSource.Kind = .photos
+    @State private var photosInitialized = false
+    @State private var photosRestoring = false
+    @State private var confirmFolderScan = false
     // App-owned Sparkle updater, forwarded here so it can flow through the
     // existing menuBridge/SnapsiftActions bridge below (see Commands.swift).
     // Defaults to unavailable/no-op — set for real by SnapsiftApp on macOS.
@@ -56,6 +61,7 @@ struct ContentView: View {
     @State private var albumErrorMessage: String?
     // Pass 2b: save-rotation state
     @State private var saveRotationErrorAlert = false
+    @State private var savingRotation = false
     // Feature 1: pre-commit review sheet
     /// The pre-commit sheet's entire payload, built atomically in runDelete().
     /// Presented via .sheet(item:) — with isPresented + separate @State the
@@ -98,40 +104,73 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            switch model.auth {
-            case .authorized:
-                main
-            // FIX 1: .limited ("Selected Photos") is iOS-only in practice, but
-            // PHAuthorizationStatus includes the case in the enum on all platforms.
-            // On macOS, requestAuthorization(for: .readWrite) never returns .limited
-            // today, but we guard it explicitly: snapsift's whole purpose is
-            // library-wide dedup+delete, which "Selected Photos" fundamentally
-            // cannot do. Route it to a clear gate instead of the review UI where
-            // deletes would silently fail.
-            case .limited:
-                limitedGate
-            case .denied, .restricted:
-                // Deep-link straight to the Photos privacy pane — the most
-                // common bad first-run path must not dead-end on prose telling
-                // the user to navigate System Settings by hand.
-                gate(message: t.gateDeniedBody(), button: t.gateLimitedButton()) {
-                    openPhotosPrivacySettings()
+            if mode == .folder {
+                FolderContentView(model: folderModel, t: t, requestScan: requestFolderScan)
+            } else {
+                switch model.auth {
+                case .authorized:
+                    main
+                // FIX 1: .limited ("Selected Photos") is iOS-only in practice, but
+                // PHAuthorizationStatus includes the case in the enum on all platforms.
+                // On macOS, requestAuthorization(for: .readWrite) never returns .limited
+                // today, but we guard it explicitly: snapsift's whole purpose is
+                // library-wide dedup+delete, which "Selected Photos" fundamentally
+                // cannot do. Route it to a clear gate instead of the review UI where
+                // deletes would silently fail.
+                case .limited:
+                    limitedGate
+                case .denied, .restricted:
+                    // Deep-link straight to the Photos privacy pane — the most
+                    // common bad first-run path must not dead-end on prose telling
+                    // the user to navigate System Settings by hand.
+                    gate(message: t.gateDeniedBody(), button: t.gateLimitedButton()) {
+                        openPhotosPrivacySettings()
+                    }
+                default:
+                    gate(message: t.privacyPitch(), button: t.gateRequestButton())
                 }
-            default:
-                gate(message: t.privacyPitch(), button: t.gateRequestButton())
             }
         }
         .desktopMinimumFrame()   // macOS-only 820×560 floor; iPhone sizes itself
         .background(ReefBackdrop())
         .preferredColorScheme(.dark)
         .tint(.reefTeal)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Picker(t.modeLabel(), selection: $mode) {
+                    Text(t.photosMode()).tag(ScanSource.Kind.photos)
+                    Text(t.folderMode()).tag(ScanSource.Kind.folder)
+                }
+                .pickerStyle(.segmented)
+                .disabled(photosRestoring || savingRotation || model.isScanning || model.refiningFaces || model.isWritingAlbums || deleting || folderModel.isScanning)
+            }
+            if mode == .folder { ToolbarItem { languageMenu } }
+        }
+        .focusedSceneValue(\.snapsiftActions, mode == .folder || model.auth == .authorized ? menuBridge : nil)
+        #if os(macOS)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            // App lifecycle flushes the retained Photos session even when its
+            // pane is inactive. Switching modes itself never schedules a save.
+            if photosInitialized { model.flushSnapshotSync() }
+        }
+        #endif
+        .confirmationDialog(t.rescanDiscardTitle(), isPresented: $confirmFolderScan, titleVisibility: .visible) {
+            Button(t.rescanDiscardConfirm(), role: .destructive) { folderModel.startScan(t) }
+            Button(t.rescanDiscardCancel(), role: .cancel) { }
+        } message: {
+            Text(t.rescanDiscardBody(folderModel.userMarkCount))
+        }
         // Pass 2b: save-rotation confirmation alert.
         // Anchored at the outermost level so it fires regardless of which sub-view
         // set `model.showSaveRotationConfirm = true` (grid button OR loupe button).
         .alert(t.saveRotationConfirmTitle(), isPresented: $model.showSaveRotationConfirm) {
             Button(t.saveRotationConfirmButton()) {
-                if let frameID = focusedFrame {
-                    Task { await model.saveRotationToPhotos(frameID: frameID) }
+                if mode == .photos, let frameID = focusedFrame {
+                    savingRotation = true
+                    Task {
+                        await model.saveRotationToPhotos(frameID: frameID)
+                        savingRotation = false
+                    }
                 }
             }
             Button(t.saveRotationCancelButton(), role: .cancel) { }
@@ -290,7 +329,6 @@ struct ContentView: View {
         .toolbar { toolbar }
         // Menu-bar bridge: publishes the primary actions + their enablement to
         // SnapsiftMenuCommands. The ⌘-shortcuts live on the menu items only.
-        .focusedSceneValue(\.snapsiftActions, menuBridge)
         .safeAreaInset(edge: .bottom) { statusBar }
         // W1.5: statusBar publishes its own height (StatusBarHeightKey); the
         // help panel's safeAreaInset above reads it back via `statusBarHeight`.
@@ -306,6 +344,11 @@ struct ContentView: View {
         // handlers guard on `deleting` for the keyboard.
         .overlay { if deleting { deletingLock } }
         .onAppear {
+            // Mode switches retain this view's Photos model and UI state, and
+            // must never re-run launch restore/reconciliation or rewrite marks.
+            guard !photosInitialized else { return }
+            photosInitialized = true
+            photosRestoring = true
             model.loadAlbums()
             installFocusRescue()
             // Reopen onto the last working state (groups + decisions) instead
@@ -315,7 +358,10 @@ struct ContentView: View {
             // A commit that died between performChanges and the history write
             // left a journal behind; book what actually went missing, then say so.
             model.reconcileDeletionJournal()
-            Task { await model.restoreSnapshot(t) }
+            Task {
+                _ = await model.restoreSnapshot(t)
+                photosRestoring = false
+            }
         }
         // Scan-completion feedback: every scan ends with an explicit banner
         // ("found N" / "nothing found" / "album gone") so finishing is never
@@ -349,13 +395,6 @@ struct ContentView: View {
                 model.snapshotUnreadableNotice = false
             }
         }
-        // Flush synchronously on ⌘Q: the debounced/async save can't be relied on
-        // to finish as the process exits, so persist the tail of the session now.
-        #if os(macOS)
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            model.flushSnapshotSync()
-        }
-        #endif
         // Keep the grid focus in sync when the selection changes by mouse —
         // otherwise focusedFrame keeps pointing into the previously selected
         // group and arrow keys / ⇧⌘R act on a stale frame.
@@ -470,11 +509,18 @@ struct ContentView: View {
     /// Every scan trigger routes through here: with pending user marks the
     /// scan waits behind a confirmation, otherwise it starts immediately.
     private func requestScan(_ kind: LibraryModel.ScanKind) {
+        guard mode == .photos else { return }
         if model.userMarkCount > 0 {
             confirmScanKind = kind
         } else {
             model.startScan(kind, t)
         }
+    }
+
+    private func requestFolderScan() {
+        guard mode == .folder, folderModel.canScan else { return }
+        if folderModel.userMarkCount > 0 { confirmFolderScan = true }
+        else { folderModel.startScan(t) }
     }
 
     @ViewBuilder private var previewOverlay: some View {
@@ -546,12 +592,28 @@ struct ContentView: View {
     /// The menu-bar action bridge (see Commands.swift). Enablement mirrors the
     /// toolbar's disabled logic; the model guards stay the final authority.
     private var menuBridge: SnapsiftActions {
+        if mode == .folder {
+            return SnapsiftActions(
+                canScan: folderModel.canScan, canScanLookAlikes: false, canScanSimilarSets: false,
+                canRefineFaces: false, canWriteAlbums: false, canDelete: false,
+                canShowHistory: false, isFolderMode: true,
+                canCancelScan: folderModel.isScanning,
+                scan: { kind in if kind == .burst { requestFolderScan() } },
+                refineFaces: {}, writeAlbums: {}, deleteMarked: {},
+                cancelScan: { folderModel.cancelScan() }, showHistory: {}, toggleHelp: {},
+                canCheckForUpdates: updateChecker.checkAvailable,
+                checkForUpdates: { updateChecker.check() })
+        }
         let busy = model.isScanning || model.refiningFaces || model.isWritingAlbums || deleting
         return SnapsiftActions(
             canScan: !busy,
+            canScanLookAlikes: !busy,
+            canScanSimilarSets: !busy,
             canRefineFaces: !busy && !model.groups.isEmpty,
             canWriteAlbums: !busy && !writingAlbums && !model.groups.isEmpty,
             canDelete: !busy && model.totalDeletions > 0,
+            canShowHistory: true,
+            isFolderMode: false,
             canCancelScan: model.isScanning || model.refiningFaces,
             scan: { requestScan($0) },
             refineFaces: { Task { await model.refineWithFaces(t) } },
@@ -613,13 +675,17 @@ struct ContentView: View {
     private func installFocusRescue() {
         #if os(macOS)
         guard keyMonitor == nil else { return }
+        let photos = model
+        let activeMode = $mode
+        let focus = $sidebarFocused
         // Also watch mouse-downs so a row click re-arms focus by itself and
         // the first keystroke after it is not sacrificed to the rescue.
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown]) { event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown]) { [weak photos] event in
+            guard activeMode.wrappedValue == .photos, let photos else { return event }
             let fr = NSApp.keyWindow?.firstResponder
             if fr == nil || fr is NSWindow {
-                if !model.groups.isEmpty || !model.categories.isEmpty {
-                    sidebarFocused = true
+                if !photos.groups.isEmpty || !photos.categories.isEmpty {
+                    focus.wrappedValue = true
                 }
             }
             return event
@@ -838,7 +904,7 @@ struct ContentView: View {
     /// Pass 2b — trigger save-rotation confirmation (⇧⌘R).
     /// Only arms the confirm alert if the focused frame has a pending rotation.
     private func handleSaveRotationKey() {
-        guard let f = focusedFrame, model.rotation(for: f) % 4 != 0 else { return }
+        guard mode == .photos, let f = focusedFrame, model.rotation(for: f) % 4 != 0 else { return }
         model.showSaveRotationConfirm = true
     }
 
@@ -961,11 +1027,11 @@ struct ContentView: View {
             aspectRatios: g.photos.map { model.displayAspect(for: $0) },
             containerWidth: Double(galleryWidth),
             targetHeight: JustifiedLayout.targetHeight(forWidth: Double(galleryWidth)),
-            spacing: Double(GroupReview.gallerySpacing)
+            spacing: Double(GroupReview<LibraryModel>.gallerySpacing)
         )
         // nil = already on the first/last row. Staying put is the whole point:
         // the old handler slid sideways into the next row instead.
-        if let next = JustifiedLayout.rowNeighbor(rows: rows, spacing: Double(GroupReview.gallerySpacing),
+        if let next = JustifiedLayout.rowNeighbor(rows: rows, spacing: Double(GroupReview<LibraryModel>.gallerySpacing),
                                                   from: index, delta: delta) {
             focusedFrame = g.photos[next].uuid
         }
@@ -1706,6 +1772,7 @@ struct ContentView: View {
     }
 
     private func runWriteAlbums() async {
+        guard mode == .photos else { return }
         writingAlbums = true
         defer { writingAlbums = false }
         do {
@@ -1719,6 +1786,7 @@ struct ContentView: View {
     /// Step 1: build the pre-commit data and show the review sheet.
     /// The actual PHPhotoLibrary delete only happens after the user confirms.
     private func runDelete() async {
+        guard mode == .photos else { return }
         // The .disabled gates above cover the buttons; this covers the ⌘⌫
         // shortcut and any future caller. isWritingAlbums included: confirming a
         // delete during an album write used to produce a sheet whose Confirm did
@@ -1774,6 +1842,7 @@ struct ContentView: View {
 
     /// Step 2: the actual delete — called only after the user confirmed the sheet.
     private func performDelete() async {
+        guard mode == .photos else { return }
         // Re-entry guard: the sheet's ⌘⏎ can be delivered twice before its
         // teardown lands, and a doubled commit would book every deletion twice
         // in the audit log. Main-actor tasks run FIFO, so the first task's
@@ -1867,9 +1936,9 @@ struct ContentView: View {
 }
 
 /// The side-by-side review grid for one cluster.
-struct GroupReview: View {
+struct GroupReview<Model: GroupReviewModel>: View {
     let group: ReviewGroup
-    @ObservedObject var model: LibraryModel
+    @ObservedObject var model: Model
     let t: L10n
     // Pass 2a (FIX 2): measured content width for the justified-rows layout.
     // Owned by ContentView (see `galleryWidth`) so the ↑/↓ row-walk and the
@@ -1897,15 +1966,16 @@ struct GroupReview: View {
 
     /// Horizontal gap between frames in a row (and vertical gap between rows).
     /// Static: the keyboard handler needs the identical spacing to re-pack rows.
-    static let gallerySpacing: CGFloat = 8
+    static var gallerySpacing: CGFloat { 8 }
     private var gallerySpacing: CGFloat { Self.gallerySpacing }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    Text(t.clusterHeader(count: group.photos.count,
-                                         span: group.spanSec, delete: group.deletionIDs.count))
+                    Text(model.isFolderReview
+                         ? t.folderReviewCounts(count: group.photos.count, marked: group.deletionIDs.count)
+                         : t.clusterHeader(count: group.photos.count, span: group.spanSec, delete: group.deletionIDs.count))
                         .font(.callout).foregroundStyle(Color.reefTextDim)
                     if model.qualityAvailable {
                         Label(t.appleRanked(), systemImage: "wand.and.stars")
@@ -1972,14 +2042,15 @@ struct GroupReview: View {
                         .help(t.tipDeleteAllProtected())
                     } else {
                         Button { model.toggleDeleteAll(group: group.id) } label: {
-                            Label(group.deleteAll ? t.deletingAll() : t.deleteAll(),
+                            Label(model.isFolderReview ? t.folderMarkOthers(group.deleteAll)
+                                  : (group.deleteAll ? t.deletingAll() : t.deleteAll()),
                                   systemImage: group.deleteAll ? "trash.fill" : "trash")
                         }
                         .buttonStyle(.bordered)
                         .tint(group.deleteAll ? .reefRed : .reefTeal)
-                        .help(group.deleteAll && group.includeProtected
+                        .help(model.isFolderReview ? t.folderMarkOthersTip(group.deleteAll) : (group.deleteAll && group.includeProtected
                               ? t.tipDeleteAllIncludingProtected()
-                              : t.tipDeleteAll())
+                              : t.tipDeleteAll()))
                     }
                     Button { model.keepAll(group: group.id) } label: {
                         Label(group.keepAll ? t.keepingAll() : t.keepAll(),
@@ -2007,13 +2078,13 @@ struct GroupReview: View {
         // FIX C: confirmation alert before protected frames enter the deletion set.
         // The model is only updated when the user explicitly confirms — Cancel is a
         // full no-op so accidentally tapping "Include protected" is reversible.
-        .alert(t.deleteProtectedAlertTitle(), isPresented: $showDeleteProtectedAlert) {
-            Button(t.deleteProtectedAlertConfirm(), role: .destructive) {
+        .alert(model.isFolderReview ? t.folderProtectedTitle() : t.deleteProtectedAlertTitle(), isPresented: $showDeleteProtectedAlert) {
+            Button(model.isFolderReview ? t.folderMarkAnyway() : t.deleteProtectedAlertConfirm(), role: .destructive) {
                 model.setIncludeProtected(group: group.id, value: true)
             }
             Button(t.deleteProtectedAlertCancel(), role: .cancel) { }
         } message: {
-            Text(t.deleteProtectedAlertBody(group.protectedCount))
+            Text(model.isFolderReview ? t.folderProtectedBody(group.protectedCount) : t.deleteProtectedAlertBody(group.protectedCount))
         }
     }
 
@@ -2023,7 +2094,7 @@ struct GroupReview: View {
     /// pending display rotation. Tapping sets model.showSaveRotationConfirm = true;
     /// the actual confirmation alert is anchored at the top-level ContentView.
     @ViewBuilder private var saveRotationButton: some View {
-        if let focused = focusedFrame, model.rotation(for: focused) % 4 != 0 {
+        if !model.isFolderReview, let focused = focusedFrame, model.rotation(for: focused) % 4 != 0 {
             // Never offered for a frame that already carries the user's own
             // edits: saving would flatten them (PhotoKit hands back the RENDERED
             // version of an adjusted asset) and "Revert to Original" would then
@@ -2112,6 +2183,7 @@ struct GroupReview: View {
         // the color collision where "protected" and "interchangeable safe copy" both
         // showed amber despite having opposite meanings.
         let isExactSuggested = isExactDupeGroup && !keep && !p.isProtected
+            && (!model.isFolderReview || group.autoSeeded.contains(p.uuid))
         // Protected frames (favorite / edited / document) are never auto-deletable
         // — show them amber + lock/reason badges, never red.
         let border: Color = keep ? .reefGreen
@@ -2125,11 +2197,7 @@ struct GroupReview: View {
             // The thumbnail self-sizes to `box` and applies rotation correctly
             // (it swaps the pre-rotation layout box internally, so an odd turn is
             // never fill-cropped against the wrong shape).
-            AssetThumbnail(asset: model.asset(for: p.uuid),
-                           manager: model.imageManager,
-                           box: imageSize,
-                           quarterTurns: model.rotation(for: p.uuid),
-                           fill: true)   // fill the exact aspect-true box (no letterbox)
+            model.reviewThumbnail(for: p, box: imageSize)
                 .opacity(dimmed ? 0.34 : 1)
             badge(p: p, keep: keep, del: del, exactSuggested: isExactSuggested)
             // W1.5 (owner dogfood ruling): moved from bottom-leading — it was
@@ -2147,7 +2215,10 @@ struct GroupReview: View {
             }
             // Filename caption overlaid on a gradient strip so the card height
             // stays equal to the row height (justified rows need uniform height).
-            Text(p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
+                if let details = model.reviewDetails(for: p.uuid, t: t) { Text(details) }
+            }
                 .font(.caption2).lineLimit(1).truncationMode(.middle)
                 .foregroundStyle(Color.reefText)
                 .padding(.horizontal, 6).padding(.vertical, CVERSpacing.xs)
@@ -2205,8 +2276,8 @@ struct GroupReview: View {
         // frames ARE marked, and `tipExactDupe` is the only place that names
         // what the exact-duplicate comparison does and does not cover.
         .help(
-            isExactSuggested ? t.tipExactDupe()
-            : del ? "\(t.tipDelete()) · \(t.deleteWhy(deleteWhyReason(for: p)))"
+            isExactSuggested ? (model.isFolderReview ? t.folderExactTip() : t.tipExactDupe())
+            : del ? "\(model.isFolderReview ? t.folderMarkedTip() : t.tipDelete()) · \(t.deleteWhy(deleteWhyReason(for: p)))"
             : p.isProtected && isExactDupeGroup ? t.tipExactDupeProtected()
             : p.isProtected ? t.tipProtectedFrame()
             : keep ? keeperWhyTooltip(for: p, group: group, t: t)
@@ -2252,6 +2323,11 @@ struct GroupReview: View {
         if p.favorite   { parts.append(t.loupeFav()) }
         if p.edited     { parts.append(t.loupeEdited()) }
         if p.isDocument { parts.append(t.loupeDoc()) }
+        if model.isFolderReview {
+            if let details = model.reviewDetails(for: p.uuid, t: t) { parts.append(details) }
+            if model.uniqueMetadataIDs.contains(p.uuid) { parts.append(t.folderUniqueMetadata()) }
+            if p.isUnverifiable { parts.append(t.folderUnverifiable()) }
+        }
         return "\(fname) · \(parts.joined(separator: " · "))"
     }
 
@@ -2292,9 +2368,9 @@ struct GroupReview: View {
             // FIX #4 (slice 1): iCloud-eviction indicator — document classification
             // was skipped (original not on-device); the frame is left un-marked.
             if p.documentEvalDegraded {
-                chip(symbol: "icloud.slash", text: nil,
+                chip(symbol: model.isFolderReview ? "questionmark.circle" : "icloud.slash", text: nil,
                      Color.reefTextDim.opacity(0.9), Color.reefGround)
-                    .help(t.tipDocumentEvalDegraded())
+                    .help(model.isFolderReview ? t.folderUnverifiable() : t.tipDocumentEvalDegraded())
             }
             // Edit state UNREADABLE (no Full Disk Access with the sync-lane
             // breaker tripped, or a Photos library we could not confirm). The
@@ -2304,6 +2380,10 @@ struct GroupReview: View {
                 chip(symbol: "questionmark.circle", text: nil,
                      Color.reefAmber.opacity(0.9), Color(hex: 0x1a1203))
                     .help(t.tipEditedUndetermined())
+            }
+            if model.isFolderReview && model.uniqueMetadataIDs.contains(p.uuid) {
+                chip(symbol: "tag.fill", text: nil, .reefAmber, Color(hex: 0x1a1203))
+                    .help(t.folderUniqueMetadata())
             }
         }
         .padding(7)

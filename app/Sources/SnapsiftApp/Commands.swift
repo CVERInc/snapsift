@@ -6,9 +6,13 @@ import SwiftUI
 /// no snapsift window is key, which disables every item automatically.
 struct SnapsiftActions {
     var canScan: Bool
+    var canScanLookAlikes: Bool
+    var canScanSimilarSets: Bool
     var canRefineFaces: Bool
     var canWriteAlbums: Bool
     var canDelete: Bool
+    var canShowHistory: Bool
+    var isFolderMode: Bool
     /// True while a scan / face pass is actually running — the only time ⌘.
     /// has anything to stop.
     var canCancelScan: Bool
@@ -59,10 +63,10 @@ struct SnapsiftMenuCommands: Commands {
                 .disabled(actions?.canScan != true)
             Button(t.lookAlikes()) { actions?.scan(.lookAlikes) }
                 .keyboardShortcut("2", modifiers: .command)
-                .disabled(actions?.canScan != true)
+                .disabled(actions?.canScanLookAlikes != true)
             Button(t.similarSets()) { actions?.scan(.similarSets) }
                 .keyboardShortcut("3", modifiers: .command)
-                .disabled(actions?.canScan != true)
+                .disabled(actions?.canScanSimilarSets != true)
             Divider()
             Button(t.faces(false)) { actions?.refineFaces() }
                 .keyboardShortcut("4", modifiers: .command)
@@ -79,16 +83,16 @@ struct SnapsiftMenuCommands: Commands {
                 .keyboardShortcut(".", modifiers: .command)
                 .disabled(actions?.canCancelScan != true)
             Divider()
-            Button(t.menuDeleteMarked()) { actions?.deleteMarked() }
+            Button(actions?.isFolderMode == true ? t.folderMoveToTrash() : t.menuDeleteMarked()) { actions?.deleteMarked() }
                 .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(actions?.canDelete != true)
             Divider()
-            Button(t.historyTitle()) { actions?.showHistory() }
+            Button(actions?.isFolderMode == true ? t.folderHistory() : t.historyTitle()) { actions?.showHistory() }
                 .keyboardShortcut("y", modifiers: .command)
-                .disabled(actions == nil)
+                .disabled(actions?.canShowHistory != true)
             Button(t.helpTitle()) { actions?.toggleHelp() }
                 .keyboardShortcut("?", modifiers: .command)
-                .disabled(actions == nil)
+                .disabled(actions == nil || actions?.isFolderMode == true)
         }
     }
 }

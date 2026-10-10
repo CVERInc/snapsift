@@ -26,10 +26,10 @@ struct AlbumItem: Identifiable, Equatable {
 /// Reading is strictly non-destructive: we only fetch membership of the
 /// collection and never add, remove, or move assets.
 enum ScanSource: Equatable {
-    enum Kind { case photos, folder }
+    enum Kind: Hashable { case photos, folder }
 
-    /// Folder selection and wiring arrive with the folder source. All existing
-    /// working sets remain Photos-only, including their journal and snapshot.
+    /// The mode picker uses Kind; FolderLibraryModel owns folder working sets.
+    /// These PhotoKit scopes remain Photos-only, including their stores.
     var kind: Kind { .photos }
 
     case wholeLibrary

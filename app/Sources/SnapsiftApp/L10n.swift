@@ -1,5 +1,6 @@
 import Foundation
 import SnapsiftCore
+import SnapsiftFolder
 
 /// All user-facing strings, resolved for one ``Language``. Every message is an
 /// exhaustive `switch`, so the compiler refuses to build until a newly added
@@ -7,6 +8,325 @@ import SnapsiftCore
 struct L10n: Sendable {
     let language: Language
     init(_ language: Language) { self.language = language }
+
+    // MARK: Folder Mode
+
+    func modeLabel() -> String {
+        switch language {
+        case .en: return "Mode"
+        case .ja: return "モード"
+        case .zhTW: return "模式"
+        }
+    }
+    func photosMode() -> String {
+        switch language {
+        case .en: return "Photos"
+        case .ja: return "写真"
+        case .zhTW: return "照片圖庫"
+        }
+    }
+    func folderMode() -> String {
+        switch language {
+        case .en: return "Folders"
+        case .ja: return "フォルダ"
+        case .zhTW: return "資料夾"
+        }
+    }
+    func folderChoose() -> String {
+        switch language {
+        case .en: return "Choose folders…"
+        case .ja: return "フォルダを選択…"
+        case .zhTW: return "選擇資料夾⋯"
+        }
+    }
+    func folderChosen() -> String {
+        switch language {
+        case .en: return "Chosen folders"
+        case .ja: return "選択したフォルダ"
+        case .zhTW: return "已選資料夾"
+        }
+    }
+    func folderRemove() -> String {
+        switch language {
+        case .en: return "Remove folder from selection"
+        case .ja: return "選択からフォルダを外す"
+        case .zhTW: return "從選取清單移除資料夾"
+        }
+    }
+    func folderBookmarkStale() -> String {
+        switch language {
+        case .en: return "Saved folder access was stale and has been refreshed."
+        case .ja: return "保存したフォルダアクセスが古くなっていたため更新しました。"
+        case .zhTW: return "已儲存的資料夾存取書籤已過期，已重新整理。"
+        }
+    }
+    func folderUnavailable() -> String {
+        switch language {
+        case .en: return "Folder unavailable — reconnect its drive or choose it again."
+        case .ja: return "フォルダにアクセスできません。ドライブを接続するか、選び直してください。"
+        case .zhTW: return "無法存取資料夾，請重新連接磁碟或再次選取。"
+        }
+    }
+    func folderBookmarkError(_ detail: String) -> String {
+        switch language {
+        case .en: return "Could not save or read the chosen folders: \(detail)"
+        case .ja: return "選択したフォルダを保存または読み込みできませんでした：\(detail)"
+        case .zhTW: return "無法儲存或讀取已選資料夾：\(detail)"
+        }
+    }
+    func folderReviewTitle() -> String {
+        switch language {
+        case .en: return "Folder review"
+        case .ja: return "フォルダの確認"
+        case .zhTW: return "檢視資料夾照片"
+        }
+    }
+    func folderStart() -> String {
+        switch language {
+        case .en: return "Choose folders, then scan for duplicate and similar photos. Live Photo, RAW and sidecar members stay together."
+        case .ja: return "フォルダを選択し、重複・類似写真をスキャンしてください。Live Photo、RAW、サイドカーはまとめて扱います。"
+        case .zhTW: return "選擇資料夾後，掃描重複與相似照片。原況照片、RAW 與附屬檔案會以同一個項目處理。"
+        }
+    }
+    func folderNoGroups() -> String {
+        switch language {
+        case .en: return "No duplicate or similar groups found."
+        case .ja: return "重複・類似グループは見つかりませんでした。"
+        case .zhTW: return "未找到重複或相似的照片群組。"
+        }
+    }
+    func folderScanning() -> String {
+        switch language {
+        case .en: return "Scanning folders — comparing images and original bytes…"
+        case .ja: return "フォルダをスキャン中 — 画像と元ファイルを比較しています…"
+        case .zhTW: return "正在掃描資料夾，比對影像與原始檔案內容⋯"
+        }
+    }
+    func folderScanFinished(items: Int, groups: Int) -> String {
+        switch language {
+        case .en: return "Scanned \(items) items · \(groups) groups to review"
+        case .ja: return "\(items)項目をスキャン · 確認するグループは\(groups)件"
+        case .zhTW: return "已掃描 \(items) 個項目，有 \(groups) 組可供檢視"
+        }
+    }
+    func folderScanCancelled() -> String {
+        switch language {
+        case .en: return "Folder scan stopped."
+        case .ja: return "フォルダのスキャンを停止しました。"
+        case .zhTW: return "已停止資料夾掃描。"
+        }
+    }
+    func folderScanError(_ detail: String) -> String {
+        switch language {
+        case .en: return "Could not scan the chosen folders: \(detail)"
+        case .ja: return "選択したフォルダをスキャンできませんでした：\(detail)"
+        case .zhTW: return "無法掃描已選資料夾：\(detail)"
+        }
+    }
+    func folderErrorTitle() -> String {
+        switch language {
+        case .en: return "Folder access failed"
+        case .ja: return "フォルダアクセスに失敗"
+        case .zhTW: return "資料夾存取失敗"
+        }
+    }
+    func folderMembers(_ count: Int, kinds: String) -> String {
+        switch language {
+        case .en: return "\(count) member files · \(kinds)"
+        case .ja: return "\(count)個の構成ファイル · \(kinds)"
+        case .zhTW: return "\(count) 個成員檔案 · \(kinds)"
+        }
+    }
+    func folderUniqueMetadata() -> String {
+        switch language {
+        case .en: return "Finder tags or comment — never pre-marked"
+        case .ja: return "Finderタグまたはコメントあり — 自動マークしません"
+        case .zhTW: return "帶有 Finder 標籤或註解，不會預先標記"
+        }
+    }
+    func folderProtectedTitle() -> String {
+        switch language {
+        case .en: return "Mark protected items?"
+        case .ja: return "保護対象をマークしますか？"
+        case .zhTW: return "要標記受保護的項目嗎？"
+        }
+    }
+    func folderProtectedBody(_ count: Int) -> String {
+        switch language {
+        case .en: return "This overrides protection for \(count) edited photos or documents, including all member files and sidecars. Marking moves nothing. Removal requires a separate Trash review."
+        case .ja: return "編集済み写真・書類\(count)項目の保護を解除します。構成ファイルとサイドカーもすべて含まれます。マークだけでは移動しません。ゴミ箱への移動には別の確認が必要です。"
+        case .zhTW: return "這會覆寫 \(count) 個已編輯照片或文件的保護，包含所有成員檔案與附屬檔案。標記不會移動任何檔案，移至垃圾桶前仍需另行確認。"
+        }
+    }
+    func folderMarkAnyway() -> String {
+        switch language {
+        case .en: return "Mark Anyway"
+        case .ja: return "それでもマーク"
+        case .zhTW: return "仍然標記"
+        }
+    }
+    func folderExactTip() -> String {
+        switch language {
+        case .en: return "Byte-identical single files in the same folder — suggested for Trash review. Finder tags/comments and protection are checked before suggesting a mark."
+        case .ja: return "同じフォルダ内のバイト一致した単独ファイルです。ゴミ箱への移動候補として提案しています。マークを提案する前にFinderタグ・コメントと保護状態を確認します。"
+        case .zhTW: return "同一資料夾內逐位元組相同的單一檔案，建議列入垃圾桶移除前的檢視。預先標記前會檢查 Finder 標籤、註解與保護狀態。"
+        }
+    }
+    func folderMarkedTip() -> String {
+        switch language {
+        case .en: return "Marked for Trash review — click to keep instead"
+        case .ja: return "ゴミ箱への移動候補 — クリックで残す"
+        case .zhTW: return "已標記供移至垃圾桶前檢視，按一下可改為保留"
+        }
+    }
+    func folderMarkOthers(_ marked: Bool) -> String {
+        switch language {
+        case .en: return marked ? "Others marked" : "Mark others"
+        case .ja: return marked ? "他の写真をマーク済み" : "他の写真をマーク"
+        case .zhTW: return marked ? "其餘已標記" : "標記其餘照片"
+        }
+    }
+    func folderMarkOthersTip(_ marked: Bool) -> String {
+        switch language {
+        case .en: return marked ? "Clear this group's marks" : "Mark eligible photos except the keeper. Protected and unclassifiable items stay unmarked; no files move."
+        case .ja: return marked ? "このグループのマークを解除" : "残す写真以外の対象をマークします。保護対象・分類不能な項目はマークせず、ファイルも移動しません。"
+        case .zhTW: return marked ? "清除此群組的標記" : "標記保留照片以外的可移除項目。受保護或無法判定的項目不會標記，也不會移動任何檔案。"
+        }
+    }
+    func folderReviewCounts(count: Int, marked: Int) -> String {
+        switch language {
+        case .en: return "Keep \(max(count - marked, 0)) · marked \(marked)"
+        case .ja: return "残す \(max(count - marked, 0)) · マーク \(marked)"
+        case .zhTW: return "保留 \(max(count - marked, 0)) · 標記 \(marked)"
+        }
+    }
+    func folderUnverifiable() -> String {
+        switch language {
+        case .en: return "Could not classify this image — protected and cannot be marked."
+        case .ja: return "この画像を分類できませんでした。保護され、マークできません。"
+        case .zhTW: return "無法判定此影像，已保護且無法標記。"
+        }
+    }
+    func folderCrossDuplicates() -> String {
+        switch language {
+        case .en: return "Cross-folder duplicates"
+        case .ja: return "別フォルダの重複"
+        case .zhTW: return "跨資料夾重複項目"
+        }
+    }
+    func folderCrossExplanation() -> String {
+        switch language {
+        case .en: return "Identical primary files in different folders. Never pre-marked; companion files are not byte-verified. Select a path to review."
+        case .ja: return "別フォルダに同一の主ファイルがあります。自動マークはしません。付随ファイルはバイト一致を確認していません。パスを選んで確認してください。"
+        case .zhTW: return "不同資料夾中有內容相同的主要檔案，不會預先標記；附屬檔案尚未逐位元組驗證。選取路徑即可檢視。"
+        }
+    }
+    func folderVolumeUnknown() -> String {
+        switch language {
+        case .en: return "Unknown volume"
+        case .ja: return "不明なボリューム"
+        case .zhTW: return "未知磁碟區"
+        }
+    }
+    func folderVolumeSupported() -> String {
+        switch language {
+        case .en: return "Trash supported · removal coming in this build"
+        case .ja: return "ゴミ箱対応 · このビルドでの移動機能は近日追加"
+        case .zhTW: return "支援垃圾桶，此版本將加入移至垃圾桶功能"
+        }
+    }
+    func folderScanOnly(_ reason: VolumeCapabilityReason) -> String {
+        switch reason {
+        case .networkVolume:
+            switch language {
+            case .en: return "Scan only — network volumes do not have confirmed Trash support. Removal disabled."
+            case .ja: return "スキャンのみ — ネットワークボリュームのゴミ箱対応は未確認です。削除は無効です。"
+            case .zhTW: return "僅供掃描，網路磁碟區未確認支援垃圾桶，已停用移除功能。"
+            }
+        case .readOnly:
+            switch language {
+            case .en: return "Scan only — this volume is read-only. Removal disabled."
+            case .ja: return "スキャンのみ — このボリュームは読み取り専用です。削除は無効です。"
+            case .zhTW: return "僅供掃描，此磁碟區為唯讀，已停用移除功能。"
+            }
+        case .unsupportedFilesystemType:
+            switch language {
+            case .en: return "Scan only — Trash support is unconfirmed for this filesystem. Removal disabled."
+            case .ja: return "スキャンのみ — このファイルシステムのゴミ箱対応は未確認です。削除は無効です。"
+            case .zhTW: return "僅供掃描，此檔案系統未確認支援垃圾桶，已停用移除功能。"
+            }
+        case .signalsUnavailable:
+            switch language {
+            case .en: return "Scan only — volume capabilities could not be confirmed. Removal disabled."
+            case .ja: return "スキャンのみ — ボリュームの機能を確認できませんでした。削除は無効です。"
+            case .zhTW: return "僅供掃描，無法確認此磁碟區的功能，已停用移除功能。"
+            }
+        }
+    }
+    func folderMoveToTrash() -> String {
+        switch language {
+        case .en: return "Move to Trash"
+        case .ja: return "ゴミ箱に移動"
+        case .zhTW: return "移至垃圾桶"
+        }
+    }
+    func folderHistory() -> String {
+        switch language {
+        case .en: return "Folder history"
+        case .ja: return "フォルダの履歴"
+        case .zhTW: return "資料夾歷史紀錄"
+        }
+    }
+    func folderComing() -> String {
+        switch language {
+        case .en: return "Trash removal, folder history and Put Back are coming in this build."
+        case .ja: return "ゴミ箱への移動、フォルダの履歴、元に戻す機能はこのビルドで近日追加予定です。"
+        case .zhTW: return "此版本將加入移至垃圾桶、資料夾歷史紀錄與放回原處功能。"
+        }
+    }
+    func folderDiscard() -> String {
+        switch language {
+        case .en: return "Discard folder review"
+        case .ja: return "フォルダの確認結果を破棄"
+        case .zhTW: return "捨棄資料夾檢視結果"
+        }
+    }
+    func folderDiscardBody(_ count: Int) -> String {
+        switch language {
+        case .en: return "This discards the current folder review and \(count) pending marks. Scan again to rebuild the review."
+        case .ja: return "現在のフォルダ確認結果と未確定のマーク\(count)件を破棄します。再スキャンすると確認結果を作り直せます。"
+        case .zhTW: return "這會捨棄目前的資料夾檢視結果與 \(count) 個尚未執行的標記。重新掃描即可再次檢視。"
+        }
+    }
+    func folderSkipped(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) files or entries could not be scanned:"
+        case .ja: return "\(count)件のファイル・項目をスキャンできませんでした："
+        case .zhTW: return "有 \(count) 個檔案或項目無法掃描："
+        }
+    }
+    func folderIssue(_ reason: FolderEnumerationIssue.Reason) -> String {
+        switch reason {
+        case .unreadable:
+            switch language {
+            case .en: return "Unreadable"
+            case .ja: return "読み込み不可"
+            case .zhTW: return "無法讀取"
+            }
+        case .invalidImage:
+            switch language {
+            case .en: return "Invalid image"
+            case .ja: return "無効な画像"
+            case .zhTW: return "無效的影像檔案"
+            }
+        case .ambiguousMembers:
+            switch language {
+            case .en: return "Ambiguous companion files"
+            case .ja: return "付随ファイルを特定できません"
+            case .zhTW: return "無法確認附屬檔案的配對關係"
+            }
+        }
+    }
 
     // MARK: source picker
 

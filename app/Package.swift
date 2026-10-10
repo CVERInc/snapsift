@@ -33,17 +33,23 @@ let package = Package(
         // SwiftUI app: PhotoKit's escaping, non-Sendable callbacks fit the
         // tools-5.9 default (Swift 5) language mode cleanly.
         .executableTarget(name: "SnapsiftApp", dependencies: [
+            "SnapsiftAppSupport",
             .product(name: "SnapsiftCore", package: "snapsift"),
             .product(name: "SnapsiftVision", package: "snapsift"),
             .product(name: "SnapsiftPhotoKit", package: "snapsift"),
+            .product(name: "SnapsiftFolder", package: "snapsift"),
             .product(name: "Signet", package: "signet"),
             // Sparkle and its call sites are macOS-only.
             .product(name: "Sparkle", package: "Sparkle", condition: .when(platforms: [.macOS])),
         ]),
         .executableTarget(name: "SnapsiftTests", dependencies: [
+            "SnapsiftAppSupport",
             .product(name: "SnapsiftCore", package: "snapsift"),
             .product(name: "SnapsiftVision", package: "snapsift"),
             .product(name: "SnapsiftFolder", package: "snapsift"),
+        ]),
+        .target(name: "SnapsiftAppSupport", dependencies: [
+            .product(name: "SnapsiftCore", package: "snapsift"),
         ]),
         // Live-machine harness (`swift run SnapsiftLiveTests`): exercises the
         // REAL PhotoKit/Vision/sidecar paths against dedicated throwaway assets
