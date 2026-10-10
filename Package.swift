@@ -16,6 +16,6 @@ let package = Package(
         .target(name: "SnapsiftCore"),
         .target(name: "SnapsiftVision", dependencies: ["SnapsiftCore"]),
         .target(name: "SnapsiftPhotoKit", dependencies: ["SnapsiftCore", "SnapsiftVision"]),
-        .target(name: "SnapsiftFolder", dependencies: ["SnapsiftCore"]),
+        .target(name: "SnapsiftFolder", dependencies: ["SnapsiftCore", "SnapsiftVision"]),
     ]
 )

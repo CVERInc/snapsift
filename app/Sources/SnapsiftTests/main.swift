@@ -2601,6 +2601,7 @@ func checkCommitOrchestration() async {
 await checkCommitOrchestration()
 await checkExactDuplicatePass()
 await checkImageProviderSeam()
+await checkFolderSource()
 
 print("Folder volume capability")
 do {
