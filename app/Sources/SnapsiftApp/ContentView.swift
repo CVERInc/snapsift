@@ -2100,6 +2100,9 @@ struct GroupReview<Model: GroupReviewModel>: View {
         }
         .background(Color.reefGround)
         .navigationTitle(sectionTitle)
+        .task(id: group.id) {
+            await model.loadReviewDetails(for: group.photos.map(\.uuid))
+        }
         // FIX C: confirmation alert before protected frames enter the deletion set.
         // The model is only updated when the user explicitly confirms — Cancel is a
         // full no-op so accidentally tapping "Include protected" is reversible.
@@ -2359,6 +2362,8 @@ struct GroupReview<Model: GroupReviewModel>: View {
             if let details = model.reviewDetails(for: p.uuid, t: t) { parts.append(details) }
             if model.uniqueMetadataIDs.contains(p.uuid) { parts.append(t.folderUniqueMetadata()) }
             if p.isUnverifiable { parts.append(t.folderUnverifiable()) }
+        } else if let details = model.reviewDetails(for: p.uuid, t: t) {
+            parts.append(details)
         }
         return "\(fname) · \(parts.joined(separator: " · "))"
     }

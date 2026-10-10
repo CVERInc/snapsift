@@ -14,6 +14,7 @@ protocol GroupReviewModel: ObservableObject {
     func displayAspect(for photo: Photo) -> Double
     func reviewThumbnail(for photo: Photo, box: CGSize) -> AnyView
     func reviewDetails(for id: String, t: L10n) -> String?
+    func loadReviewDetails(for ids: [String]) async
     func reviewFormat(for id: String) -> FolderReviewFormat?
     func promote(group: ReviewGroup.ID, to: String)
     func keepAll(group: ReviewGroup.ID)
@@ -22,6 +23,7 @@ protocol GroupReviewModel: ObservableObject {
 }
 
 extension GroupReviewModel {
+    func loadReviewDetails(for ids: [String]) async { }
     func reviewFormat(for id: String) -> FolderReviewFormat? { nil }
 }
 
@@ -31,5 +33,4 @@ extension LibraryModel: GroupReviewModel {
         AnyView(AssetThumbnail(asset: asset(for: photo.uuid), manager: imageManager,
                                box: box, quarterTurns: rotation(for: photo.uuid), fill: true))
     }
-    func reviewDetails(for id: String, t: L10n) -> String? { nil }
 }

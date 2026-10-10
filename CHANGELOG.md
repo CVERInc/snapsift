@@ -6,6 +6,10 @@ reserved for the first signed and notarized build.
 ## [Unreleased]
 
 ### Added
+- **Album names in Apple Photos review.** Review tiles and the pre-commit
+  review show user album names in English, Japanese and Taiwan Traditional
+  Chinese, excluding snapsift's organizational albums. Names load only when
+  a group or pre-commit review opens; ranking and marking are unchanged.
 - **Folder Mode scanning, Trash removal and Put Back.** Choose multiple folders with saved
   access, compare duplicate and similar photos, and review grouped Live Photo,
   RAW + JPEG and sidecar files together. Cross-folder duplicates remain

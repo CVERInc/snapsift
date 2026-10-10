@@ -59,7 +59,7 @@ struct PreCommitReviewSheet: View {
     let totalProtected: Int   // total protected frames across all groups being deleted
     let noSurvivorCount: Int  // groups where every frame goes to Recently Deleted
     let withdrawnCount: Int   // groups withheld: nothing they keep still exists
-    let model: LibraryModel
+    @ObservedObject var model: LibraryModel
     let t: L10n
     let onConfirm: () -> Void
     let onCancel: () -> Void
@@ -190,6 +190,12 @@ struct PreCommitReviewSheet: View {
         .desktopSheetFrame(minWidth: 560, minHeight: 520, maxWidth: 700, maxHeight: 860)
         .background(Color.reefGround)
         .preferredColorScheme(.dark)
+        .task {
+            let ids = groups.flatMap { group in
+                [group.keeper?.uuid].compactMap { $0 } + group.toRemove.map(\.uuid)
+            }
+            await model.loadReviewDetails(for: ids)
+        }
     }
 }
 
@@ -197,7 +203,7 @@ struct PreCommitReviewSheet: View {
 
 private struct GroupPreCommitRow: View {
     let group: PreCommitGroup
-    let model: LibraryModel
+    @ObservedObject var model: LibraryModel
     let t: L10n
 
     var body: some View {
@@ -250,6 +256,11 @@ private struct GroupPreCommitRow: View {
                         Text(keeperWhyLabel(group.keeperReason))
                             .font(.caption2)
                             .foregroundStyle(Color.reefTextDim)
+                        if let details = model.reviewDetails(for: keeper.uuid, t: t) {
+                            Text(details)
+                                .font(.caption2)
+                                .foregroundStyle(Color.reefTextDim)
+                        }
                     }
 
                     Spacer()
@@ -282,45 +293,25 @@ private struct GroupPreCommitRow: View {
                         // stay scroll-reachable (the sheet's contract), just lazy.
                         LazyHStack(spacing: 6) {
                             ForEach(group.toRemove) { p in
-                                ZStack {
-                                    AssetThumbnail(asset: model.asset(for: p.uuid),
-                                                   manager: model.imageManager,
-                                                   box: CGSize(width: 52, height: 52),
-                                                   quarterTurns: model.rotation(for: p.uuid),
-                                                   fill: true)
-                                        .opacity(0.34)
-                                        .clipShape(RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)
-                                                .strokeBorder(
-                                                    p.isProtected ? Color.reefAmber : Color.reefRed,
-                                                    lineWidth: 1.5
-                                                )
-                                        )
-                                    if p.isProtected {
-                                        Image(systemName: "lock.fill")
-                                            .font(.footnote.weight(.bold))
-                                            .foregroundStyle(Color.reefAmber)
-                                    } else if group.uniqueMetadataIDs.contains(p.uuid) {
-                                        // Same pixels, different library entry:
-                                        // this copy carries albums or a caption
-                                        // the keeper doesn't. The two thumbnails
-                                        // are identical, so the badge is the
-                                        // only way the user can tell.
-                                        Image(systemName: "tag.fill")
-                                            .font(.footnote.weight(.bold))
-                                            .foregroundStyle(Color.reefAmber)
+                                let details = model.reviewDetails(for: p.uuid, t: t)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    removalThumbnail(p)
+                                    if let details {
+                                        Text(details)
+                                            .font(.caption2)
+                                            .foregroundStyle(Color.reefTextDim)
+                                            .lineLimit(3)
                                     }
                                 }
-                                .frame(width: 52, height: 52)
+                                .frame(width: details == nil ? 52 : 160, alignment: .leading)
                                 // These tiles are the removal list itself — a
-                                // VoiceOver user must hear WHICH photo, not
-                                // "image": speak the filename per tile.
+                                // VoiceOver user must hear WHICH photo and its albums.
                                 .accessibilityElement(children: .ignore)
                                 .accessibilityLabel(
                                     (p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
                                     + (group.uniqueMetadataIDs.contains(p.uuid)
-                                       ? " — " + t.preCommitUniqueMetadata() : ""))
+                                       ? " — " + t.preCommitUniqueMetadata() : "")
+                                    + (details.map { " — " + $0 } ?? ""))
                             }
                         }
                     }
@@ -334,6 +325,40 @@ private struct GroupPreCommitRow: View {
             RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous)
                 .strokeBorder(Color.reefBorder, lineWidth: 1)
         )
+    }
+
+    private func removalThumbnail(_ p: Photo) -> some View {
+        ZStack {
+            AssetThumbnail(asset: model.asset(for: p.uuid),
+                           manager: model.imageManager,
+                           box: CGSize(width: 52, height: 52),
+                           quarterTurns: model.rotation(for: p.uuid),
+                           fill: true)
+                .opacity(0.34)
+                .clipShape(RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)
+                        .strokeBorder(
+                            p.isProtected ? Color.reefAmber : Color.reefRed,
+                            lineWidth: 1.5
+                        )
+                )
+            if p.isProtected {
+                Image(systemName: "lock.fill")
+                    .font(.footnote.weight(.bold))
+                    .foregroundStyle(Color.reefAmber)
+            } else if group.uniqueMetadataIDs.contains(p.uuid) {
+                // Same pixels, different library entry:
+                // this copy carries albums or a caption
+                // the keeper doesn't. The two thumbnails
+                // are identical, so the badge is the
+                // only way the user can tell.
+                Image(systemName: "tag.fill")
+                    .font(.footnote.weight(.bold))
+                    .foregroundStyle(Color.reefAmber)
+            }
+        }
+        .frame(width: 52, height: 52)
     }
 
     private func keeperWhyLabel(_ reason: KeeperReason) -> String {

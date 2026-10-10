@@ -2734,6 +2734,7 @@ do {
 
 folderAppIntegrationTests(check)
 folderReviewFormatTests(check)
+reviewAlbumNamesTests(check)
 await folderRemovalAppTests(check)
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")

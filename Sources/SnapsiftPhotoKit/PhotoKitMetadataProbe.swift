@@ -2,6 +2,22 @@ import Foundation
 import Photos
 import SnapsiftCore
 
+/// Presentation-only membership lookup. nil means the lane could not read it;
+/// an empty array means there are no named user albums to display.
+public func photoKitUserAlbumNames(for asset: PHAsset,
+                                  snapsiftTitles: Set<String>) async -> [String]? {
+    guard !Task.isCancelled else { return nil }
+    return await PhotoKitSyncLane.call {
+        let collections = PHAssetCollection.fetchAssetCollectionsContaining(
+            asset, with: .album, options: nil)
+        var titles: [String] = []
+        collections.enumerateObjects { collection, _, _ in
+            if let title = collection.localizedTitle, !title.isEmpty { titles.append(title) }
+        }
+        return userAlbumNames(titles: titles, snapsiftTitles: snapsiftTitles)
+    }
+}
+
 /// Public PhotoKit user-album membership plus the app's verified description
 /// query. The macOS sidecar stays app-side; unreadable facts remain nil.
 public struct PhotoKitMetadataProbe: UniqueMetadataProbe {

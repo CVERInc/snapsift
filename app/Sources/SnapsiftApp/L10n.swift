@@ -10,6 +10,17 @@ struct L10n: Sendable {
     let language: Language
     init(_ language: Language) { self.language = language }
 
+    // MARK: Photos review
+
+    func reviewAlbums(_ names: [String]) -> String? {
+        guard let summary = reviewAlbumNamesSummary(names) else { return nil }
+        switch language {
+        case .en: return "In albums: \(summary)"
+        case .ja: return "アルバム: \(summary)"
+        case .zhTW: return "所在相簿：\(summary)"
+        }
+    }
+
     // MARK: Folder Mode
 
     func modeLabel() -> String {

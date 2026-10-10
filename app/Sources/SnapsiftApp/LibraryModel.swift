@@ -85,6 +85,45 @@ final class LibraryModel: ObservableObject {
     /// Empty until `loadAlbums()` is called.
     @Published var albums: [AlbumItem] = []
 
+    private enum ReviewAlbums {
+        case read([String])
+        case unavailable
+    }
+    @Published private var reviewAlbums: [String: ReviewAlbums] = [:]
+    private var reviewAlbumsGeneration = 0
+
+    /// Called only by an opened gallery group or the Photos pre-commit sheet.
+    /// The view owns cancellation; an in-flight lane call may finish after it
+    /// leaves, but cannot publish into a cancelled review or a new scan.
+    func loadReviewDetails(for ids: [String]) async {
+        guard !isScanning, !Task.isCancelled else { return }
+        let generation = reviewAlbumsGeneration
+        let snapsiftTitles = AlbumWriter.allSnapsiftTitles
+        for id in ids {
+            guard !Task.isCancelled, !isScanning,
+                  generation == reviewAlbumsGeneration else { return }
+            guard reviewAlbums[id] == nil else { continue }
+            guard let asset = asset(for: id) else {
+                reviewAlbums[id] = .unavailable
+                continue
+            }
+            let names = await photoKitUserAlbumNames(for: asset, snapsiftTitles: snapsiftTitles)
+            guard !Task.isCancelled, !isScanning,
+                  generation == reviewAlbumsGeneration else { return }
+            reviewAlbums[id] = names.map { .read($0) } ?? .unavailable
+        }
+    }
+
+    func reviewDetails(for id: String, t: L10n) -> String? {
+        guard case .read(let names)? = reviewAlbums[id] else { return nil }
+        return t.reviewAlbums(names)
+    }
+
+    private func invalidateReviewAlbums() {
+        reviewAlbumsGeneration += 1
+        reviewAlbums = [:]
+    }
+
     /// Max dHash Hamming distance for two burst frames to count as the same
     /// scene. Generous enough to keep real bursts (slight motion) together,
     /// tight enough to split unrelated shots.
@@ -495,6 +534,7 @@ final class LibraryModel: ObservableObject {
             return
         }
 
+        invalidateReviewAlbums()
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
         groups = []
         categories = []
@@ -938,6 +978,7 @@ final class LibraryModel: ObservableObject {
             return
         }
 
+        invalidateReviewAlbums()
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
         groups = []
         categories = []
@@ -1035,6 +1076,7 @@ final class LibraryModel: ObservableObject {
             return
         }
 
+        invalidateReviewAlbums()
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
         groups = []
         categories = []
