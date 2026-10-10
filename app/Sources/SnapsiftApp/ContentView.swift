@@ -5,7 +5,7 @@ import Signet
 
 struct ContentView: View {
     @StateObject private var model = LibraryModel()
-    @StateObject private var folderModel = FolderLibraryModel()
+    @ObservedObject var folderModel: FolderLibraryModel
     @State private var mode: ScanSource.Kind = .photos
     @State private var photosInitialized = false
     @State private var photosRestoring = false
@@ -142,9 +142,26 @@ struct ContentView: View {
                     Text(t.folderMode()).tag(ScanSource.Kind.folder)
                 }
                 .pickerStyle(.segmented)
-                .disabled(photosRestoring || savingRotation || model.isScanning || model.refiningFaces || model.isWritingAlbums || deleting || folderModel.isScanning)
+                .disabled(photosRestoring || savingRotation || model.isScanning || model.refiningFaces || model.isWritingAlbums || deleting || folderModel.isScanning || folderModel.isBusy)
             }
             if mode == .folder { ToolbarItem { languageMenu } }
+        }
+        .onAppear { folderModel.reconcileAtLaunch(t) }
+        .safeAreaInset(edge: .top) {
+            if let recovery = folderModel.recoveryMessage {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(Color.reefAmber)
+                    Text(recovery).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button(t.folderHistory()) {
+                        mode = .folder
+                        folderModel.presentHistory(t)
+                    }.disabled(folderModel.isBusy || folderModel.isScanning || photosRestoring || savingRotation || deleting || model.isScanning || model.refiningFaces || model.isWritingAlbums)
+                    Button { folderModel.recoveryMessage = nil } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).help(t.historyClose()).accessibilityLabel(t.historyClose())
+                }
+                .padding(CVERSpacing.md).background(Color.reefDeep)
+            }
         }
         .focusedSceneValue(\.snapsiftActions, mode == .folder || model.auth == .authorized ? menuBridge : nil)
         #if os(macOS)
@@ -327,6 +344,7 @@ struct ContentView: View {
             }
         }
         .toolbar { toolbar }
+        .disabled(folderModel.isBusy)
         // Menu-bar bridge: publishes the primary actions + their enablement to
         // SnapsiftMenuCommands. The ⌘-shortcuts live on the menu items only.
         .safeAreaInset(edge: .bottom) { statusBar }
@@ -509,7 +527,7 @@ struct ContentView: View {
     /// Every scan trigger routes through here: with pending user marks the
     /// scan waits behind a confirmation, otherwise it starts immediately.
     private func requestScan(_ kind: LibraryModel.ScanKind) {
-        guard mode == .photos else { return }
+        guard mode == .photos, !folderModel.isBusy else { return }
         if model.userMarkCount > 0 {
             confirmScanKind = kind
         } else {
@@ -595,16 +613,16 @@ struct ContentView: View {
         if mode == .folder {
             return SnapsiftActions(
                 canScan: folderModel.canScan, canScanLookAlikes: false, canScanSimilarSets: false,
-                canRefineFaces: false, canWriteAlbums: false, canDelete: false,
-                canShowHistory: false, isFolderMode: true,
+                canRefineFaces: false, canWriteAlbums: false, canDelete: folderModel.canReviewRemoval,
+                canShowHistory: !folderModel.isBusy && !folderModel.isScanning, isFolderMode: true,
                 canCancelScan: folderModel.isScanning,
                 scan: { kind in if kind == .burst { requestFolderScan() } },
-                refineFaces: {}, writeAlbums: {}, deleteMarked: {},
-                cancelScan: { folderModel.cancelScan() }, showHistory: {}, toggleHelp: {},
+                refineFaces: {}, writeAlbums: {}, deleteMarked: { folderModel.presentRemovalReview() },
+                cancelScan: { folderModel.cancelScan() }, showHistory: { folderModel.presentHistory(t) }, toggleHelp: {},
                 canCheckForUpdates: updateChecker.checkAvailable,
                 checkForUpdates: { updateChecker.check() })
         }
-        let busy = model.isScanning || model.refiningFaces || model.isWritingAlbums || deleting
+        let busy = model.isScanning || model.refiningFaces || model.isWritingAlbums || deleting || folderModel.isBusy
         return SnapsiftActions(
             canScan: !busy,
             canScanLookAlikes: !busy,
@@ -1786,7 +1804,7 @@ struct ContentView: View {
     /// Step 1: build the pre-commit data and show the review sheet.
     /// The actual PHPhotoLibrary delete only happens after the user confirms.
     private func runDelete() async {
-        guard mode == .photos else { return }
+        guard mode == .photos, !folderModel.isBusy else { return }
         // The .disabled gates above cover the buttons; this covers the ⌘⌫
         // shortcut and any future caller. isWritingAlbums included: confirming a
         // delete during an album write used to produce a sheet whose Confirm did
@@ -1842,7 +1860,7 @@ struct ContentView: View {
 
     /// Step 2: the actual delete — called only after the user confirmed the sheet.
     private func performDelete() async {
-        guard mode == .photos else { return }
+        guard mode == .photos, !folderModel.isBusy else { return }
         // Re-entry guard: the sheet's ⌘⏎ can be delivered twice before its
         // teardown lands, and a doubled commit would book every deletion twice
         // in the audit log. Main-actor tasks run FIFO, so the first task's

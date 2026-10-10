@@ -60,6 +60,7 @@ extension EnvironmentValues {
 
 @main
 struct SnapsiftApp: App {
+    @StateObject private var folderModel = FolderLibraryModel()
     #if os(macOS)
     // Sparkle 2 updater, owned by the App (not a view) so it outlives any
     // window opening/closing. `startingUpdater: true` makes it perform
@@ -90,7 +91,7 @@ struct SnapsiftApp: App {
     var body: some Scene {
         #if os(macOS)
         WindowGroup("snapsift") {
-            ContentView()
+            ContentView(folderModel: folderModel)
                 .cverTheme(ReefTheme())
                 .environment(\.snapsiftUpdateChecker, SnapsiftUpdateChecker(
                     checkAvailable: updaterState.canCheckForUpdates,
@@ -108,7 +109,7 @@ struct SnapsiftApp: App {
         }
         #else
         WindowGroup("snapsift") {
-            ContentView()
+            ContentView(folderModel: folderModel)
                 .cverTheme(ReefTheme())
         }
         #endif

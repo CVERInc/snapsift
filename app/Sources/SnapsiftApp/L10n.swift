@@ -1,6 +1,7 @@
 import Foundation
 import SnapsiftCore
 import SnapsiftFolder
+import SnapsiftAppSupport
 
 /// All user-facing strings, resolved for one ``Language``. Every message is an
 /// exhaustive `switch`, so the compiler refuses to build until a newly added
@@ -64,7 +65,7 @@ struct L10n: Sendable {
         switch language {
         case .en: return "Folder unavailable — reconnect its drive or choose it again."
         case .ja: return "フォルダにアクセスできません。ドライブを接続するか、選び直してください。"
-        case .zhTW: return "無法存取資料夾，請重新連接磁碟或再次選取。"
+        case .zhTW: return "資料夾操作，請重新連接磁碟或再次選取。"
         }
     }
     func folderBookmarkError(_ detail: String) -> String {
@@ -125,7 +126,7 @@ struct L10n: Sendable {
     }
     func folderErrorTitle() -> String {
         switch language {
-        case .en: return "Folder access failed"
+        case .en: return "Folder operation"
         case .ja: return "フォルダアクセスに失敗"
         case .zhTW: return "資料夾存取失敗"
         }
@@ -230,9 +231,9 @@ struct L10n: Sendable {
     }
     func folderVolumeSupported() -> String {
         switch language {
-        case .en: return "Trash supported · removal coming in this build"
-        case .ja: return "ゴミ箱対応 · このビルドでの移動機能は近日追加"
-        case .zhTW: return "支援垃圾桶，此版本將加入移至垃圾桶功能"
+        case .en: return "Moving to Trash is supported"
+        case .ja: return "ゴミ箱への移動に対応しています"
+        case .zhTW: return "支援移至垃圾桶"
         }
     }
     func folderScanOnly(_ reason: VolumeCapabilityReason) -> String {
@@ -277,13 +278,6 @@ struct L10n: Sendable {
         case .zhTW: return "資料夾歷史紀錄"
         }
     }
-    func folderComing() -> String {
-        switch language {
-        case .en: return "Trash removal, folder history and Put Back are coming in this build."
-        case .ja: return "ゴミ箱への移動、フォルダの履歴、元に戻す機能はこのビルドで近日追加予定です。"
-        case .zhTW: return "此版本將加入移至垃圾桶、資料夾歷史紀錄與放回原處功能。"
-        }
-    }
     func folderDiscard() -> String {
         switch language {
         case .en: return "Discard folder review"
@@ -324,6 +318,480 @@ struct L10n: Sendable {
             case .en: return "Ambiguous companion files"
             case .ja: return "付随ファイルを特定できません"
             case .zhTW: return "無法確認附屬檔案的配對關係"
+            }
+        }
+    }
+
+    // MARK: Folder removal and restore
+
+    func folderReviewRemovalTitle(_ count: Int) -> String {
+        switch language {
+        case .en: return "Review \(count) marked items for Trash"
+        case .ja: return "ゴミ箱に移動するマーク済み\(count)件を確認"
+        case .zhTW: return "檢視 \(count) 個待移至垃圾桶的標記項目"
+        }
+    }
+    func folderReviewEligible(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) items can be moved. Files will be checked again before moving."
+        case .ja: return "\(count)件を移動できます。移動前にファイルをもう一度確認します。"
+        case .zhTW: return "有 \(count) 個項目可移動，移動前會再次檢查檔案。"
+        }
+    }
+    func folderReviewRemovalSubtitle(_ bytes: Int) -> String {
+        switch language {
+        case .en: return "\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)) in marked items. Put Back is available until the Trash is emptied."
+        case .ja: return "マークした項目は\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))です。ゴミ箱を空にするまで元に戻せます。"
+        case .zhTW: return "已標記項目共 \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))。清空垃圾桶前可放回原處。"
+        }
+    }
+    func folderVolumeTotal(_ count: Int, bytes: Int) -> String {
+        switch language {
+        case .en: return "\(count) items · \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))"
+        case .ja: return "\(count)件 · \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))"
+        case .zhTW: return "\(count) 個項目 · \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))"
+        }
+    }
+    func folderExternalTrashSpace() -> String {
+        switch language {
+        case .en: return "Space on this volume is freed only after its Trash is emptied."
+        case .ja: return "このボリュームの空き容量が増えるのは、ゴミ箱を空にした後です。"
+        case .zhTW: return "此磁碟區的空間只有在清空垃圾桶後才會釋出。"
+        }
+    }
+    func folderNoSurvivorWarning(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) groups will have no item left. All their files will move to Trash."
+        case .ja: return "\(count)グループは項目が残りません。すべてのファイルをゴミ箱に移動します。"
+        case .zhTW: return "有 \(count) 個群組將不保留任何項目，所有檔案都會移至垃圾桶。"
+        }
+    }
+    func folderNoSurvivorAcknowledge() -> String {
+        switch language {
+        case .en: return "I understand that these groups will have no item left."
+        case .ja: return "これらのグループには項目が残らないことを理解しました。"
+        case .zhTW: return "我了解這些群組將不保留任何項目。"
+        }
+    }
+    func folderNoSurvivorRow() -> String {
+        switch language {
+        case .en: return "No item will be kept in this group."
+        case .ja: return "このグループには項目が残りません。"
+        case .zhTW: return "此群組將不保留任何項目。"
+        }
+    }
+    func folderProtectedWarning(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) protected items are force-included. Their companion files and editing sidecars move with them."
+        case .ja: return "保護された\(count)件を強制的に含めています。付随ファイルと編集用サイドカーも一緒に移動します。"
+        case .zhTW: return "已強制納入 \(count) 個受保護項目，附屬檔案與編輯側錄檔會一起移動。"
+        }
+    }
+    func folderReviewWithdrawals() -> String {
+        switch language {
+        case .en: return "These groups are withheld from removal:"
+        case .ja: return "次のグループは移動しません："
+        case .zhTW: return "以下群組暫不移除："
+        }
+    }
+    func folderWithdrawalReport(_ count: Int, reason: FolderWithdrawalReason) -> String {
+        switch language {
+        case .en: return "\(count) marked items kept: \(folderWithdrawal(reason))"
+        case .ja: return "マークした\(count)件はそのままです：\(folderWithdrawal(reason))"
+        case .zhTW: return "已保留 \(count) 個標記項目：\(folderWithdrawal(reason))"
+        }
+    }
+    func folderCommitting() -> String {
+        switch language {
+        case .en: return "Moving marked items to Trash…"
+        case .ja: return "マークした項目をゴミ箱に移動中…"
+        case .zhTW: return "正在將標記項目移至垃圾桶⋯"
+        }
+    }
+    func folderPuttingBack() -> String {
+        switch language {
+        case .en: return "Putting files back…"
+        case .ja: return "ファイルを元に戻しています…"
+        case .zhTW: return "正在放回檔案⋯"
+        }
+    }
+    func folderReconciling() -> String {
+        switch language {
+        case .en: return "Checking folder history…"
+        case .ja: return "フォルダの履歴を確認中…"
+        case .zhTW: return "正在檢查資料夾歷史紀錄⋯"
+        }
+    }
+    func folderReviewing() -> String {
+        switch language {
+        case .en: return "Review the marked items before moving them."
+        case .ja: return "移動する前にマークした項目を確認してください。"
+        case .zhTW: return "移動前請先檢視標記項目。"
+        }
+    }
+    func folderMarkedCount(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) items marked for Trash review"
+        case .ja: return "\(count)件をゴミ箱への移動確認にマーク"
+        case .zhTW: return "已標記 \(count) 個項目，待檢視後移至垃圾桶"
+        }
+    }
+    func folderRemoved(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) items moved to Trash. Open Folder history to Put Back."
+        case .ja: return "\(count)件をゴミ箱に移動しました。フォルダの履歴から元に戻せます。"
+        case .zhTW: return "已將 \(count) 個項目移至垃圾桶，可從資料夾歷史紀錄放回原處。"
+        }
+    }
+    func folderNothingRemoved() -> String {
+        switch language {
+        case .en: return "No items were moved to Trash."
+        case .ja: return "ゴミ箱に移動した項目はありません。"
+        case .zhTW: return "沒有項目移至垃圾桶。"
+        }
+    }
+    func folderRemovalIncomplete(_ count: Int) -> String {
+        switch language {
+        case .en: return "Move to Trash did not finish cleanly. \(count) complete items were confirmed moved. Review the details below."
+        case .ja: return "ゴミ箱への移動は正常に完了しませんでした。\(count)件の全ファイルの移動を確認しました。詳細を確認してください。"
+        case .zhTW: return "移至垃圾桶未完整完成，已確認 \(count) 個完整項目移動完成。請查看下方詳細說明。"
+        }
+    }
+    func folderOperationReportTitle() -> String {
+        switch language {
+        case .en: return "Folder operation needs attention"
+        case .ja: return "フォルダの操作を確認してください"
+        case .zhTW: return "請確認資料夾操作結果"
+        }
+    }
+    func folderNewlyProtected(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) items kept because editing sidecars appeared or could not be checked. Their marks were cleared."
+        case .ja: return "編集用サイドカーが現れたか確認できなかったため、\(count)件を保護しました。マークを解除しました。"
+        case .zhTW: return "有 \(count) 個項目出現編輯側錄檔或無法確認側錄檔，已保留並取消標記。"
+        }
+    }
+    func folderUnverifiedKept(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) items could not be verified and were kept."
+        case .ja: return "\(count)件を確認できなかったため、そのまま残しました。"
+        case .zhTW: return "無法確認 \(count) 個項目的狀態，已保留。"
+        }
+    }
+    func folderKeeperMissing(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) groups kept because their chosen keeper is no longer available. Scan again."
+        case .ja: return "選択した残す項目が見つからないため、\(count)グループを移動しませんでした。再スキャンしてください。"
+        case .zhTW: return "有 \(count) 個群組的保留項目已無法存取，整組保留，請重新掃描。"
+        }
+    }
+    func folderSurvivorsMissing(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) groups kept because none of the intended survivors are available. Scan again."
+        case .ja: return "残す予定の項目がすべて見つからないため、\(count)グループを移動しませんでした。再スキャンしてください。"
+        case .zhTW: return "有 \(count) 個群組原本要保留的項目皆無法存取，整組保留，請重新掃描。"
+        }
+    }
+    func folderStale(_ count: Int) -> String {
+        switch language {
+        case .en: return "\(count) items became unavailable during the live check. This move was cancelled; scan again."
+        case .ja: return "直前の確認中に\(count)件が利用できなくなりました。移動を中止しました。再スキャンしてください。"
+        case .zhTW: return "即時檢查時有 \(count) 個項目無法存取，已取消本次移動，請重新掃描。"
+        }
+    }
+    func folderAuditFailed() -> String {
+        switch language {
+        case .en: return "Files moved, but their folder history could not be saved. The pending record was retained for recovery; Put Back may be unavailable until history is recovered."
+        case .ja: return "ファイルは移動しましたが、フォルダの履歴を保存できませんでした。復旧用の保留記録を保持しています。履歴が復旧するまで元に戻せない場合があります。"
+        case .zhTW: return "檔案已移動，但無法儲存資料夾歷史紀錄。待處理記錄已保留供復原，歷史紀錄復原前可能無法放回原處。"
+        }
+    }
+    func folderJournalFailed() -> String {
+        switch language {
+        case .en: return "The pending removal record could not be saved. No new removal was started."
+        case .ja: return "移動前の記録を保存できませんでした。新たな移動は開始していません。"
+        case .zhTW: return "無法儲存待移除記錄，未開始新的移除操作。"
+        }
+    }
+    func folderPendingIntent() -> String {
+        switch language {
+        case .en: return "A pending folder removal record remains. Open Folder history to retry recovery; reconnect any missing volumes before another move."
+        case .ja: return "フォルダの移動記録が保留中です。フォルダの履歴を開いて復旧を再試行し、未接続のボリュームを接続してから次の移動を行ってください。"
+        case .zhTW: return "仍有待處理的資料夾移除記錄。請開啟資料夾歷史紀錄重試復原，並接回未連接的磁碟區，再執行下一次移動。"
+        }
+    }
+    func folderCommitBusy() -> String {
+        switch language {
+        case .en: return "Another folder operation is running. Wait for it to finish before moving files."
+        case .ja: return "別のフォルダ操作を実行中です。完了してから移動してください。"
+        case .zhTW: return "其他資料夾操作正在執行，請等候完成後再移動檔案。"
+        }
+    }
+    func folderCommitFailed(_ detail: String) -> String {
+        switch language {
+        case .en: return "Move to Trash could not finish: \(detail)"
+        case .ja: return "ゴミ箱への移動を完了できませんでした：\(detail)"
+        case .zhTW: return "無法完成移至垃圾桶：\(detail)"
+        }
+    }
+    func folderRecovered(_ count: Int, unavailable: Int) -> String {
+        switch language {
+        case .en: return "Recovered \(count) removals into Folder history after an interrupted operation. \(unavailable) currently have no Put Back."
+        case .ja: return "中断された操作から\(count)件の移動をフォルダの履歴に復旧しました。現在\(unavailable)件は元に戻せません。"
+        case .zhTW: return "已將中斷操作中的 \(count) 筆移除補登至資料夾歷史紀錄，目前有 \(unavailable) 筆無法放回原處。"
+        }
+    }
+    func folderReconcileFailed(_ detail: String) -> String {
+        switch language {
+        case .en: return "Folder history recovery could not finish. Pending records are retained: \(detail)"
+        case .ja: return "フォルダの履歴の復旧を完了できませんでした。保留記録は保持しています：\(detail)"
+        case .zhTW: return "無法完成資料夾歷史紀錄復原，待處理記錄已保留：\(detail)"
+        }
+    }
+    func folderHistoryEmpty() -> String {
+        switch language {
+        case .en: return "No folder removals yet."
+        case .ja: return "フォルダの移動履歴はまだありません。"
+        case .zhTW: return "尚無資料夾移除記錄。"
+        }
+    }
+    func folderHistoryFailed(_ detail: String) -> String {
+        switch language {
+        case .en: return "Could not read Folder history: \(detail)"
+        case .ja: return "フォルダの履歴を読み込めませんでした：\(detail)"
+        case .zhTW: return "無法讀取資料夾歷史紀錄：\(detail)"
+        }
+    }
+    func folderHistoryRefresh() -> String {
+        switch language {
+        case .en: return "Refresh"
+        case .ja: return "更新"
+        case .zhTW: return "重新整理"
+        }
+    }
+    func folderOriginalPath() -> String {
+        switch language {
+        case .en: return "Original path"
+        case .ja: return "元の場所"
+        case .zhTW: return "原始路徑"
+        }
+    }
+    func folderTrashLocation() -> String {
+        switch language {
+        case .en: return "Trash location"
+        case .ja: return "ゴミ箱内の場所"
+        case .zhTW: return "垃圾桶位置"
+        }
+    }
+    func folderPutBack() -> String {
+        switch language {
+        case .en: return "Put Back"
+        case .ja: return "元に戻す"
+        case .zhTW: return "放回原處"
+        }
+    }
+    func folderPutBackDone() -> String {
+        switch language {
+        case .en: return "Files put back at their original paths. Scan again to compare them."
+        case .ja: return "元の場所にファイルを戻しました。再スキャンして比較できます。"
+        case .zhTW: return "檔案已放回原始路徑，請重新掃描以再次比對。"
+        }
+    }
+    func folderPutBackConflict(_ urls: [URL]) -> String {
+        switch language {
+        case .en: return "Put Back stopped because files already exist at the original paths. Nothing was overwritten:\n\(urls.map(\.path).joined(separator: "\n"))"
+        case .ja: return "元の場所にファイルが存在するため、元に戻せません。上書きはしていません：\n\(urls.map(\.path).joined(separator: "\n"))"
+        case .zhTW: return "原始路徑已有檔案，已停止放回，未覆寫任何檔案：\n\(urls.map(\.path).joined(separator: "\n"))"
+        }
+    }
+    func folderPutBackParentMissing(_ urls: [URL]) -> String {
+        switch language {
+        case .en: return "The original folders are missing or on a different volume. Put Back did not start:\n\(urls.map(\.path).joined(separator: "\n"))"
+        case .ja: return "元のフォルダが存在しないか別のボリュームにあります。元に戻す操作は開始していません：\n\(urls.map(\.path).joined(separator: "\n"))"
+        case .zhTW: return "原始資料夾不存在或位於不同磁碟區，未開始放回：\n\(urls.map(\.path).joined(separator: "\n"))"
+        }
+    }
+    func folderPutBackFailed(_ detail: String) -> String {
+        switch language {
+        case .en: return "Put Back failed. Files already moved were returned to their Trash locations: \(detail)"
+        case .ja: return "元に戻せませんでした。移動済みのファイルはゴミ箱内の場所に戻しました：\(detail)"
+        case .zhTW: return "放回失敗，已將移動過的檔案退回原本的垃圾桶位置：\(detail)"
+        }
+    }
+    func folderPutBackPartial(_ urls: [URL], detail: String) -> String {
+        switch language {
+        case .en: return "Put Back only partly completed and could not be rolled back. These files remain at their original paths; check the other members in history:\n\(urls.map(\.path).joined(separator: "\n"))\n\(detail)"
+        case .ja: return "元に戻す操作が一部だけ完了し、取り消せませんでした。次のファイルは元の場所に残っています。他のファイルは履歴で確認してください：\n\(urls.map(\.path).joined(separator: "\n"))\n\(detail)"
+        case .zhTW: return "放回僅部分完成，且無法復原操作。以下檔案留在原始路徑，請從歷史紀錄確認其他附屬檔案：\n\(urls.map(\.path).joined(separator: "\n"))\n\(detail)"
+        }
+    }
+    func folderPutBackPersistenceFailed(_ detail: String) -> String {
+        switch language {
+        case .en: return "Put Back could not finish or save its result. Some files may have moved. Refresh history to check every location before retrying: \(detail)"
+        case .ja: return "元に戻す操作または結果の保存を完了できませんでした。一部のファイルが移動した可能性があります。再試行前に履歴を更新して各場所を確認してください：\(detail)"
+        case .zhTW: return "無法完成放回或儲存結果，部分檔案可能已移動。請先重新整理歷史紀錄，確認各檔案位置後再重試：\(detail)"
+        }
+    }
+    func folderMemberRestored() -> String {
+        switch language {
+        case .en: return "At the original path"
+        case .ja: return "元の場所にあります"
+        case .zhTW: return "已在原始路徑"
+        }
+    }
+    func folderCommitError(_ error: Error) -> String {
+        if let error = error as? CommitError {
+            switch error {
+            case .busy: return folderCommitBusy()
+            case .journalWriteFailed: return folderJournalFailed()
+            }
+        }
+        if let error = error as? FolderHistoryError {
+            switch error {
+            case .pendingIntent: return folderPendingIntent()
+            case .trashUnavailable: return folderRemovalFailure(.trash(""))
+            case .invalidPath, .entryNotFound: return folderCommitFailed(error.localizedDescription)
+            }
+        }
+        return folderCommitFailed(error.localizedDescription)
+    }
+    func folderWithdrawal(_ reason: FolderWithdrawalReason) -> String {
+        switch reason {
+        case .scanOnly(_, let capability): return folderScanOnly(capability)
+        case .itemUnavailable(_):
+            switch language {
+            case .en: return "A scan item is unavailable. Scan again."
+            case .ja: return "スキャンした項目を利用できません。再スキャンしてください。"
+            case .zhTW: return "無法存取掃描項目，請重新掃描。"
+            }
+        case .memberMissing(let url):
+            switch language {
+            case .en: return "A member file is missing: \(url.path)"
+            case .ja: return "構成ファイルが見つかりません：\(url.path)"
+            case .zhTW: return "找不到附屬檔案：\(url.path)"
+            }
+        case .identityChanged(let url):
+            switch language {
+            case .en: return "The file was replaced since the scan: \(url.path)"
+            case .ja: return "スキャン後にファイルが置き換わりました：\(url.path)"
+            case .zhTW: return "掃描後檔案已被替換：\(url.path)"
+            }
+        case .sizeChanged(let url):
+            switch language {
+            case .en: return "The file size changed since the scan: \(url.path)"
+            case .ja: return "スキャン後にファイルサイズが変わりました：\(url.path)"
+            case .zhTW: return "掃描後檔案大小已變更：\(url.path)"
+            }
+        case .modificationDateChanged(let url):
+            switch language {
+            case .en: return "The file was modified since the scan: \(url.path)"
+            case .ja: return "スキャン後にファイルが変更されました：\(url.path)"
+            case .zhTW: return "掃描後檔案已修改：\(url.path)"
+            }
+        case .volumeUnavailable(_):
+            switch language {
+            case .en: return "The volume is unavailable or its identity changed. Reconnect it and scan again."
+            case .ja: return "ボリュームを利用できないか識別情報が変わりました。接続して再スキャンしてください。"
+            case .zhTW: return "磁碟區無法存取或識別資訊已變更，請接回後重新掃描。"
+            }
+        case .hashUnavailable(_):
+            switch language {
+            case .en: return "The original bytes could not be read for verification. Scan again."
+            case .ja: return "検証用に元ファイルを読み込めませんでした。再スキャンしてください。"
+            case .zhTW: return "無法讀取原始檔案內容以驗證，請重新掃描。"
+            }
+        case .hashMismatch(_):
+            switch language {
+            case .en: return "The original bytes no longer match the exact-duplicate scan. Scan again."
+            case .ja: return "元ファイルの内容が完全重複のスキャン結果と一致しません。再スキャンしてください。"
+            case .zhTW: return "原始檔案內容已與完全重複的掃描結果不符，請重新掃描。"
+            }
+        case .membersChanged(_):
+            switch language {
+            case .en: return "Companion files changed or could not be checked. Scan again before moving this group."
+            case .ja: return "付随ファイルが変わったか確認できません。グループを移動する前に再スキャンしてください。"
+            case .zhTW: return "附屬檔案已變更或無法確認，請重新掃描後再移動此群組。"
+            }
+        }
+    }
+    func folderRemovalFailure(_ reason: FolderRemovalFailureReason) -> String {
+        switch reason {
+        case .liveCheck(let withdrawal): return folderWithdrawal(withdrawal)
+        case .trash(let detail):
+            switch language {
+            case .en: return "Could not move this item to Trash. Completed member moves were rolled back. \(detail)"
+            case .ja: return "この項目をゴミ箱に移動できませんでした。移動済みの構成ファイルは元に戻しました。\(detail)"
+            case .zhTW: return "無法將此項目移至垃圾桶，已將移動過的附屬檔案放回。\(detail)"
+            }
+        case .invalidTrashResult(_):
+            switch language {
+            case .en: return "The Trash location could not be verified. This item was not confirmed removed. Check its original path and the Trash before retrying."
+            case .ja: return "ゴミ箱内の場所を確認できませんでした。この項目の移動は確認できていません。再試行前に元の場所とゴミ箱を確認してください。"
+            case .zhTW: return "無法驗證垃圾桶位置，未確認此項目移除完成。請先查看原始路徑與垃圾桶，再重試。"
+            }
+        case .journalWrite(let detail):
+            switch language {
+            case .en: return "The pending removal record could not be updated. Further moves stopped and completed member moves were rolled back. \(detail)"
+            case .ja: return "移動記録を更新できませんでした。以降の移動を中止し、移動済みの構成ファイルは元に戻しました。\(detail)"
+            case .zhTW: return "無法更新待移除記錄，已停止後續移動，並將移動過的附屬檔案放回。\(detail)"
+            }
+        case .rollbackFailed(let urls, _):
+            switch language {
+            case .en: return "This item only partly moved, and some files could not be put back. Check the recorded locations before retrying; automatic Put Back may be unavailable.\n\(urls.map(\.path).joined(separator: "\n"))"
+            case .ja: return "この項目は一部だけ移動し、戻せないファイルがあります。再試行前に記録された場所を確認してください。自動で元に戻せない場合があります。\n\(urls.map(\.path).joined(separator: "\n"))"
+            case .zhTW: return "此項目僅部分移動，且部分檔案無法放回。請先確認記錄中的位置再重試，可能無法自動放回原處。\n\(urls.map(\.path).joined(separator: "\n"))"
+            }
+        }
+    }
+    func folderHistoryUnavailable(_ reason: FolderHistoryUnavailableReason) -> String {
+        switch reason {
+        case .volumeNotMounted:
+            switch language {
+            case .en: return "Put Back unavailable — the volume is not mounted. Reconnect it and refresh."
+            case .ja: return "元に戻せません — ボリュームが未接続です。接続して更新してください。"
+            case .zhTW: return "無法放回原處，磁碟區尚未掛載。請接回後重新整理。"
+            }
+        case .trashMissing:
+            switch language {
+            case .en: return "Put Back unavailable — a recorded Trash item is gone or the Trash was emptied."
+            case .ja: return "元に戻せません — 記録されたファイルがゴミ箱にないか、ゴミ箱が空になっています。"
+            case .zhTW: return "無法放回原處，記錄中的垃圾桶項目已不存在，或垃圾桶已清空。"
+            }
+        case .locationUnknown:
+            switch language {
+            case .en: return "Put Back unavailable — a Trash location was not recorded. Check the Trash manually."
+            case .ja: return "元に戻せません — ゴミ箱内の場所が記録されていません。ゴミ箱を手動で確認してください。"
+            case .zhTW: return "無法放回原處，未記錄垃圾桶位置。請手動查看垃圾桶。"
+            }
+        case .itemChanged:
+            switch language {
+            case .en: return "Put Back unavailable — a recorded Trash file changed or was replaced."
+            case .ja: return "元に戻せません — 記録されたゴミ箱内のファイルが変更または置き換えられました。"
+            case .zhTW: return "無法放回原處，記錄中的垃圾桶檔案已變更或被替換。"
+            }
+        case .cannotVerify:
+            switch language {
+            case .en: return "Put Back unavailable — the recorded files could not be verified. Check access and refresh."
+            case .ja: return "元に戻せません — 記録されたファイルを確認できません。アクセス権を確認して更新してください。"
+            case .zhTW: return "無法放回原處，無法驗證記錄中的檔案。請確認存取權限後重新整理。"
+            }
+        case .incompleteRemoval:
+            switch language {
+            case .en: return "Automatic Put Back unavailable — this operation only partly completed. Check each original and Trash path below."
+            case .ja: return "自動で元に戻せません — 操作が一部だけ完了しています。以下の元の場所とゴミ箱内の場所を確認してください。"
+            case .zhTW: return "無法自動放回原處，此操作僅部分完成。請確認下方各原始路徑與垃圾桶位置。"
+            }
+        case .restoring:
+            switch language {
+            case .en: return "Put Back was interrupted. Refresh history to check the file locations."
+            case .ja: return "元に戻す操作が中断されました。履歴を更新してファイルの場所を確認してください。"
+            case .zhTW: return "放回操作曾中斷，請重新整理歷史紀錄以確認檔案位置。"
+            }
+        case .restored:
+            switch language {
+            case .en: return "Already put back."
+            case .ja: return "元に戻しました。"
+            case .zhTW: return "已放回原處。"
             }
         }
     }

@@ -2733,6 +2733,7 @@ do {
 }
 
 folderAppIntegrationTests(check)
+await folderRemovalAppTests(check)
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

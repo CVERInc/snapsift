@@ -6,12 +6,16 @@ reserved for the first signed and notarized build.
 ## [Unreleased]
 
 ### Added
-- **Folder Mode scanning and review.** Choose multiple folders with saved
+- **Folder Mode scanning, Trash removal and Put Back.** Choose multiple folders with saved
   access, compare duplicate and similar photos, and review grouped Live Photo,
   RAW + JPEG and sidecar files together. Cross-folder duplicates remain
   unmarked, and scan-only volumes show why removal is unavailable. Folder
   review is separate from Apple Photos scans, decisions and history, with
-  English, Japanese and Taiwan Traditional Chinese interface text.
+  English, Japanese and Taiwan Traditional Chinese interface text. Review
+  counts, sizes, volumes and protected items before moving files to Trash.
+  Folder history records original and Trash paths, recovers interrupted
+  removals at launch, and offers Put Back without overwriting existing files.
+  Partial moves, changed files and history failures are reported.
 - **⇧K — "keep only this one."** In a group of five, one keystroke nominates the
   focused photo as the keeper and crosses out the rest, instead of pressing `X`
   four times (or `D` then `K`, which passes through a state where every photo is

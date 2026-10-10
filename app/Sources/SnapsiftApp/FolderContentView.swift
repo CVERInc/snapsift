@@ -43,10 +43,10 @@ struct FolderContentView: View {
                             .buttonStyle(.borderless)
                             .help(t.folderRemove())
                             .accessibilityLabel(t.folderRemove())
-                            .disabled(model.isScanning)
+                            .disabled(model.isScanning || model.isBusy)
                         }
                     }
-                    Button(t.folderChoose()) { model.chooseFolders(t) }.disabled(model.isScanning)
+                    Button(t.folderChoose()) { model.chooseFolders(t) }.disabled(model.isScanning || model.isBusy)
                 }
                 Section(t.folderReviewTitle()) {
                     ForEach(model.groups) { group in
@@ -90,7 +90,7 @@ struct FolderContentView: View {
                         Image(systemName: "folder").font(.largeTitle).foregroundStyle(Color.reefMint)
                         Text(model.hasScanned ? t.folderNoGroups() : t.folderStart())
                             .multilineTextAlignment(.center).foregroundStyle(Color.reefTextDim)
-                        Button(t.folderChoose()) { model.chooseFolders(t) }.disabled(model.isScanning)
+                        Button(t.folderChoose()) { model.chooseFolders(t) }.disabled(model.isScanning || model.isBusy)
                     }
                     .padding(CVERSpacing.xl)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -105,13 +105,43 @@ struct FolderContentView: View {
                 Button(t.scan(), action: requestScan).disabled(!model.canScan)
             }
             ToolbarItem {
-                Button(t.folderMoveToTrash()) {}.disabled(true).help(t.folderComing())
+                Button { model.presentRemovalReview() } label: {
+                    Label(t.folderMoveToTrash(), systemImage: "trash")
+                }.disabled(!model.canReviewRemoval)
             }
             ToolbarItem {
-                Button(t.folderHistory()) {}.disabled(true).help(t.folderComing())
+                Button { model.presentHistory(t) } label: {
+                    Label(t.folderHistory(), systemImage: "clock.arrow.circlepath")
+                }.disabled(model.isBusy || model.isScanning)
             }
         }
         .safeAreaInset(edge: .bottom) { statusBar }
+        .overlay {
+            if model.isBusy && model.activity.operation != .reviewing {
+                ZStack {
+                    Color.black.opacity(0.35)
+                    VStack(spacing: 12) {
+                        ProgressView().tint(.reefMint)
+                        Text(activityMessage).font(.callout).foregroundStyle(Color.reefText)
+                    }
+                    .padding(CVERSpacing.xl).liquidGlassCard(cornerRadius: CVERRadius.panel)
+                }.contentShape(Rectangle())
+            }
+        }
+        .sheet(item: Binding(get: { model.removalReview }, set: { if $0 == nil { model.cancelRemovalReview() } })) { payload in
+            FolderPreCommitReviewSheet(payload: payload, model: model, t: t,
+                onConfirm: { Task { await model.commitReviewed(payload, t) } },
+                onCancel: { model.cancelRemovalReview() })
+        }
+        .sheet(isPresented: $model.showHistory) {
+            FolderHistoryView(model: model, t: t, onClose: { if !model.isBusy { model.showHistory = false } })
+        }
+        .alert(t.folderOperationReportTitle(), isPresented: Binding(
+            get: { !model.showHistory && model.operationReport != nil },
+            set: { if !$0 && !model.showHistory { model.operationReport = nil } }
+        )) {
+            Button(t.deleteErrorDismiss(), role: .cancel) { model.operationReport = nil }
+        } message: { Text(model.operationReport ?? "") }
         .onAppear { model.loadFolders(t) }
         .onChange(of: model.selection) { _, id in
             let group = model.groups.first(where: { $0.id == id })
@@ -148,9 +178,20 @@ struct FolderContentView: View {
         } message: { Text(t.folderProtectedBody(1)) }
     }
 
+    private var activityMessage: String {
+        switch model.activity.operation {
+        case .committing: return t.folderCommitting()
+        case .puttingBack: return t.folderPuttingBack()
+        case .reconciling: return t.folderReconciling()
+        case .reviewing, .idle: return t.folderReviewing()
+        }
+    }
+
     private var statusBar: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if model.isScanning {
+            if model.isBusy {
+                HStack { ProgressView().controlSize(.small); Text(activityMessage) }
+            } else if model.isScanning {
                 HStack {
                     // The current pipeline exposes no stage/count callback;
                     // use Photos Mode's indeterminate-progress convention.
@@ -164,12 +205,12 @@ struct FolderContentView: View {
             }
             if let hint { Text(hint).foregroundStyle(Color.reefAmber) }
             HStack {
-                Text(t.folderComing()).foregroundStyle(Color.reefTextDim)
+                Text(t.folderMarkedCount(model.totalDeletions)).foregroundStyle(Color.reefTextDim)
                 Spacer()
                 Button(t.folderDiscard()) {
                     if model.userMarkCount > 0 { showDiscard = true }
                     else { model.discardResult() }
-                }.disabled(model.result == nil || model.isScanning)
+                }.disabled(model.result == nil || model.isScanning || model.isBusy)
             }
         }
         .font(.callout).padding(CVERSpacing.md)
@@ -191,11 +232,11 @@ struct FolderContentView: View {
                         }
                     }
                 }
-                if !result.crossFolderDuplicates.isEmpty {
+                if !model.crossFolderMatches.isEmpty {
                     Text(t.folderCrossExplanation()).foregroundStyle(Color.reefAmber)
-                    ForEach(Array(result.crossFolderDuplicates.enumerated()), id: \.offset) { _, duplicate in
-                        ForEach(duplicate.itemIDs, id: \.self) { id in
-                            if let item = result.items.first(where: { $0.id == id }) {
+                    ForEach(Array(model.crossFolderMatches.enumerated()), id: \.offset) { _, ids in
+                        ForEach(ids, id: \.self) { id in
+                            if let item = model.item(for: id) {
                                 Button(item.primary.url.path) {
                                     model.selection = model.groups.first { $0.photos.contains { $0.uuid == id } }?.id
                                     model.focusedFrame = id
@@ -221,7 +262,7 @@ struct FolderContentView: View {
     }
 
     private func handleKey(_ key: KeyPress, _ group: ReviewGroup) -> KeyPress.Result {
-        guard !model.isScanning, !key.modifiers.contains(.command), !key.modifiers.contains(.control),
+        guard !model.isScanning, !model.isBusy, !key.modifiers.contains(.command), !key.modifiers.contains(.control),
               let id = model.focusedFrame, let index = group.photos.firstIndex(where: { $0.uuid == id }) else { return .ignored }
         switch key.key {
         case .leftArrow, .rightArrow:
