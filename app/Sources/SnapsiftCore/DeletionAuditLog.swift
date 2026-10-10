@@ -18,13 +18,13 @@ public enum DeletionReason: String, Codable, Sendable, Equatable {
 public struct DeletionRecord: Codable, Sendable {
     /// ISO-8601 timestamp of the deletion batch.
     public let timestamp: String
-    /// PHAsset localIdentifier of the deleted photo.
+    /// Source identifier of the deleted photo (a PHAsset localIdentifier in Photos Mode).
     public let assetIdentifier: String
     /// Original filename (may be empty if Photos didn't expose it).
     public let filename: String
     /// File size in bytes (0 if the quality sidecar wasn't readable).
     public let sizeBytes: Int
-    /// localIdentifier of the keeper that survived in the same group.
+    /// Source identifier of the keeper that survived in the same group.
     public let keeperIdentifier: String
     /// Filename of the keeper.
     public let keeperFilename: String
@@ -152,9 +152,8 @@ public struct DeletionAuditLog: Sendable {
         directory.appendingPathComponent("pending-delete.json")
     }
 
-    /// Write the intent journal. Returns false on I/O failure; the caller
-    /// decides (we still commit — a missing journal costs accountability, a
-    /// refused delete costs the user their session).
+    /// Write the intent journal. Returns false on I/O failure so the commit
+    /// orchestration can refuse deletion before any destructive effect.
     @discardableResult
     public static func writeIntent(_ session: DeletionSession, to url: URL = intentURL) -> Bool {
         do {

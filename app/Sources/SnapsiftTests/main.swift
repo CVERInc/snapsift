@@ -2255,5 +2255,349 @@ do {
           "only the two reasons real state can back are reachable (.notPicked is W2)")
 }
 
+// Drive the same orchestration the app uses, with no PhotoKit or disk effects.
+struct TestCommitEntry {
+    let timestamp: String
+    let records: [DeletionRecord]
+}
+
+enum TestDeleteError: Error { case refused }
+
+@MainActor
+final class CommitFixture {
+    var groups: [ReviewGroup]
+    var resolved: Set<String>
+    var edited: [String: Bool]
+    var favorites: Set<String> = []
+    var bursts: [String: [String]] = [:]
+    var events: [String] = []
+    var intent: TestCommitEntry?
+    var audits: [TestCommitEntry] = []
+    var result: CommitResult?
+    var journalWritable = true
+    var auditWritable = true
+    var deleteThrows = false
+    var proceedOnStale = true
+    let orchestrator = CommitOrchestrator()
+
+    init(_ groups: [ReviewGroup]) {
+        self.groups = groups
+        let ids = groups.flatMap { $0.photos.map(\.uuid) }
+        resolved = Set(ids)
+        edited = Dictionary(ids.map { ($0, false) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    var ports: CommitPorts<String, TestCommitEntry> {
+        CommitPorts(
+            fetchLive: { ids in
+                self.events.append("fetch:\(ids.sorted().joined(separator: ","))")
+                return Dictionary(uniqueKeysWithValues: ids.filter { self.resolved.contains($0) }
+                    .map { ($0, $0) })
+            },
+            editedNow: { targets in
+                self.events.append("edited:\(targets.map(\.uuid).joined(separator: ","))")
+                return self.edited
+            },
+            favoriteNow: { id in
+                self.events.append("favorite:\(id)")
+                return self.favorites.contains(id)
+            },
+            burstSiblings: { id in
+                self.events.append("burst:\(id)")
+                return self.bursts[id]
+            },
+            timestamp: {
+                self.events.append("timestamp")
+                return "2026-10-09T00:00:00Z"
+            },
+            makeJournalEntry: { timestamp, records in
+                self.events.append("entry")
+                return TestCommitEntry(timestamp: timestamp, records: records)
+            },
+            writeIntent: { entry in
+                self.events.append("intent")
+                if self.journalWritable { self.intent = entry }
+                return self.journalWritable
+            },
+            delete: { ids in
+                self.events.append("delete:\(ids.joined(separator: ","))")
+                if self.deleteThrows { throw TestDeleteError.refused }
+            },
+            appendAudit: { entry in
+                self.events.append("audit")
+                if self.auditWritable { self.audits.append(entry) }
+                return self.auditWritable
+            },
+            clearIntent: {
+                self.events.append("clear")
+                self.intent = nil
+            })
+    }
+
+    var callbacks: CommitCallbacks {
+        CommitCallbacks(
+            staleWarning: { stale, found in
+                self.events.append("stale:\(stale),\(found)")
+                return self.proceedOnStale
+            },
+            onProtectedDropped: { self.events.append("protected:\($0)") },
+            onBurstSkipped: { self.events.append("burstSkipped:\($0)") },
+            onUndeterminedSkipped: { self.events.append("undetermined:\($0)") },
+            onKeeperMissing: { self.events.append("keeperMissing:\($0)") },
+            onNoSurvivorLeft: { self.events.append("noSurvivor:\($0)") },
+            onGroupsChanged: {
+                self.events.append("groups")
+                self.groups = $0
+            },
+            onCommittingChanged: { self.events.append($0 ? "lock" : "unlock") },
+            saveSnapshot: { self.events.append("snapshot") },
+            beforeDelete: { self.events.append("anchor") },
+            onCommitted: {
+                self.events.append("committed")
+                self.result = $0
+            })
+    }
+
+    func run(isBusy: Bool = false) async throws -> Int {
+        try await orchestrator.commit(groups: groups, isBusy: isBusy,
+                                      ports: ports, callbacks: callbacks)
+    }
+}
+
+@MainActor
+func checkCommitOrchestration() async {
+    print("Commit orchestration through fake ports")
+    func group(_ photos: [Photo], keeper: String = "U1", rejected: Set<String> = ["U2"],
+               seeded: Set<String> = [], includeProtected: Bool = false) -> ReviewGroup {
+        var g = ReviewGroup(photos: photos, keeperID: keeper)
+        g.rejected = rejected
+        g.autoSeeded = seeded
+        g.includeProtected = includeProtected
+        return g
+    }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], seeded: ["U2"])])
+        let n = try await f.run()
+        check(n == 1 && f.result?.deletedIDs == ["U2"], "orchestration: happy path deletes the marked frame")
+        check(f.events == ["lock", "fetch:U1,U2", "edited:U2", "favorite:U2", "burst:U2",
+                           "timestamp", "anchor", "entry", "intent", "delete:U2", "audit", "clear",
+                           "committed", "unlock"], "orchestration: exact port and callback order")
+        let record = f.audits.first?.records.first
+        check(record?.assetIdentifier == "U2" && record?.filename == "IMG_2.heic"
+              && record?.sizeBytes == 2_000_000, "orchestration: audit captures the actual deleted frame")
+        check(record?.keeperIdentifier == "U1" && record?.keeperFilename == "IMG_1.heic"
+              && record?.reason == .exactDuplicate, "orchestration: keeper and auto-seed attribution survive extraction")
+        check(f.audits.first?.timestamp == record?.timestamp && f.intent == nil
+              && f.result?.auditFailed == false, "orchestration: source journal payload carries the batch timestamp")
+    } catch { check(false, "orchestration: happy path threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)])])
+        f.resolved.remove("U1")
+        check(try await f.run() == 0, "orchestration: vanished keeper withdraws the group")
+        check(f.events.contains("keeperMissing:1") && !f.events.contains("noSurvivor:1"),
+              "orchestration: vanished keeper reports its specific callback")
+        check(f.audits.isEmpty && !f.events.contains("intent") && f.groups[0].rejected == ["U2"],
+              "orchestration: keeper withdrawal retains marks and performs no delete")
+    } catch { check(false, "orchestration: vanished keeper threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1), ph(3, 2)], rejected: ["U1", "U2"])])
+        f.resolved.remove("U3")
+        check(try await f.run() == 0, "orchestration: vanished alternate survivor withdraws the group")
+        check(f.events.contains("fetch:U1,U2,U3") && f.events.contains("noSurvivor:1")
+              && !f.events.contains("keeperMissing:1") && !f.events.contains("intent"),
+              "orchestration: every survivor is fetched and no-survivor callback is distinct")
+    } catch { check(false, "orchestration: vanished survivor threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], seeded: ["U2"], includeProtected: true)])
+        f.favorites.insert("U2")
+        check(try await f.run() == 0, "orchestration: newly favorited frame is skipped even with prior override")
+        check(f.groups[0].photos[1].favorite && f.groups[0].rejected.isEmpty
+              && f.groups[0].autoSeeded.isEmpty, "orchestration: new protection updates flags and clears both marks")
+        check(Array(f.events.suffix(4)) == ["groups", "protected:1", "snapshot", "unlock"],
+              "orchestration: publish protection before callback and save the changed snapshot")
+    } catch { check(false, "orchestration: newly favorited frame threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], seeded: ["U2"])])
+        f.edited.removeValue(forKey: "U2")
+        check(try await f.run() == 0, "orchestration: undetermined edit state never reaches deletion")
+        check(f.groups[0].photos[1].editedUndetermined && f.groups[0].rejected.isEmpty
+              && f.groups[0].autoSeeded.isEmpty, "orchestration: uncertainty is stored and unmarked")
+        check(Array(f.events.suffix(4)) == ["groups", "undetermined:1", "snapshot", "unlock"],
+              "orchestration: undetermined callback and snapshot order")
+    } catch { check(false, "orchestration: undetermined edit state threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)])])
+        f.bursts["U2"] = ["U2", "unreviewed-sibling"]
+        check(try await f.run() == 0, "orchestration: partial burst skips the representative")
+        check(Array(f.events.suffix(3)) == ["burstSkipped:1", "snapshot", "unlock"]
+              && !f.events.contains("intent") && f.groups[0].rejected == ["U2"],
+              "orchestration: burst skip preserves the mark, saves snapshot, and does not journal")
+        f.bursts["U2"] = ["U2"]
+        check(try await f.run() == 1, "orchestration: representative is deletable when every sibling is marked")
+    } catch { check(false, "orchestration: partial burst threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1), ph(3, 2)], rejected: ["U2", "U3"])])
+        f.bursts["U2"] = ["U2", "U3"]
+        check(try await f.run() == 2 && f.audits.first?.records.count == 2,
+              "orchestration: whole marked burst deletes and audits all siblings")
+    } catch { check(false, "orchestration: whole burst threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)])])
+        f.journalWritable = false
+        do {
+            _ = try await f.run()
+            check(false, "orchestration: journal failure must throw")
+        } catch CommitError.journalWriteFailed {
+            check(true, "orchestration: journal failure reports a blocked commit")
+        }
+        check(!f.events.contains("delete:U2") && f.audits.isEmpty && f.intent == nil,
+              "orchestration: journal failure never performs deletion or appends audit")
+        check(f.events.last == "unlock" && f.groups[0].rejected == ["U2"],
+              "orchestration: journal failure releases busy guard and retains marks")
+        f.journalWritable = true
+        check(try await f.run() == 1, "orchestration: retry after journal failure is allowed")
+    } catch { check(false, "orchestration: journal failure test threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)])])
+        f.deleteThrows = true
+        do {
+            _ = try await f.run()
+            check(false, "orchestration: performer failure must propagate")
+        } catch TestDeleteError.refused {
+            check(true, "orchestration: performer error is preserved")
+        }
+        check(Array(f.events.suffix(4)) == ["intent", "delete:U2", "clear", "unlock"],
+              "orchestration: performer throw clears intent before unlocking")
+        check(f.intent == nil && f.audits.isEmpty && f.result == nil,
+              "orchestration: performer throw creates no audit or post-commit effects")
+    } catch { check(false, "orchestration: performer failure test threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)])])
+        do {
+            _ = try await f.run(isBusy: true)
+            check(false, "orchestration: busy guard must throw")
+        } catch CommitError.busy {
+            check(true, "orchestration: busy guard preserves CommitError.busy")
+        }
+        check(f.events.isEmpty, "orchestration: busy guard runs before every port and callback")
+        var ports = f.ports
+        ports.editedNow = { _ in
+            do {
+                _ = try await f.run()
+                check(false, "orchestration: overlapping commit must throw")
+            } catch CommitError.busy {
+                check(true, "orchestration: actor re-entry is blocked while awaiting a port")
+            } catch { check(false, "orchestration: unexpected re-entry error \(error)") }
+            return f.edited
+        }
+        check(try await f.orchestrator.commit(groups: f.groups, ports: ports, callbacks: f.callbacks) == 1,
+              "orchestration: outer commit completes after blocking re-entry")
+    } catch { check(false, "orchestration: busy guard test threw \(error)") }
+
+    for proceed in [false, true] {
+        do {
+            let f = CommitFixture([group([ph(1, 0), ph(2, 1), ph(3, 2)], rejected: ["U2", "U3"])])
+            f.resolved.remove("U2")
+            f.proceedOnStale = proceed
+            check(try await f.run() == (proceed ? 1 : 0), "orchestration: stale warning decision \(proceed) is honored")
+            check(f.events.contains("stale:1,1") && f.groups[0].rejected.contains("U2"),
+                  "orchestration: stale callback receives exact counts and vanished marks stay")
+            check(f.audits.flatMap(\.records).map(\.assetIdentifier) == (proceed ? ["U3"] : []),
+                  "orchestration: stale items never enter the audit")
+        } catch { check(false, "orchestration: stale warning threw \(error)") }
+    }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], rejected: ["U1", "U2"])])
+        f.auditWritable = false
+        check(try await f.run() == 2 && f.result?.auditFailed == true && f.intent == nil,
+              "orchestration: audit failure is best-effort after successful deletion, intent cleared last")
+    } catch { check(false, "orchestration: audit failure threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], rejected: ["U1", "U2"])])
+        check(try await f.run() == 2, "orchestration: deliberate no-survivor commit remains allowed")
+        check(f.audits[0].records.allSatisfy { $0.keeperIdentifier.isEmpty && $0.keeperFilename.isEmpty
+              && $0.reason == .userRejected }, "orchestration: deleted keeper uses the empty audit sentinel")
+    } catch { check(false, "orchestration: deliberate no-survivor commit threw \(error)") }
+
+    do {
+        let f = CommitFixture([
+            group((1...6).map { ph($0, Double($0)) }, rejected: ["U2", "U3", "U4", "U5", "U6"]),
+            group([ph(7, 0), ph(8, 1)], keeper: "U7", rejected: ["U8"]),
+            group([ph(9, 0), ph(10, 1), ph(11, 2)], keeper: "U9", rejected: ["U9", "U11"])
+        ])
+        f.resolved.subtract(["U4", "U7", "U10"])
+        f.favorites.insert("U2")
+        f.edited.removeValue(forKey: "U3")
+        f.bursts["U5"] = ["U5", "unreviewed-sibling"]
+        check(try await f.run() == 1 && f.result?.deletedIDs == ["U6"],
+              "orchestration: mixed withdrawals, sweeps, and burst skips leave only the admissible frame")
+        let outcomes = f.events.filter {
+            $0 == "groups" || $0.hasPrefix("protected:") || $0.hasPrefix("undetermined:")
+                || $0.hasPrefix("keeperMissing:") || $0.hasPrefix("noSurvivor:")
+                || $0.hasPrefix("stale:") || $0.hasPrefix("burstSkipped:")
+        }
+        check(outcomes == ["groups", "protected:1", "undetermined:1", "keeperMissing:1",
+                           "noSurvivor:1", "stale:1,2", "burstSkipped:1"],
+              "orchestration: every mixed outcome retains the original callback order and counts")
+        check(f.audits[0].records.map(\.assetIdentifier) == ["U6"]
+              && f.groups[0].rejected == ["U4", "U5", "U6"],
+              "orchestration: audit excludes withdrawn and burst-skipped frames; only protection clears marks")
+    } catch { check(false, "orchestration: mixed outcome test threw \(error)") }
+
+    do {
+        let g = group([ph(1, 0), ph(2, 1, edited: true), ph(3, 2, editedUnknown: true),
+                       ph(4, 3, fav: true)], rejected: ["U2", "U3", "U4"], includeProtected: true)
+        check(g.deletionIDs == ["U2", "U4"] && g.isKeeper(g.photos[0]),
+              "ReviewGroup: imported model uses the real protection and survivor rules")
+        let f = CommitFixture([g])
+        check(try await f.run() == 2 && !f.events.contains(where: { $0.hasPrefix("edited:")
+              || $0.hasPrefix("favorite:") }),
+              "orchestration: consented known protection is not re-swept; unverifiable still survives")
+        check(f.audits[0].records.map(\.reason) == [.forceIncludedProtectedEdited, .forceIncludedProtectedFavorite],
+              "orchestration: forced protection audit attribution is unchanged")
+    } catch { check(false, "orchestration: force-included protection threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1), ph(3, 2)], rejected: ["U2", "U3"])])
+        f.resolved.remove("U2")
+        var callbacks = f.callbacks
+        callbacks.staleWarning = nil
+        check(try await f.orchestrator.commit(groups: f.groups, ports: f.ports, callbacks: callbacks) == 1
+              && !f.events.contains("stale:1,1"),
+              "orchestration: omitted stale handler retains legacy proceed behavior")
+    } catch { check(false, "orchestration: omitted stale handler threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1), ph(3, 2), ph(4, 3)], rejected: ["U2", "U3", "U4"])])
+        f.favorites.insert("U2")
+        f.resolved.remove("U3")
+        f.proceedOnStale = false
+        check(try await f.run() == 0 && f.groups[0].photos[1].favorite,
+              "orchestration: stale cancellation keeps the earlier protection verdict")
+        check(!f.events.contains("snapshot") && !f.events.contains("intent"),
+              "orchestration: stale cancellation retains the original snapshot timing")
+    } catch { check(false, "orchestration: stale cancellation after sweep threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], rejected: [])])
+        check(try await f.run() == 0 && f.events == ["lock", "unlock"],
+              "orchestration: empty candidate set skips every source effect")
+    } catch { check(false, "orchestration: empty candidate test threw \(error)") }
+}
+
+await checkCommitOrchestration()
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)
