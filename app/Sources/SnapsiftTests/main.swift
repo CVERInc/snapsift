@@ -2598,6 +2598,8 @@ func checkCommitOrchestration() async {
 }
 
 await checkCommitOrchestration()
+await checkExactDuplicatePass()
+await checkImageProviderSeam()
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

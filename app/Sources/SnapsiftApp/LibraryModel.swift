@@ -2,6 +2,7 @@ import Foundation
 import Photos
 import SnapsiftCore
 import SnapsiftPhotoKit
+import SnapsiftVision
 
 /// A semantic bucket from the "Similar sets" pass: all photos Vision tagged with
 /// the same content label, across the whole library and across time.
@@ -61,7 +62,7 @@ final class LibraryModel: ObservableObject {
     ///
     /// SESSION-ONLY, unlike `groups`: not part of `ScanSnapshot`, so a relaunch
     /// between "scan" and "Sort into Albums" loses this particular set — the
-    /// same lifecycle `assetsByID` already has for excluded assets. A rescan
+    /// same lifecycle the Photos provider already has for excluded assets. A rescan
     /// regenerates it.
     private(set) var pairedVideoUndeterminedAssets: [PHAsset] = []
     /// `unverifiableCount` plus the paired-video-undetermined videos above —
@@ -278,7 +279,8 @@ final class LibraryModel: ObservableObject {
     var maxSpan = 30.0
 
     let imageManager = PHCachingImageManager()
-    private var assetsByID: [String: PHAsset] = [:]
+    private lazy var photoKitImages = PhotoKitImageProvider(assetsByID: [:], manager: imageManager)
+    private var imageProvider: any ImageProvider { photoKitImages }
 
     /// The library-state change token as of when the current review verdicts were
     /// last known valid (scan end, or restore). `makeSnapshot` persists THIS verbatim
@@ -356,7 +358,7 @@ final class LibraryModel: ObservableObject {
         let quarterTurns = rotation(for: frameID)
         let net = ((quarterTurns % 4) + 4) % 4
         guard net != 0 else { return }
-        guard let asset = assetsByID[frameID] else {
+        guard let asset = photoKitImages.asset(for: frameID) else {
             saveRotationError = RotationSaveError.noEditingInput
             return
         }
@@ -459,7 +461,7 @@ final class LibraryModel: ObservableObject {
         }
     }
 
-    func asset(for id: String) -> PHAsset? { assetsByID[id] }
+    func asset(for id: String) -> PHAsset? { photoKitImages.asset(for: id) }
 
     func requestAccess() async {
         auth = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
@@ -496,7 +498,7 @@ final class LibraryModel: ObservableObject {
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
         groups = []
         categories = []
-        assetsByID = [:]
+        photoKitImages = PhotoKitImageProvider(assetsByID: [:], manager: imageManager)
         facesApplied = false
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
@@ -517,7 +519,7 @@ final class LibraryModel: ObservableObject {
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
-        assetsByID = map
+        photoKitImages = PhotoKitImageProvider(assetsByID: map, manager: imageManager)
 
         // Enrich with Apple's quality scores + real file size from the library's
         // Photos.sqlite (read-only). A SUCCESSFUL load is cached for the session;
@@ -550,13 +552,13 @@ final class LibraryModel: ObservableObject {
         // differ — near-identical → confident (pre-marked), more variation →
         // "you decide" (nothing pre-marked). Reliability over speed, always.
         progress = t.progVerifying(0, clustered.count)
-        let lookup = assetsByID
+        let provider = imageProvider
         let verified = await LookAlikeScanner.verifyByContent(
-            clustered, asset: { lookup[$0] }, manager: imageManager,
-            maxDistance: contentMaxDistance, t: t
+            clustered, provider: provider,
+            maxDistance: contentMaxDistance
         ) { [weak self] msg, frac in
             Task { @MainActor in
-                self?.progress = msg
+                self?.progress = msg.message(t)
                 if let frac { self?.progressFraction = 0.15 + 0.45 * frac }
             }
         }
@@ -571,7 +573,7 @@ final class LibraryModel: ObservableObject {
         let confidentIdx = verified.indices.filter { verified[$0].spread <= contentConfidentSpread }
         let toCheck = confidentIdx.map { verified[$0].photos.map(\.uuid) }
         let spreads = await LookAlikeScanner.featureSpreads(
-            toCheck, byID: assetsByID, manager: imageManager
+            toCheck, provider: provider
         ) { [weak self] done, total, loaded in
             Task { @MainActor in
                 self?.progress = t.progConfirming(done, total, loaded: loaded)
@@ -634,7 +636,7 @@ final class LibraryModel: ObservableObject {
     /// Release scan-only working memory once verdicts are materialized into
     /// `groups`/`categories`: the per-scan hash/feature-print cache exists only to
     /// dedupe work WITHIN a scan (a rescan rebuilds it) and the full-library
-    /// `assetsByID` map retains a PHAsset per library asset even though every
+    /// Photos provider retains a PHAsset per library asset even though every
     /// post-scan consumer (thumbnails, face refine, album write, delete) only ever
     /// looks up group/category members. Called at the very end of each scan so the
     /// exact-duplicate pass (which deliberately reuses the cache) still gets its
@@ -643,7 +645,7 @@ final class LibraryModel: ObservableObject {
         await LookAlikeScanner.clearCache()
         let memberIDs = Set(groups.flatMap { $0.photos.map(\.uuid) }
             + categories.flatMap { $0.photos.map(\.uuid) })
-        assetsByID = assetsByID.filter { memberIDs.contains($0.key) }
+        photoKitImages = photoKitImages.retaining(memberIDs)
     }
 
     /// Drop Live Photo paired videos — the independent `.mov` companion that
@@ -823,7 +825,7 @@ final class LibraryModel: ObservableObject {
                      // protected) and enrichFlags upgrades cluster members via
                      // the wedge-proof per-asset PhotoKit fallback.
                      edited: sidecarTrusted ? (e?.edited ?? false) : false,
-                     originalCamera: PhotoFlags.originalCamera(asset),
+                     originalCamera: PhotoKitFlags.originalCamera(asset),
                      editedUndetermined: !sidecarTrusted)
     }
 
@@ -837,7 +839,7 @@ final class LibraryModel: ObservableObject {
     /// `edited` normally arrives from the sidecar at Photo-build time (zero
     /// XPC). Only when the sidecar is unreadable (no Full Disk Access) is it
     /// upgraded here per cluster member — and then ONLY via
-    /// `PhotoFlags.editedFallback`: the raw PhotoKit lookup is a synchronous
+    /// `PhotoKitFlags.editedFallback`: the raw PhotoKit lookup is a synchronous
     /// XPC round-trip that wedged a scan for >24 h when photolibraryd
     /// restarted mid-call, all 8 workers convoyed behind one dead queue with
     /// no way to observe cancellation. The fallback confines that risk to a
@@ -857,7 +859,8 @@ final class LibraryModel: ObservableObject {
         var sharps: [String: Double] = [:]
         var edits: [String: Bool] = [:]
         var done = 0
-        let lookup = assetsByID
+        let photos = photoKitImages
+        let provider = imageProvider
         // Fall back to the per-asset PhotoKit lookup whenever the sidecar can't
         // be trusted for protection — no Full Disk Access, OR a database we
         // could not prove is the library PhotoKit serves.
@@ -868,16 +871,17 @@ final class LibraryModel: ObservableObject {
             func add() {
                 while !Task.isCancelled, next < uuids.count {   // cooperative cancel
                     let id = uuids[next]; next += 1
-                    guard let a = lookup[id] else { continue }
-                    let mgr = imageManager
+                    guard provider.itemIdentifiers.contains(id) else { continue }
                     group.addTask {
                         // One thumbnail fetch, fed to BOTH the document check and
                         // the sharpness estimate — they previously fetched the same
                         // 512px thumbnail independently (double I/O per member).
-                        let localCG = await PhotoFlags.localThumb(a, mgr)
-                        async let docResult = PhotoFlags.isDocumentResult(a, manager: mgr, localCG: localCG)
-                        let edited: Bool? = needEditedFallback
-                            ? await PhotoFlags.editedFallback(a) : nil
+                        let localCG = await PhotoFlags.localThumb(id, provider: provider)
+                        async let docResult = PhotoFlags.isDocumentResult(id, provider: provider, localCG: localCG)
+                        let edited: Bool?
+                        if needEditedFallback, let asset = photos.asset(for: id) {
+                            edited = await PhotoKitFlags.editedFallback(asset)
+                        } else { edited = nil }
                         let shp = localCG.map(PhotoFlags.sharpness(from:)) ?? 0
                         let (isDoc, degraded) = await docResult
                         return (id, isDoc, degraded, shp, edited)
@@ -956,15 +960,15 @@ final class LibraryModel: ObservableObject {
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
-        assetsByID = map
+        photoKitImages = PhotoKitImageProvider(assetsByID: map, manager: imageManager)
 
         await loadEnrichmentIfNeeded(t, assets: assets)
         if bailIfCancelled(t) { return }
         let enr = enrichment ?? [:]
 
-        let idGroups = await LookAlikeScanner.scan(assets: assets, manager: imageManager, t: t) { [weak self] msg, frac in
+        let idGroups = await LookAlikeScanner.scan(itemIdentifiers: assets.map(\.localIdentifier), provider: imageProvider) { [weak self] msg, frac in
             Task { @MainActor in
-                self?.progress = msg
+                self?.progress = msg.message(t)
                 if let frac { self?.progressFraction = 0.05 + 0.65 * frac }
             }
         }
@@ -1034,7 +1038,7 @@ final class LibraryModel: ObservableObject {
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
         groups = []
         categories = []
-        assetsByID = [:]
+        photoKitImages = PhotoKitImageProvider(assetsByID: [:], manager: imageManager)
         facesApplied = false
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
@@ -1054,7 +1058,7 @@ final class LibraryModel: ObservableObject {
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
-        assetsByID = map
+        photoKitImages = PhotoKitImageProvider(assetsByID: map, manager: imageManager)
 
         await loadEnrichmentIfNeeded(t, assets: assets)
         if bailIfCancelled(t) { return }
@@ -1064,11 +1068,11 @@ final class LibraryModel: ObservableObject {
         // than Look-alikes (which is now ≈identical only), so pose/angle changes
         // still group (cats ≈0.3 feature distance land here, not in Look-alikes).
         let idGroups = await LookAlikeScanner.scan(
-            assets: assets, manager: imageManager, t: t,
+            itemIdentifiers: assets.map(\.localIdentifier), provider: imageProvider,
             dHashDistance: 14, featureDistance: 0.45
         ) { [weak self] msg, frac in
             Task { @MainActor in
-                self?.progress = msg
+                self?.progress = msg.message(t)
                 if let frac { self?.progressFraction = 0.05 + 0.6 * frac }
             }
         }
@@ -1079,18 +1083,18 @@ final class LibraryModel: ObservableObject {
         // apfel LLM subprocess (Apple Intelligence), so a serial loop over hundreds
         // of buckets is a long dead tail after all pixel work is done. apfel
         // processes overlap fine — run ~4 in flight while preserving display order.
-        struct PendingSet { let photos: [Photo]; let rep: PHAsset? }
+        struct PendingSet { let photos: [Photo]; let rep: String? }
         var pending: [PendingSet] = []
         for ids in idGroups {
             if bailIfCancelled(t) { return }
             let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0, enr: enr) }
                 .sorted { $0.takenAt < $1.takenAt }
             guard photos.count >= 2 else { continue }
-            pending.append(PendingSet(photos: photos, rep: photos.first.flatMap { map[$0.uuid] }))
+            pending.append(PendingSet(photos: photos, rep: photos.first.map(\.uuid)))
         }
         var names = [String?](repeating: nil, count: pending.count)
         let total = pending.count
-        let mgr = imageManager
+        let provider = imageProvider
         var done = 0
         await withTaskGroup(of: (Int, String).self) { group in
             var next = 0
@@ -1099,7 +1103,7 @@ final class LibraryModel: ObservableObject {
             func add() {
                 while !flag.isSet, !Task.isCancelled, next < pending.count {
                     let idx = next; let rep = pending[next].rep; next += 1
-                    group.addTask { (idx, await LibraryModel.setName(repAsset: rep, manager: mgr, t: t)) }
+                    group.addTask { (idx, await LibraryModel.setName(itemIdentifier: rep, provider: provider, t: t)) }
                     return
                 }
             }
@@ -1137,10 +1141,10 @@ final class LibraryModel: ObservableObject {
     /// apfel when available; otherwise the top tag (or a localized fallback).
     /// Nonisolated so the naming pass can run these concurrently off the main
     /// actor — the representative asset is resolved by the caller.
-    private nonisolated static func setName(repAsset: PHAsset?,
-                                            manager: PHCachingImageManager, t: L10n) async -> String {
-        guard let repAsset else { return t.setFallbackName() }
-        let tags = await CategoryScanner.labels(for: repAsset, manager: manager)
+    private nonisolated static func setName(itemIdentifier: String?,
+                                            provider: any ImageProvider, t: L10n) async -> String {
+        guard let itemIdentifier else { return t.setFallbackName() }
+        let tags = await CategoryScanner.labels(for: itemIdentifier, provider: provider)
         guard let top = tags.first else { return t.setFallbackName() }
         if let pretty = await Apfel.albumName(tags: tags, language: t.language) { return pretty }
         return CategoryScanner.displayName(top)
@@ -1420,14 +1424,13 @@ final class LibraryModel: ObservableObject {
         let total = members.count
         progress = t.progFaces(0, total)
         progressFraction = total > 0 ? 0 : nil
-        let lookup = assetsByID
-        let mgr = imageManager
+        let provider = imageProvider
         var done = 0
         // Bounded concurrency, matching enrichFlags: FaceScorer.score is a
         // network-allowed per-asset fetch, so a serial loop over thousands of
         // iCloud-evicted cluster members ran for hours. 6-wide overlaps the
         // download/decode latency; a stuck asset can't stall the batch (timeout
-        // inside VisionGuards).
+        // in the provider's faceScoring profile).
         var scores: [String: Double] = [:]
         await withTaskGroup(of: (String, Double).self) { group in
             var next = 0
@@ -1436,8 +1439,8 @@ final class LibraryModel: ObservableObject {
             func add() {
                 while !flag.isSet, !Task.isCancelled, next < members.count {
                     let id = members[next]; next += 1
-                    guard let a = lookup[id] else { continue }
-                    group.addTask { (id, await FaceScorer.score(asset: a, manager: mgr)) }
+                    guard provider.itemIdentifiers.contains(id) else { continue }
+                    group.addTask { (id, await FaceScorer.score(itemIdentifier: id, provider: provider)) }
                     return
                 }
             }
@@ -1505,71 +1508,21 @@ final class LibraryModel: ObservableObject {
     /// without publishing).
     func detectExactDuplicates(in snapshot: [ReviewGroup], _ t: L10n,
                                fracBase: Double = 0.9, fracSpan: Double = 0.1) async -> Set<ReviewGroup.ID> {
-        guard !snapshot.isEmpty else { return [] }
-        progress = t.progVerifying(0, snapshot.count)
-
-        // We need feature prints for the dimension+dHash-consistent groups.
-        // Re-use the existing photo hashes via a lightweight second pass.
-        // All hashing and print computation runs off the main actor.
-        let lookup = assetsByID
-        let mgr = imageManager
-
-        var exact: Set<ReviewGroup.ID> = []
-        var done = 0
-        for g in snapshot {
-            if Task.isCancelled || abortFlag.isSet { return exact }   // caller bails + cleans up
-            defer {
-                done += 1
-                if done % 10 == 0 {
-                    progress = t.progVerifying(done, snapshot.count)
-                    progressFraction = fracBase + fracSpan * Double(done) / Double(snapshot.count)
-                }
-            }
-
-            // 0+1. Pixel-free eligibility (member count, no videos, single UTI,
-            // matching dimensions) — pure Core predicate, unit-tested.
-            guard exactGroupPrecheck(g.photos) else { continue }
-
-            // 2. dHash distance == 0 for ALL pairs (computed in Core — no I/O).
-            //    We need thumbnails; request them with bounded concurrency.
-            let ids = g.photos.map(\.uuid)
-            let hashes = await LookAlikeScanner.dHashesPublic(ids, byID: lookup, manager: mgr)
-            guard hashes.count == ids.count else { continue }
-            let hashValues = ids.compactMap { hashes[$0] }
-            guard hashValues.count == ids.count else { continue }
-            var allZero = true
-            outer: for i in 0..<hashValues.count {
-                for j in (i + 1)..<hashValues.count {
-                    if hamming(hashValues[i], hashValues[j]) > ExactDuplicatePredicate.hammingThreshold {
-                        allZero = false; break outer
-                    }
-                }
-            }
-            guard allZero else { continue }
-
-            // 3. Feature-print distance ≤ featureThreshold for ALL pairs.
-            let spreads = await LookAlikeScanner.featureSpreads([ids], byID: lookup, manager: mgr) { _, _, _ in }
-            guard let spread = spreads.first, let s = spread,
-                  s <= ExactDuplicatePredicate.featureThreshold else { continue }
-
-            // 4. Byte verification: every member's original must hash identically.
-            //    Any unreadable/evicted original → cannot verify → not exact.
-            var digests: Set<String> = []
-            var verifiable = true
-            for id in ids {
-                guard let a = lookup[id],
-                      let d = await OriginalHasher.sha256(asset: a) else {
-                    verifiable = false
-                    break
-                }
-                digests.insert(d)
-            }
-            guard verifiable, digests.count == 1 else { continue }
-
-            exact.insert(g.id)
-        }
-
-        progress = ""
+        let provider = imageProvider
+        let photos = photoKitImages
+        let exact = await ExactDuplicatePass.detectExactDuplicates(
+            in: snapshot, hasher: OriginalHasher(asset: photos.asset(for:)),
+            dHashes: { await LookAlikeScanner.dHashesPublic($0, provider: provider) },
+            featureSpread: { ids in
+                let spreads = await LookAlikeScanner.featureSpreads([ids], provider: provider) { _, _, _ in }
+                return spreads.first ?? nil
+            },
+            isCancelled: { self.abortFlag.isSet },
+            progress: { done, total in
+                self.progress = t.progVerifying(done, total)
+                if done > 0 { self.progressFraction = fracBase + fracSpan * Double(done) / Double(total) }
+            },
+            onFinished: { self.progress = "" })
         return exact
     }
 
@@ -1595,68 +1548,29 @@ final class LibraryModel: ObservableObject {
     private func seedExactRejections(in built: [ReviewGroup],
                                      exact: Set<ReviewGroup.ID>, _ t: L10n,
                                      fracBase: Double, fracSpan: Double) async -> [ReviewGroup] {
-        guard !exact.isEmpty else { return built }
-        var built = built
-        // Report progress: the hi-q document re-check below suspends up to 30 s
-        // per candidate, so on a big library this tail can run minutes — it must
-        // keep the scan's single progress surface alive, not blank out.
-        let total = exact.count
-        var done = 0
-        progress = t.progVerifying(0, total)
-        progressFraction = fracBase
-        for i in built.indices where exact.contains(built[i].id) {
-            if Task.isCancelled || abortFlag.isSet { return built }   // caller bails + cleans up
-            defer {
-                done += 1
-                progress = t.progVerifying(done, total)
-                progressFraction = fracBase + fracSpan * Double(done) / Double(total)
-            }
-            let keeperID = built[i].keeperID
-            var seeds: Set<String> = []
-            // Byte-identical is an answer about PIXELS. It is not an answer
-            // about the LIBRARY ENTRY: the copy we would suggest removing may be
-            // the one the user captioned and filed into three albums, and the
-            // two thumbnails in the sheet are literally the same image, so they
-            // cannot catch it. Compare what each copy carries first; anything
-            // the probe cannot determine counts as "carries" (Core
-            // `carriesUniqueMetadata`) and the frame is simply not pre-marked —
-            // the group keeps its exact badge and stays the user's to decide.
-            let metadata = await libraryMetadata(for: built[i].photos.map(\.uuid))
-            let keeperMeta = metadata[keeperID] ?? LibraryMetadata()
-            for (j, p) in built[i].photos.enumerated() {
-                guard p.uuid != keeperID, p.isDeletable else { continue }
-                if carriesUniqueMetadata(candidate: metadata[p.uuid] ?? LibraryMetadata(),
-                                         keeper: keeperMeta) {
-                    uniqueMetadataWithheld += 1
-                    // Only badge what we could actually READ: an undetermined
-                    // probe justifies withholding the pre-mark, but claiming
-                    // "carries a caption" about a frame we couldn't read would
-                    // be inventing a fact on the confirmation surface.
-                    if (metadata[p.uuid] ?? LibraryMetadata()).isFullyDetermined {
-                        uniqueMetadataIDs.insert(p.uuid)
-                    }
-                    continue
-                }
-                if let asset = assetsByID[p.uuid] {
-                    switch await PhotoFlags.isDocumentHiQ(asset, manager: imageManager) {
-                    case .some(true):
-                        // Real document — upgrade the frame's flag so the UI
-                        // badge and every downstream guard agree.
-                        built[i].photos[j] = built[i].photos[j]
-                            .with(isDocument: true, documentEvalDegraded: false)
-                        continue
-                    case .none:
-                        continue   // couldn't verify — stay protective, don't seed
-                    case .some(false):
-                        break      // verified not a document — safe to seed
-                    }
-                }
-                seeds.insert(p.uuid)
-            }
-            built[i].rejected.formUnion(seeds)
-            built[i].autoSeeded = seeds
-        }
-        return built
+        let provider = imageProvider
+        let photos = photoKitImages
+        let metadata = PhotoKitMetadataProbe(
+            asset: photos.asset(for:), snapsiftTitles: AlbumWriter.allSnapsiftTitles,
+            descriptions: { await self.libraryDescriptions(for: $0) })
+        let result = await ExactDuplicatePass.seedExactRejections(
+            in: built, exact: exact, metadataProbe: metadata,
+            documentCheck: { id in
+                // Preserve the old absent-asset branch. The preceding byte pass
+                // cannot certify a missing asset, so it never seeds this case.
+                guard provider.itemIdentifiers.contains(id) else { return false }
+                return await PhotoFlags.isDocumentHiQ(id, provider: provider)
+            },
+            isCancelled: { self.abortFlag.isSet },
+            progress: { done, total in
+                self.progress = t.progVerifying(done, total)
+                self.progressFraction = fracBase + fracSpan * Double(done) / Double(total)
+            },
+            onMetadataWithheld: { id, fullyDetermined in
+                self.uniqueMetadataWithheld += 1
+                if fullyDetermined { self.uniqueMetadataIDs.insert(id) }
+            })
+        return result.groups
     }
 
     /// Album membership + caption presence for a set of frames.
@@ -1681,28 +1595,7 @@ final class LibraryModel: ObservableObject {
     /// pre-mark this function feeds silently stops firing on library churn the
     /// user never asked for. `userAlbumCount` (Core) excludes every title
     /// `AlbumWriter` can create, in any language.
-    private func libraryMetadata(for uuids: [String]) async -> [String: LibraryMetadata] {
-        guard !uuids.isEmpty else { return [:] }
-        let snapsiftTitles = AlbumWriter.allSnapsiftTitles
-        var albums: [String: Int] = [:]
-        for id in uuids {
-            guard let asset = assetsByID[id] else { continue }
-            // Through the lane: this is a synchronous PhotoKit call and a wedged
-            // photolibraryd must strand one sacrificial thread, never the pool.
-            // nil (timeout / breaker) stays nil — undetermined, not zero.
-            if let n: Int = await PhotoKitSyncLane.call({
-                let cols = PHAssetCollection.fetchAssetCollectionsContaining(
-                    asset, with: .album, options: nil)
-                var titles: [String] = []
-                titles.reserveCapacity(cols.count)
-                cols.enumerateObjects { col, _, _ in
-                    titles.append(col.localizedTitle ?? "")
-                }
-                return userAlbumCount(titles: titles, snapsiftTitles: snapsiftTitles)
-            }) {
-                albums[id] = n
-            }
-        }
+    private func libraryDescriptions(for uuids: [String]) async -> [String: Bool]? {
         var described: [String: Bool]? = nil
         if libraryIdentity.isVerified {
             let zs = uuids.map { QualitySidecar.zuuid(fromLocalIdentifier: $0) }
@@ -1717,11 +1610,7 @@ final class LibraryModel: ObservableObject {
                 described = byLocal
             }
         }
-        var out: [String: LibraryMetadata] = [:]
-        for id in uuids {
-            out[id] = LibraryMetadata(albumCount: albums[id], hasDescription: described?[id])
-        }
-        return out
+        return described
     }
 
     /// Groups whose surviving keeper no longer resolves in the LIVE library.
@@ -1984,7 +1873,7 @@ final class LibraryModel: ObservableObject {
         }
         var out: [String: Bool] = [:]
         for t in targets {
-            if let e = await PhotoFlags.editedFallback(t.asset) { out[t.uuid] = e }
+            if let e = await PhotoKitFlags.editedFallback(t.asset) { out[t.uuid] = e }
         }
         return out
     }
@@ -2123,7 +2012,7 @@ final class LibraryModel: ObservableObject {
         }
         guard !restoredGroups.isEmpty || !restoredCats.isEmpty else { return false }
 
-        assetsByID = map
+        photoKitImages = PhotoKitImageProvider(assetsByID: map, manager: imageManager)
         groups = restoredGroups
         exactDupeGroupIDs = exactIDs
         categories = restoredCats
@@ -2196,7 +2085,7 @@ final class LibraryModel: ObservableObject {
         let result = try await AlbumWriter.write(
             groups: groups,
             exactGroups: exactDupeGroupIDs,
-            assetsByID: assetsByID,
+            assetsByID: photoKitImages.assetsByID,
             extraNeedsLookAssets: pairedVideoUndeterminedAssets,
             t: t
         )
@@ -2294,9 +2183,9 @@ final class LibraryModel: ObservableObject {
         }
         exactDupeGroupIDs = survivingExactIDs
 
-        // FIX #5 — refresh assetsByID after a successful delete.
+        // FIX #5 — refresh the Photos snapshot after a successful delete.
         //
-        // After the delete pass the assetsByID map still holds the pre-delete
+        // After the delete pass the Photos snapshot still holds the pre-delete
         // snapshot: any asset that was removed is still in the map (stale), and if
         // the library was mutated by another process between the scan and now there
         // may be IDs in the map that no longer exist. We do a cheap metadata-only
@@ -2315,9 +2204,9 @@ final class LibraryModel: ObservableObject {
             fetched.enumerateObjects { asset, _, _ in
                 freshMap[asset.localIdentifier] = asset
             }
-            assetsByID = freshMap
+            photoKitImages = PhotoKitImageProvider(assetsByID: freshMap, manager: imageManager)
         } else {
-            assetsByID = [:]
+            photoKitImages = PhotoKitImageProvider(assetsByID: [:], manager: imageManager)
         }
 
         // Our own delete advanced the library token; move the staleness anchor
