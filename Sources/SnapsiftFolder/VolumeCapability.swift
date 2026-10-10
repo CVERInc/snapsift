@@ -69,7 +69,7 @@ public func classifyVolume(_ facts: VolumeFacts) -> VolumeCapability {
 }
 
 /// Opaque identity for a mounted volume, suitable for same-volume checks.
-public struct VolumeKey: Hashable, Sendable {
+public struct VolumeKey: Hashable, Codable, Sendable {
     public let rawValue: String
 
     public init(rawValue: String) {
