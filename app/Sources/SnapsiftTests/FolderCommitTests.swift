@@ -367,6 +367,193 @@ func checkFolderCommitAndHistory() async {
     await checkFolderPutBackFailures()
     await checkPartialCommitPort()
     await checkFolderHistoryRecovery()
+    await checkFolderUnsupportedRename()
+}
+
+@MainActor
+private func checkFolderUnsupportedRename() async {
+    let unsupported: (UnsafePointer<CChar>, UnsafePointer<CChar>, UInt32) -> Int32 = { _, _, _ in
+        errno = ENOTSUP
+        return -1
+    }
+    for unsupportedError in [ENOTSUP, EINVAL] {
+        do {
+            let f = try FolderCommitFixture(companions: ["b.mov"])
+            defer { f.cleanup() }
+            _ = try await f.run()
+            let record = try f.store.records()[0]
+            let bytes = try record.members.map { try Data(contentsOf: $0.trashURL!) }
+            var exclusiveCalls = 0
+            var renameCalls = 0
+            let port = FolderTrashPort(trash: f.port.trash, move: { from, to in
+                try FolderTrashPort.moveWithoutOverwrite(from, to, exclusiveRename: { _, _, flags in
+                    exclusiveCalls += 1
+                    check(flags == UInt32(RENAME_EXCL), "folder fallback: exclusive rename remains primary")
+                    errno = unsupportedError
+                    return -1
+                }, rename: { from, to in
+                    renameCalls += 1
+                    return Darwin.rename(from, to)
+                })
+            })
+            if case .restored = try f.store.putBack(record.id, port: port) {
+                check(true, "folder fallback: unsupported errno \(unsupportedError) restores grouped members")
+            } else { check(false, "folder fallback: unsupported errno \(unsupportedError) must restore") }
+            check(try record.members.enumerated().allSatisfy { index, member in
+                let live = try FolderMember.read(at: member.originalURL)
+                let restoredBytes = try Data(contentsOf: member.originalURL)
+                return live.fileID == member.fileID && live.size == member.size
+                    && live.modificationDate == member.modificationDate
+                    && restoredBytes == bytes[index]
+                    && !FileManager.default.fileExists(atPath: member.trashURL!.path)
+            }, "folder fallback: restored bytes and file identities are unchanged")
+            check(try exclusiveCalls == 2 && renameCalls == 2 && f.store.records()[0].state == .restored,
+                  "folder fallback: each unsupported exclusive move falls back once and records restoration")
+        } catch { check(false, "folder unsupported rename \(unsupportedError): \(error)") }
+    }
+
+    do {
+        let f = try FolderCommitFixture()
+        defer { f.cleanup() }
+        _ = try await f.run()
+        let record = try f.store.records()[0]
+        let member = record.members[0]
+        let sourceBytes = try Data(contentsOf: member.trashURL!)
+        let sentinel = Data("existing destination".utf8)
+        try sentinel.write(to: member.originalURL)
+        var renameCalls = 0
+        let port = FolderTrashPort(trash: f.port.trash, move: { from, to in
+            try FolderTrashPort.moveWithoutOverwrite(from, to, exclusiveRename: unsupported, rename: { from, to in
+                renameCalls += 1
+                return Darwin.rename(from, to)
+            })
+        })
+        if case .conflict(let urls) = try f.store.putBack(record.id, port: port) {
+            check(urls == [member.originalURL], "folder fallback: Put Back reports the existing destination conflict")
+        } else { check(false, "folder fallback: existing destination must report a conflict") }
+        // Bypass history preflight to exercise O_EXCL itself.
+        do {
+            try port.move(member.trashURL!, member.originalURL)
+            check(false, "folder fallback: placeholder must refuse an existing destination")
+        } catch {
+            check((error as NSError).domain == NSPOSIXErrorDomain && (error as NSError).code == Int(EEXIST),
+                  "folder fallback: exclusive placeholder reports EEXIST")
+        }
+        check(try renameCalls == 0 && Data(contentsOf: member.trashURL!) == sourceBytes
+              && Data(contentsOf: member.originalURL) == sentinel,
+              "folder fallback: conflict leaves both files intact without calling rename")
+    } catch { check(false, "folder fallback conflict fixture: \(error)") }
+
+    for mode in ["failure", "foreign-empty", "written", "foreign-link"] {
+        do {
+            let f = try FolderCommitFixture()
+            defer { f.cleanup() }
+            _ = try await f.run()
+            let record = try f.store.records()[0]
+            let member = record.members[0]
+            let sourceBytes = try Data(contentsOf: member.trashURL!)
+            let foreign = f.root.appendingPathComponent("foreign")
+            let sentinel = Data("foreign contents".utf8)
+            if mode == "foreign-link" {
+                try FileManager.default.createSymbolicLink(at: foreign, withDestinationURL: member.trashURL!)
+            } else { try Data().write(to: foreign) }
+            var foreignInfo = stat()
+            guard foreign.path.withCString({ lstat($0, &foreignInfo) }) == 0 else {
+                throw FolderCommitTestError.fixture
+            }
+            var sawPlaceholder = false
+            var changedDestination = false
+            let port = FolderTrashPort(trash: f.port.trash, move: { from, to in
+                try FolderTrashPort.moveWithoutOverwrite(from, to, exclusiveRename: unsupported, rename: { _, to in
+                    var info = stat()
+                    sawPlaceholder = lstat(to, &info) == 0
+                        && (info.st_mode & S_IFMT) == S_IFREG && info.st_size == 0
+                    if mode == "foreign-empty" || mode == "foreign-link" {
+                        changedDestination = foreign.path.withCString { Darwin.rename($0, to) } == 0
+                    } else if mode == "written" {
+                        changedDestination = (try? sentinel.write(to: member.originalURL)) != nil
+                    }
+                    errno = EIO
+                    return -1
+                })
+            })
+            if case .failed = try f.store.putBack(record.id, port: port) {
+                check(sawPlaceholder, "folder fallback: \(mode) rename failure follows creation of an empty regular placeholder")
+            } else { check(false, "folder fallback: \(mode) rename failure must be reported") }
+            check(try Data(contentsOf: member.trashURL!) == sourceBytes && f.store.records()[0].state == .removed,
+                  "folder fallback: \(mode) rename failure preserves the Trash item and removal history")
+            var destinationInfo = stat()
+            let exists = member.originalURL.path.withCString { lstat($0, &destinationInfo) } == 0
+            if mode == "failure" {
+                check(!exists, "folder fallback: failed rename cleans up its unchanged placeholder")
+            } else if mode == "written" {
+                check(changedDestination && (try? Data(contentsOf: member.originalURL)) == sentinel,
+                      "folder fallback: cleanup preserves a placeholder whose contents changed")
+            } else {
+                check(changedDestination && exists && destinationInfo.st_dev == foreignInfo.st_dev
+                      && destinationInfo.st_ino == foreignInfo.st_ino,
+                      "folder fallback: cleanup preserves the \(mode) destination with a different identity")
+            }
+        } catch { check(false, "folder fallback \(mode) fixture: \(error)") }
+    }
+
+    do {
+        let f = try FolderCommitFixture(companions: ["b.mov"])
+        defer { f.cleanup() }
+        _ = try await f.run()
+        let record = try f.store.records()[0]
+        var renameCalls = 0
+        let port = FolderTrashPort(trash: f.port.trash, move: { from, to in
+            try FolderTrashPort.moveWithoutOverwrite(from, to, exclusiveRename: unsupported, rename: { from, to in
+                renameCalls += 1
+                if renameCalls == 2 { errno = EIO; return -1 }
+                return Darwin.rename(from, to)
+            })
+        })
+        if case .failed = try f.store.putBack(record.id, port: port) {
+            check(try renameCalls == 3 && record.members.allSatisfy {
+                FileManager.default.fileExists(atPath: $0.trashURL!.path)
+                    && !FileManager.default.fileExists(atPath: $0.originalURL.path)
+            } && f.store.canPutBack(f.store.records()[0]),
+                  "folder fallback: partial Put Back rolls earlier members back through the same primitive")
+        } else { check(false, "folder fallback: partial Put Back must fail after rollback") }
+    } catch { check(false, "folder fallback partial Put Back: \(error)") }
+
+    do {
+        let f = try FolderCommitFixture(companions: ["b.mov"])
+        defer { f.cleanup() }
+        f.failTrashAt = 2
+        var restoreCalls = 0
+        let port = FolderTrashPort(trash: f.port.trash, move: { from, to in
+            restoreCalls += 1
+            try FolderTrashPort.moveWithoutOverwrite(from, to, exclusiveRename: unsupported)
+        })
+        let committer = FolderCommitter(history: f.store, trashPort: port)
+        check(try await committer.commit(groups: f.groups, items: f.items, primaryHashes: [:]) == 0,
+              "folder fallback: partial removal reports no committed grouped item")
+        check(try restoreCalls == 1 && f.candidate.members.allSatisfy {
+            (try? FolderMember.read(at: $0.url))?.fileID == $0.fileID
+        } && FileManager.default.contentsOfDirectory(atPath: f.trash.path).isEmpty,
+              "folder fallback: FolderCommitter restores earlier members with unchanged identities")
+    } catch { check(false, "folder fallback partial removal: \(error)") }
+
+    do {
+        let f = try FolderCommitFixture()
+        defer { f.cleanup() }
+        let destination = f.trash.appendingPathComponent("refused")
+        var renameCalls = 0
+        do {
+            try FolderTrashPort.moveWithoutOverwrite(f.candidate.primary.url, destination,
+                                                     exclusiveRename: { _, _, _ in errno = EACCES; return -1 },
+                                                     rename: { _, _ in renameCalls += 1; return 0 })
+            check(false, "folder fallback: supported rename errors must be reported")
+        } catch {
+            check((error as NSError).code == Int(EACCES) && renameCalls == 0
+                  && FileManager.default.fileExists(atPath: f.candidate.primary.url.path)
+                  && !FileManager.default.fileExists(atPath: destination.path),
+                  "folder fallback: errors other than ENOTSUP or EINVAL never create a placeholder")
+        }
+    } catch { check(false, "folder fallback errno gate: \(error)") }
 }
 
 @MainActor

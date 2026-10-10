@@ -29,11 +29,51 @@ public struct FolderTrashPort {
     /// Exclusive rename prevents overwriting even if a destination appears
     /// between the preflight and the move. Trash and originals share a volume.
     public nonisolated static func moveWithoutOverwrite(_ source: URL, _ destination: URL) throws {
+        try moveWithoutOverwrite(source, destination, exclusiveRename: Darwin.renamex_np)
+    }
+
+    public nonisolated static func moveWithoutOverwrite(
+        _ source: URL, _ destination: URL,
+        exclusiveRename: (UnsafePointer<CChar>, UnsafePointer<CChar>, UInt32) -> Int32,
+        rename: (UnsafePointer<CChar>, UnsafePointer<CChar>) -> Int32 = Darwin.rename
+    ) throws {
         guard source.isFileURL, destination.isFileURL else { throw FolderHistoryError.invalidPath }
-        let result = source.path.withCString { from in
-            destination.path.withCString { to in renamex_np(from, to, UInt32(RENAME_EXCL)) }
+        try source.path.withCString { from in
+            try destination.path.withCString { to in
+                if exclusiveRename(from, to, UInt32(RENAME_EXCL)) == 0 { return }
+                let exclusiveError = errno
+                guard exclusiveError == ENOTSUP || exclusiveError == EINVAL else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(exclusiveError))
+                }
+                // exFAT does not support RENAME_EXCL; reserve the destination exclusively.
+                let descriptor = open(to, O_CREAT | O_EXCL | O_WRONLY, mode_t(S_IRUSR | S_IWUSR))
+                guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+                var placeholder = stat()
+                let statResult = fstat(descriptor, &placeholder)
+                let statError = errno
+                let closeResult = close(descriptor)
+                let closeError = errno
+                guard statResult == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(statError)) }
+
+                func removePlaceholder() {
+                    var current = stat()
+                    if lstat(to, &current) == 0,
+                       current.st_dev == placeholder.st_dev, current.st_ino == placeholder.st_ino,
+                       (current.st_mode & S_IFMT) == S_IFREG, current.st_size == 0 {
+                        _ = unlink(to)
+                    }
+                }
+                guard closeResult == 0 else {
+                    removePlaceholder()
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(closeError))
+                }
+                guard rename(from, to) == 0 else {
+                    let renameError = errno
+                    removePlaceholder()
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(renameError))
+                }
+            }
         }
-        guard result == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
     }
 }
 

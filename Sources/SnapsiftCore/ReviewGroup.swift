@@ -93,4 +93,3 @@ public struct ReviewGroup: Identifiable {
     /// True when there are real frames that would be deleted.
     public var effectivelyArmed: Bool { !deletionIDs.isEmpty }
 }
-

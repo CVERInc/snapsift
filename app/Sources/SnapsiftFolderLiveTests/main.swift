@@ -40,9 +40,31 @@ private func expect(_ condition: Bool, _ label: String, reporter: CheckReporter)
     if !condition { throw HarnessError(message: label) }
 }
 
+private enum ImageFilesystem: String, CaseIterable {
+    case apfs, exfat, fat32
+
+    var label: String {
+        switch self {
+        case .apfs: return "APFS"
+        case .exfat: return "exFAT"
+        case .fat32: return "FAT32"
+        }
+    }
+
+    var hdiutilName: String {
+        switch self {
+        case .apfs: return "APFS"
+        case .exfat: return "ExFAT"
+        case .fat32: return "MS-DOS FAT32"
+        }
+    }
+
+    var volumeName: String { "SNAP\(rawValue.uppercased())" }
+}
+
 private struct Options {
     var externalPath: String?
-    var makeImage = false
+    var imageFilesystems: [ImageFilesystem]?
 
     static func parse(_ arguments: [String]) throws -> Options {
         var result = Options()
@@ -50,9 +72,21 @@ private struct Options {
         while index < arguments.count {
             switch arguments[index] {
             case "--make-image":
-                guard !result.makeImage else { throw HarnessError(message: "--make-image was provided more than once") }
-                result.makeImage = true
+                guard result.imageFilesystems == nil else {
+                    throw HarnessError(message: "--make-image was provided more than once")
+                }
+                result.imageFilesystems = ImageFilesystem.allCases
                 index += 1
+                if index < arguments.count, !arguments[index].hasPrefix("--") {
+                    let names = arguments[index].lowercased().split(separator: ",", omittingEmptySubsequences: false)
+                    let filesystems = names.compactMap { ImageFilesystem(rawValue: String($0)) }
+                    guard filesystems.count == names.count, !filesystems.isEmpty,
+                          Set(filesystems).count == filesystems.count else {
+                        throw HarnessError(message: "--make-image requires a comma-separated list of apfs,exfat,fat32 without duplicates")
+                    }
+                    result.imageFilesystems = filesystems
+                    index += 1
+                }
             case "--external":
                 guard result.externalPath == nil, index + 1 < arguments.count else {
                     throw HarnessError(message: "--external requires one mounted-volume path")
@@ -63,7 +97,7 @@ private struct Options {
                 throw HarnessError(message: "Unknown argument: \(arguments[index])")
             }
         }
-        guard !(result.makeImage && result.externalPath != nil) else {
+        guard !(result.imageFilesystems != nil && result.externalPath != nil) else {
             throw HarnessError(message: "Choose either --external <mounted-volume-path> or --make-image")
         }
         return result
@@ -619,37 +653,57 @@ private func setFinderTag(at url: URL) throws {
 
 @MainActor
 private final class DiskImageAttachment {
+    let filesystem: ImageFilesystem
+    private var imageURL: URL?
     private var mountPoint: URL?
     private var attached = false
 
+    init(filesystem: ImageFilesystem) { self.filesystem = filesystem }
+
     func createAndAttach(in root: URL) throws -> URL {
         let token = UUID().uuidString.lowercased()
-        let image = root.appendingPathComponent("folder-live-\(token).dmg")
-        let mount = root.appendingPathComponent("image-volume-\(token)", isDirectory: true)
+        let image = root.appendingPathComponent("folder-live-\(filesystem.rawValue)-\(token).dmg")
+        let mount = root.appendingPathComponent("image-\(filesystem.rawValue)-\(token)", isDirectory: true)
+        imageURL = image
         mountPoint = mount
         try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: false)
-        try runHdiutil(["create", "-size", "128m", "-fs", "APFS",
-                        "-volname", "SnapsiftLive\(token.prefix(8))",
+        try runHdiutil(["create", "-size", "128m", "-fs", filesystem.hdiutilName,
+                        "-volname", filesystem.volumeName,
                         "-type", "UDIF", image.path])
         try runHdiutil(["attach", "-nobrowse", "-mountpoint", mount.path, image.path])
         attached = true
         return mount
     }
 
-    func detach(reporter: CheckReporter) {
-        guard attached, let mountPoint else { return }
-        do {
-            try runHdiutil(["detach", mountPoint.path])
-            attached = false
-            reporter.check(true, "disk image: external APFS volume detached")
-        } catch {
+    @discardableResult
+    func cleanup(reporter: CheckReporter) -> Bool {
+        if attached, let mountPoint {
             do {
-                try runHdiutil(["detach", "-force", mountPoint.path])
+                try runHdiutil(["detach", mountPoint.path])
                 attached = false
-                reporter.check(true, "disk image: detached with the forced cleanup fallback")
+                reporter.check(true, "\(filesystem.label): disk image detached")
             } catch {
-                reporter.check(false, "disk image: could not detach its own mount point: \(error)")
+                do {
+                    try runHdiutil(["detach", "-force", mountPoint.path])
+                    attached = false
+                    reporter.check(true, "\(filesystem.label): disk image detached with the forced cleanup fallback")
+                } catch {
+                    reporter.check(false, "\(filesystem.label): could not detach its own mount point: \(error)")
+                    return false
+                }
             }
+        }
+        do {
+            for url in [imageURL, mountPoint].compactMap({ $0 }) {
+                if FileManager.default.fileExists(atPath: url.path) {
+                    try FileManager.default.removeItem(at: url)
+                }
+            }
+            reporter.check(true, "\(filesystem.label): disk image and mount directory deleted")
+            return true
+        } catch {
+            reporter.check(false, "\(filesystem.label): could not delete disk image or mount directory: \(error)")
+            return false
         }
     }
 
@@ -680,7 +734,7 @@ private enum SnapsiftFolderLiveTests {
         let reporter = CheckReporter()
         var startup: VolumeRun?
         var external: VolumeRun?
-        var diskImage: DiskImageAttachment?
+        var imagesCleanedUp = true
 
         do {
             let options = try Options.parse(Array(CommandLine.arguments.dropFirst()))
@@ -725,30 +779,35 @@ private enum SnapsiftFolderLiveTests {
                 } catch {
                     reporter.check(false, "external: setup failed: \(error)")
                 }
-            } else if options.makeImage {
-                do {
-                    let image = DiskImageAttachment()
-                    diskImage = image
-                    let mount = try image.createAndAttach(in: startRun.root)
-                    let probe = probeVolume(at: mount)
-                    try expect(probe.volumeKey != nil && probe.volumeKey != startupProbe.volumeKey,
-                               "disk image: attached APFS volume is distinct from startup Data",
-                               reporter: reporter)
-                    try expect(probe.facts.isRootFileSystem == false
-                               && probe.capability == .removalSupported && probe.volumeURL != nil,
-                               "disk image: attached APFS volume is writable and Trash-capable",
-                               reporter: reporter)
-                    external = try VolumeRun(label: "external APFS image", parent: mount,
-                                             isStartupVolume: false, volumeRoot: probe.volumeURL,
-                                             reporter: reporter)
-                } catch {
-                    reporter.check(false, "disk image: setup failed: \(error)")
-                }
             }
 
             for run in [startRun, external].compactMap({ $0 }) {
                 do { try await run.exercise() }
                 catch { reporter.check(false, "\(run.label): harness stopped: \(error)") }
+            }
+            for filesystem in options.imageFilesystems ?? [] {
+                let image = DiskImageAttachment(filesystem: filesystem)
+                var run: VolumeRun?
+                do {
+                    let mount = try image.createAndAttach(in: startRun.root)
+                    let probe = probeVolume(at: mount)
+                    try expect(probe.volumeKey != nil && probe.volumeKey != startupProbe.volumeKey,
+                               "\(filesystem.label): attached volume is distinct from startup Data",
+                               reporter: reporter)
+                    try expect(probe.facts.isRootFileSystem == false
+                               && probe.capability == .removalSupported && probe.volumeURL != nil,
+                               "\(filesystem.label): attached volume is writable and Trash-capable",
+                               reporter: reporter)
+                    let volumeRun = try VolumeRun(label: filesystem.label, parent: mount,
+                                                  isStartupVolume: false, volumeRoot: probe.volumeURL,
+                                                  reporter: reporter)
+                    run = volumeRun
+                    try await volumeRun.exercise()
+                } catch {
+                    reporter.check(false, "\(filesystem.label): image checks stopped: \(error)")
+                }
+                run?.cleanup(removeRoot: true)
+                if !image.cleanup(reporter: reporter) { imagesCleanedUp = false }
             }
         } catch {
             reporter.check(false, "Harness setup failed: \(error)")
@@ -756,8 +815,8 @@ private enum SnapsiftFolderLiveTests {
 
         external?.cleanup(removeRoot: true)
         startup?.cleanup(removeRoot: false)
-        if let diskImage { diskImage.detach(reporter: reporter) }
-        startup?.removeStartupRoot()
+        if imagesCleanedUp { startup?.removeStartupRoot() }
+        else { reporter.check(false, "startup: throwaway root retained because disk image cleanup failed") }
 
         reporter.printTable()
         exit(reporter.failures == 0 ? 0 : 1)
