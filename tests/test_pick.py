@@ -166,7 +166,7 @@ def test_rank_is_total_order():
 # round(q, 1) used banker's rounding (0.25 → 0.2) while Swift's .rounded() used
 # round-half-away (0.25 → 0.3), so the CLI and the app could pick DIFFERENT
 # keepers on a half-tenth quality boundary. The bucket must be the same integer
-# on both sides; Swift's mirror lives in app/.../SnapsiftCore/Keeper.swift.
+# on both sides; Swift's mirror lives in Sources/SnapsiftCore/Keeper.swift.
 
 def test_quality_bucket_round_half_up_matches_swift():
     # The exact half-boundaries where banker's vs away-from-zero diverged.

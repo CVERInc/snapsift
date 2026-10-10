@@ -57,7 +57,7 @@ from collections import Counter
 # RAW formats rank at 90 — above JPEG (80) but below HEIC (100).  A RAW file
 # is always the highest-fidelity capture; it is never a re-compressed derivative.
 # HEIC beats RAW only because HEIC is the iPhone-native processed result.
-# Must be kept in sync with SnapsiftCore/Keeper.swift `utiPriority`.
+# Must be kept in sync with Sources/SnapsiftCore/Keeper.swift `utiPriority`.
 UTI_PRIORITY = {
     "public.heic":               100,
     "public.heif":               100,

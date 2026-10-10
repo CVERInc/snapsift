@@ -24,6 +24,11 @@ reserved for the first signed and notarized build.
   - Marks made this way are attributed as "marked by you" in the audit log,
     never as an app suggestion.
 
+### Changed
+- Shared Core and PhotoKit libraries are now published from the root Swift
+  package for macOS 14 and iOS 17. The macOS app and its tools continue to build
+  from `app/`, consuming the same libraries locally.
+
 ## [0.10.0] — 2026-09-18
 
 The safety release. Everything below was reviewed in three adversarial rounds

@@ -1,23 +1,21 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// The native side of snapsift. SnapsiftCore is pure, dependency-free logic
-// (clustering, keeper ranking, dHash) ported 1:1 from the Python reference and
-// covered by the same cases. Tests are a framework-free executable runner
+// The macOS app and its executable tools consume the shared root libraries.
+// Tests are a framework-free executable runner
 // (`swift run SnapsiftTests`) so they work under CommandLineTools without Xcode,
-// matching the clioil/reepub family convention. The App and CLI targets layer
-// PhotoKit / Vision on top of Core in later phases.
+// matching the clioil/reepub family convention.
 let package = Package(
-    name: "snapsift",
-    // iOS declared for the future iPhone target (thin Xcode project consuming
-    // these same targets); SnapsiftIcon's body is macOS-fenced accordingly.
-    platforms: [.macOS(.v14), .iOS(.v17)],
+    name: "app",
+    platforms: [.macOS(.v14)],
     products: [
-        .library(name: "SnapsiftCore", targets: ["SnapsiftCore"]),
         .executable(name: "SnapsiftApp", targets: ["SnapsiftApp"]),
         .executable(name: "SnapsiftTests", targets: ["SnapsiftTests"]),
     ],
     dependencies: [
+        // Explicit name binds product references independently of the checkout
+        // directory's SwiftPM identity (including differently named worktrees).
+        .package(name: "snapsift", path: ".."),
         // Signet — CVER's shared design system (palette, tokens, glass surfaces, chrome).
         // Pinned to main / latest per the in-house dep convention.
         .package(url: "https://github.com/CVERInc/signet", branch: "main"),
@@ -25,26 +23,25 @@ let package = Package(
         // (source builds have no feed URL / public key and simply never see an
         // update). Pinned to an exact release tag, unlike the in-house deps
         // above: it is third-party and macOS-only (its own Package.swift
-        // declares only .macOS(.v12)), so it is attached to SnapsiftApp alone
-        // via a macOS platform condition below, not to the package's
-        // `dependencies` list as a whole.
+        // declares only .macOS(.v12)), so it is attached to SnapsiftApp alone,
+        // never to the root libraries.
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
     ],
     targets: [
-        .target(name: "SnapsiftCore"),
         // SwiftUI app over the same engine: PhotoKit enumeration + thumbnails +
-        // native deletion, with the reef family theme (now from CVERKit).
+        // native deletion, with Signet's shared theme.
         // SwiftUI app: PhotoKit's escaping, non-Sendable callbacks fit the
         // tools-5.9 default (Swift 5) language mode cleanly.
         .executableTarget(name: "SnapsiftApp", dependencies: [
-            "SnapsiftCore",
+            .product(name: "SnapsiftCore", package: "snapsift"),
+            .product(name: "SnapsiftPhotoKit", package: "snapsift"),
             .product(name: "Signet", package: "signet"),
-            // macOS-only: `platforms` above also declares iOS 17 for the future
-            // iPhone target, and Sparkle has no iOS build. All call sites are
-            // additionally guarded with #if os(macOS).
+            // Sparkle and its call sites are macOS-only.
             .product(name: "Sparkle", package: "Sparkle", condition: .when(platforms: [.macOS])),
         ]),
-        .executableTarget(name: "SnapsiftTests", dependencies: ["SnapsiftCore"]),
+        .executableTarget(name: "SnapsiftTests", dependencies: [
+            .product(name: "SnapsiftCore", package: "snapsift"),
+        ]),
         // Live-machine harness (`swift run SnapsiftLiveTests`): exercises the
         // REAL PhotoKit/Vision/sidecar paths against dedicated throwaway assets
         // it imports itself — never existing photos. Needs Photos permission
@@ -53,7 +50,9 @@ let package = Package(
         // The Info.plist is section-embedded into the Mach-O so TCC can attribute
         // the Photos prompt (a bare executable has no usage string → the request
         // hangs). MUST be run from a real Terminal for the prompt to surface.
-        .executableTarget(name: "SnapsiftLiveTests", dependencies: ["SnapsiftCore"],
+        .executableTarget(name: "SnapsiftLiveTests", dependencies: [
+            .product(name: "SnapsiftCore", package: "snapsift"),
+        ],
             exclude: ["Info.plist"],   // section-embedded via the linker, not a bundle resource
             linkerSettings: [.unsafeFlags([
                 "-Xlinker", "-sectcreate",

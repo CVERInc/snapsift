@@ -2,6 +2,7 @@ import Foundation
 import Photos
 import Vision
 import SnapsiftCore
+import SnapsiftPhotoKit
 
 /// On-device detection of the slice-1 protection / ranking flags for a Photo.
 ///

@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import SnapsiftCore
+import SnapsiftPhotoKit
 
 /// A semantic bucket from the "Similar sets" pass: all photos Vision tagged with
 /// the same content label, across the whole library and across time.
@@ -2236,40 +2237,10 @@ final class LibraryModel: ObservableObject {
         onNoSurvivorLeft: ((Int) -> Void)? = nil
     ) async throws -> Int {
         var tokenWasCurrent = false
-        let ports = CommitPorts<PHAsset, DeletionSession>(
-            fetchLive: { ids in
-                // Match scan/restore: burst sub-frames must resolve by identifier.
-                let opts = PHFetchOptions()
-                opts.includeAllBurstAssets = true
-                let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: opts)
-                var live: [String: PHAsset] = [:]
-                live.reserveCapacity(fetched.count)
-                fetched.enumerateObjects { a, _, _ in live[a.localIdentifier] = a }
-                return live
-            },
-            editedNow: { targets in
-                // Keep the WAL-aware sidecar and wedge-proof fallback in the app.
-                await self.currentEditedFlags(for: targets.map { (uuid: $0.uuid, asset: $0.item) })
-            },
-            favoriteNow: { $0.isFavorite },
-            burstSiblings: { asset in
-                guard asset.representsBurst, let bid = asset.burstIdentifier else { return nil }
-                let opts = PHFetchOptions()
-                opts.includeAllBurstAssets = true
-                let fetched = PHAsset.fetchAssets(withBurstIdentifier: bid, options: opts)
-                var ids: [String] = []
-                fetched.enumerateObjects { sibling, _, _ in ids.append(sibling.localIdentifier) }
-                return ids
-            },
-            makeJournalEntry: { DeletionSession(timestamp: $0, records: $1) },
-            writeIntent: { DeletionAuditLog.writeIntent($0) },
-            delete: { assets in
-                try await PHPhotoLibrary.shared().performChanges {
-                    PHAssetChangeRequest.deleteAssets(assets as NSArray)
-                }
-            },
-            appendAudit: { DeletionAuditLog.append($0) },
-            clearIntent: { DeletionAuditLog.clearIntent() })
+        let ports = PhotoKitCommitPorts.make(editedNow: { targets in
+            // Keep the WAL-aware sidecar and wedge-proof fallback in the app.
+            await self.currentEditedFlags(for: targets.map { (uuid: $0.uuid, asset: $0.item) })
+        })
         return try await commitOrchestrator.commit(
             groups: groups,
             isBusy: isScanning || refiningFaces || isDeleting || isWritingAlbums,
