@@ -1,5 +1,5 @@
 import SwiftUI
-import SnapsiftAppSupport
+import SnapsiftFolder
 import Signet
 
 struct FolderFormatBadge: View {

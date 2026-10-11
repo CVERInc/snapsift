@@ -1,6 +1,6 @@
 import Foundation
 import SnapsiftCore
-import SnapsiftAppSupport
+import SnapsiftFolder
 
 func folderAppIntegrationTests(_ check: (Bool, String) -> Void) {
     print("Folder app review state")

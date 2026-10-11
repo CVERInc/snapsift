@@ -1,6 +1,6 @@
 import Foundation
 import SnapsiftCore
-import SnapsiftAppSupport
+import SnapsiftFolder
 
 func reviewAlbumNamesTests(_ check: (Bool, String) -> Void) {
     print("Photos review album names")

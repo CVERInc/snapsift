@@ -1,6 +1,5 @@
 import Foundation
 import SnapsiftCore
-import SnapsiftFolder
 
 public struct FolderRemovalReview: Identifiable {
     public let id = UUID()

@@ -4,7 +4,6 @@ import ImageIO
 import UniformTypeIdentifiers
 import SnapsiftCore
 import SnapsiftFolder
-import SnapsiftAppSupport
 
 @MainActor
 func folderRemovalAppTests(_ check: (Bool, String) -> Void) async {

@@ -2,7 +2,6 @@ import Foundation
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
-import SnapsiftAppSupport
 import SnapsiftFolder
 
 private enum FolderReviewFormatTestError: Error { case imageWrite }

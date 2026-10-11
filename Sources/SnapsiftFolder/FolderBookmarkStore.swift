@@ -23,19 +23,23 @@ public enum FolderSourceError: Error, Equatable {
 public final class FolderAccess {
     public let url: URL
     private let started: Bool
+    private let stopAccess: (URL) -> Void
     private let lock = NSLock()
     private var stopped = false
 
-    public init(url: URL) throws {
+    public init(url: URL,
+                startAccess: (URL) -> Bool = { $0.startAccessingSecurityScopedResource() },
+                stopAccess: @escaping (URL) -> Void = { $0.stopAccessingSecurityScopedResource() }) throws {
         guard url.isFileURL else { throw FolderSourceError.notLocalDirectory }
         self.url = url
-        started = url.startAccessingSecurityScopedResource()
+        self.stopAccess = stopAccess
+        started = startAccess(url)
         do {
             guard try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
                 throw FolderSourceError.notLocalDirectory
             }
         } catch {
-            if started { url.stopAccessingSecurityScopedResource() }
+            if started { stopAccess(url) }
             stopped = true
             throw error
         }
@@ -46,7 +50,7 @@ public final class FolderAccess {
         let shouldStop = started && !stopped
         stopped = true
         lock.unlock()
-        if shouldStop { url.stopAccessingSecurityScopedResource() }
+        if shouldStop { stopAccess(url) }
     }
 
     deinit { stop() }
@@ -56,6 +60,8 @@ public final class FolderAccess {
 /// never references the Photos audit, intent, or scan-snapshot stores.
 public final class FolderBookmarkStore {
     public let url: URL
+    private let makeAccess: (URL) throws -> FolderAccess
+    private let resolveBookmark: (Data) throws -> (url: URL, wasStale: Bool)
 
     public static var defaultURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -63,7 +69,13 @@ public final class FolderBookmarkStore {
             .appendingPathComponent("folders.json")
     }
 
-    public init(url: URL = FolderBookmarkStore.defaultURL) { self.url = url }
+    public init(url: URL = FolderBookmarkStore.defaultURL,
+                makeAccess: @escaping (URL) throws -> FolderAccess = { try FolderAccess(url: $0) },
+                resolveBookmark: ((Data) throws -> (url: URL, wasStale: Bool))? = nil) {
+        self.url = url
+        self.makeAccess = makeAccess
+        self.resolveBookmark = resolveBookmark ?? Self.resolve
+    }
 
     public func load() throws -> [FolderBookmark] {
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
@@ -72,7 +84,7 @@ public final class FolderBookmarkStore {
 
     @discardableResult
     public func add(_ folder: URL) throws -> FolderBookmark {
-        let access = try FolderAccess(url: folder)
+        let access = try makeAccess(folder)
         defer { access.stop() }
         let bookmark = FolderBookmark(data: try Self.bookmarkData(for: folder))
         var stored = try load()
@@ -90,17 +102,8 @@ public final class FolderBookmarkStore {
         guard let index = stored.firstIndex(where: { $0.id == id }) else {
             throw FolderSourceError.bookmarkNotFound
         }
-        var stale = false
-        #if os(macOS)
-        let options: URL.BookmarkResolutionOptions = [.withSecurityScope, .withoutUI]
-        #else
-        // iOS document-provider bookmarks preserve the URL's granted scope;
-        // the explicit withSecurityScope option is macOS-only.
-        let options: URL.BookmarkResolutionOptions = [.withoutUI]
-        #endif
-        let folder = try URL(resolvingBookmarkData: stored[index].data, options: options,
-                             relativeTo: nil, bookmarkDataIsStale: &stale)
-        let access = try FolderAccess(url: folder)
+        let (folder, stale) = try resolveBookmark(stored[index].data)
+        let access = try makeAccess(folder)
         do {
             if stale {
                 stored[index] = FolderBookmark(id: id, data: try Self.bookmarkData(for: folder))
@@ -117,6 +120,20 @@ public final class FolderBookmarkStore {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try JSONEncoder().encode(bookmarks).write(to: url, options: .atomic)
+    }
+
+    private static func resolve(_ data: Data) throws -> (url: URL, wasStale: Bool) {
+        var stale = false
+        #if os(macOS)
+        let options: URL.BookmarkResolutionOptions = [.withSecurityScope, .withoutUI]
+        #else
+        // iOS document-provider bookmarks preserve the URL's granted scope;
+        // the explicit withSecurityScope option is macOS-only.
+        let options: URL.BookmarkResolutionOptions = [.withoutUI]
+        #endif
+        let folder = try URL(resolvingBookmarkData: data, options: options,
+                             relativeTo: nil, bookmarkDataIsStale: &stale)
+        return (folder, stale)
     }
 
     private static func bookmarkData(for url: URL) throws -> Data {

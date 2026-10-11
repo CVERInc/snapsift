@@ -1,7 +1,6 @@
 import SwiftUI
 import SnapsiftCore
 import SnapsiftFolder
-import SnapsiftAppSupport
 import Signet
 
 struct FolderPreCommitReviewSheet: View {

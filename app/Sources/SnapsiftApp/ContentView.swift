@@ -2,7 +2,7 @@ import SwiftUI
 import SnapsiftPhotoKit
 import Photos
 import SnapsiftCore
-import SnapsiftAppSupport
+import SnapsiftFolder
 import Signet
 
 struct ContentView: View {

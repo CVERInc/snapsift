@@ -1,6 +1,6 @@
 import SwiftUI
 import SnapsiftCore
-import SnapsiftAppSupport
+import SnapsiftFolder
 
 /// The gallery's concrete Photos and Folder adapters share review controls,
 /// while image access, decisions and persistence stay with their own model.

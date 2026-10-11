@@ -34,7 +34,6 @@ let package = Package(
         // SwiftUI app: PhotoKit's escaping, non-Sendable callbacks fit the
         // tools-5.9 default (Swift 5) language mode cleanly.
         .executableTarget(name: "SnapsiftApp", dependencies: [
-            "SnapsiftAppSupport",
             .product(name: "SnapsiftCore", package: "snapsift"),
             .product(name: "SnapsiftVision", package: "snapsift"),
             .product(name: "SnapsiftPhotoKit", package: "snapsift"),
@@ -44,7 +43,6 @@ let package = Package(
             .product(name: "Sparkle", package: "Sparkle", condition: .when(platforms: [.macOS])),
         ]),
         .executableTarget(name: "SnapsiftTests", dependencies: [
-            "SnapsiftAppSupport",
             .product(name: "SnapsiftCore", package: "snapsift"),
             .product(name: "SnapsiftVision", package: "snapsift"),
             .product(name: "SnapsiftFolder", package: "snapsift"),
@@ -53,10 +51,6 @@ let package = Package(
         // Manual Folder Mode harness. It intentionally uses the real system
         // Trash, but only for uniquely named generated fixtures.
         .executableTarget(name: "SnapsiftFolderLiveTests", dependencies: [
-            .product(name: "SnapsiftCore", package: "snapsift"),
-            .product(name: "SnapsiftFolder", package: "snapsift"),
-        ]),
-        .target(name: "SnapsiftAppSupport", dependencies: [
             .product(name: "SnapsiftCore", package: "snapsift"),
             .product(name: "SnapsiftFolder", package: "snapsift"),
         ]),

@@ -1,8 +1,7 @@
 import Foundation
 import SnapsiftCore
 @testable import SnapsiftPhotoKit
-import SnapsiftFolder
-import SnapsiftAppSupport
+@testable import SnapsiftFolder
 
 // Framework-free test runner: `swift run SnapsiftTests`.
 // Exits non-zero on any failure so it can gate CI. Mirrors the Python pytest
@@ -3079,6 +3078,387 @@ do {
               "commit ports clear only the injected journal")
     } catch { check(false, "Photos session synthetic fixture I/O: \(error)") }
 }
+
+// Shared Folder session integration: no image decoder, Photos library or system Trash.
+private enum FolderSessionTestError: Error { case refused }
+
+@MainActor
+private final class FolderSessionFixture {
+    let root: URL
+    let source: URL
+    let trash: URL
+    var items: [FolderItem] = []
+    var groups: [ReviewGroup] = []
+    var resolvedStarts = 0
+    var resolvedStops = 0
+    var resultStarts = 0
+    var resultStops = 0
+    var pauseScan = false
+    var pauseMetadata = false
+    var scanGate: CheckedContinuation<Void, Never>?
+    var metadataGate: CheckedContinuation<Void, Never>?
+    var failScan = false
+    var failTrashName: String?
+    var failAudit = false
+    var trashCalls = 0
+    var cross: [FolderCrossFolderDuplicate] = []
+    lazy var bookmarks = FolderBookmarkStore(url: root.appendingPathComponent("app-a/folders.json"), makeAccess: { url in
+        try FolderAccess(url: url, startAccess: { _ in self.resolvedStarts += 1; return true },
+                         stopAccess: { _ in self.resolvedStops += 1 })
+    }, resolveBookmark: { _ in (self.source, false) })
+    lazy var history = FolderHistoryStore(historyURL: root.appendingPathComponent("app-a/history.json"),
+        intentURL: root.appendingPathComponent("app-a/pending-removal.json"), write: { data, url in
+            if self.failAudit && url.lastPathComponent == "history.json" { throw FolderSessionTestError.refused }
+            try FolderHistoryStore.atomicWrite(data, url)
+        })
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("snapsift-folder-session-\(UUID())")
+        source = root.appendingPathComponent("source")
+        trash = root.appendingPathComponent("fake-trash")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: false)
+        for (index, name) in ["a.jpg", "b.jpg", "c.jpg"].enumerated() {
+            let url = source.appendingPathComponent(name)
+            try Data("fixture \(name)".utf8).write(to: url)
+            let member = try FolderMember.read(at: url)
+            let photo = Photo(uuid: name, filename: name, takenAt: Double(index), width: 16, height: 16,
+                              size: member.size, uti: "public.jpeg", edited: index == 2, editedUndetermined: false)
+            items.append(FolderItem(photo: photo, primary: member, members: [member],
+                                    directoryURL: source, folderKey: "source"))
+        }
+        var group = ReviewGroup(photos: items.map(\.photo), keeperID: items[0].id)
+        group.rejected = [items[1].id, items[2].id]
+        group.includeProtected = true
+        groups = [group]
+    }
+
+    func cleanup() { try? FileManager.default.removeItem(at: root) }
+    func session() -> FolderLibrarySession {
+        FolderLibrarySession(bookmarks: bookmarks, history: history,
+            trashPort: FolderTrashPort(trash: { url in
+                self.trashCalls += 1
+                if url.lastPathComponent == self.failTrashName { throw FolderSessionTestError.refused }
+                let destination = self.trash.appendingPathComponent(url.lastPathComponent)
+                try FolderTrashPort.moveWithoutOverwrite(url, destination)
+                return destination
+            }),
+            scan: { _ in
+                if self.pauseScan { await withCheckedContinuation { self.scanGate = $0 } }
+                if self.failScan { throw FolderSessionTestError.refused }
+                let access = try FolderAccess(url: self.source,
+                    startAccess: { _ in self.resultStarts += 1; return true },
+                    stopAccess: { _ in self.resultStops += 1 })
+                return FolderScanResult(items: self.items, groups: self.groups, exactGroupIDs: [],
+                    crossFolderDuplicates: self.cross,
+                    roots: [FolderScannedRoot(url: self.source, volume: probeVolume(at: self.source))],
+                    issues: [], primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [],
+                    imageProvider: FolderImageProvider(items: self.items), accesses: [access])
+            }, metadata: { _ in
+                if self.pauseMetadata { await withCheckedContinuation { self.metadataGate = $0 } }
+                return ["b.jpg": LibraryMetadata(albumCount: 0, hasDescription: true),
+                        "c.jpg": LibraryMetadata(albumCount: 0, hasDescription: nil)]
+            })
+    }
+}
+
+@MainActor
+private func waitForFolderSession(_ condition: () -> Bool) async -> Bool {
+    for _ in 0..<10_000 {
+        if condition() { return true }
+        await Task.yield()
+    }
+    return condition()
+}
+
+@MainActor
+private func checkFolderLibrarySession() async {
+    print("Shared Folder session orchestration")
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        f.pauseMetadata = true
+        let s = f.session()
+        s.addFolders([f.source])
+        s.addFolders([f.source])
+        check(s.folders.count == 1 && f.resolvedStarts == f.resolvedStops,
+              "folder session deduplicates selected URLs and balances selection scopes")
+        let before = f.resolvedStops
+        s.startScan()
+        check(s.isScanning, "folder session synchronously blocks scan re-entry")
+        check(await waitForFolderSession { f.metadataGate != nil }, "folder session cancellation reaches delayed metadata probe")
+        s.cancelScan()
+        f.metadataGate?.resume(); f.metadataGate = nil
+        check(await waitForFolderSession { !s.isScanning }, "folder session cancelled scan finishes")
+        check(s.result == nil && s.groups.isEmpty && s.uniqueMetadataIDs.isEmpty && s.crossFolderItemIDs.isEmpty
+              && !s.hasScanned && s.selection == nil && s.focusedFrame == nil,
+              "folder session never installs results or decisions after metadata cancellation")
+        check(f.resolvedStops == before + 1 && f.resultStarts == 1 && f.resultStops == 1,
+              "folder session cancellation stops bookmark and returned pipeline accesses")
+        if case .scanCancelled? = s.notice { check(true, "folder scan cancellation is a typed outcome") }
+        else { check(false, "folder scan cancellation is a typed outcome") }
+
+        f.pauseMetadata = false
+        f.pauseScan = true
+        s.startScan()
+        check(await waitForFolderSession { f.scanGate != nil }, "folder cancellation reaches delayed pipeline")
+        s.cancelScan()
+        f.scanGate?.resume(); f.scanGate = nil
+        check(await waitForFolderSession { !s.isScanning }, "folder delayed decoder finishes after cancellation")
+        check(s.result == nil && f.resultStarts == f.resultStops && f.resolvedStarts == f.resolvedStops,
+              "folder late pipeline result is released without installation")
+
+        f.pauseScan = false
+        var observedBeforeScanning = false
+        s.onChange = { if !s.isScanning { observedBeforeScanning = true } }
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder session synthetic scan completes")
+        check(observedBeforeScanning && s.hasScanned && s.groups.count == 1
+              && s.selection == s.groups[0].id && s.focusedFrame == "a.jpg" && s.uniqueMetadataIDs == ["b.jpg"],
+              "folder session installs review, metadata badges, focus and observation")
+        if case .scanFinished(let items, let groups)? = s.notice {
+            check(items == 3 && groups == 1, "folder scan completion carries item and group counts")
+        } else { check(false, "folder scan completion carries item and group counts") }
+        s.onChange = nil
+        s.presentRemovalReview()
+        check(s.isBusy && s.removalReview?.summary.itemCount == 2, "folder session final review locks actions and uses committer summary")
+        s.discardResult()
+        check(s.result != nil, "folder session cannot discard during final review")
+        s.cancelRemovalReview()
+        let retained = s.result // Explicit stop must work even while another owner retains the value.
+        s.discardResult()
+        check(s.result == nil && !s.hasScanned && s.groups.isEmpty && s.selection == nil && s.focusedFrame == nil
+              && s.notice == nil && s.item(for: "a.jpg") == nil && s.uniqueMetadataIDs.isEmpty && s.crossFolderMatches.isEmpty,
+              "folder discard clears all scan and review state")
+        check(retained != nil && f.resultStarts == f.resultStops && f.resolvedStarts == f.resolvedStops,
+              "folder discard explicitly stops retained pipeline accesses")
+        f.failScan = true
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder failed scan completes")
+        if case .scan? = s.errorOutcome { check(true, "folder scan failure is data without localization") }
+        else { check(false, "folder scan failure is data without localization") }
+        check(s.result == nil && f.resolvedStarts == f.resolvedStops, "folder failed scan installs nothing and stops scopes")
+    } catch { check(false, "folder cancellation/discard fixture: \(error)") }
+
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        f.failTrashName = "c.jpg"
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder partial commit fixture scans")
+        s.presentRemovalReview()
+        guard let review = s.removalReview else { check(false, "folder removal review exists"); return }
+        let outcome = await s.commitReviewed(review)
+        check(outcome?.removedCount == 1 && !s.isBusy && s.removalReview == nil,
+              "folder commit counts only successful moves and releases the operation lock")
+        if case .removalFailed(let failure, let path)? = outcome?.problems.first {
+            check(failure.itemID == "c.jpg" && path == f.items[2].primary.url.path,
+                  "folder per-item failure carries its reason and original path")
+        } else { check(false, "folder per-item failure carries its reason and original path") }
+        check(s.groups.count == 1 && s.groups[0].deletionIDs == ["c.jpg"] && s.groups[0].includeProtected
+              && s.item(for: "b.jpg") == nil && s.uniqueMetadataIDs.isEmpty,
+              "folder commit finishes successful removals and retains failed protected decisions")
+        check(await s.commitReviewed(review) == nil, "folder commit rejects a consumed final review")
+        s.presentHistory()
+        check(s.historyEntries.count == 1 && s.historyEntries[0].record.itemID == "b.jpg", "folder session reloads actual removal history")
+        if let entry = s.historyEntries.first {
+            await s.putBack(entry)
+            if case .putBackDone? = s.notice { check(true, "folder Put Back returns the restored outcome") }
+            else { check(false, "folder Put Back returns the restored outcome") }
+            check(s.historyEntries.first?.record.state == .restored && FileManager.default.fileExists(atPath: f.items[1].primary.url.path),
+                  "folder Put Back uses the injected move port and reloads history")
+        }
+        s.showHistory = false
+        f.failTrashName = nil
+        s.presentRemovalReview()
+        if let retry = s.removalReview {
+            let retryOutcome = await s.commitReviewed(retry)
+            check(retryOutcome?.removedCount == 1 && retryOutcome?.problems.isEmpty == true && s.groups.isEmpty
+                  && s.selection == nil && s.focusedFrame == nil, "folder successful retry repairs groups and focus")
+            if case .removed(1)? = s.notice { check(true, "folder successful removal count is typed") }
+            else { check(false, "folder successful removal count is typed") }
+        }
+        s.discardResult()
+    } catch { check(false, "folder partial commit fixture: \(error)") }
+
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder withdrawal fixture scans")
+        s.presentRemovalReview()
+        try Data("changed bytes".utf8).write(to: f.items[1].primary.url)
+        if let review = s.removalReview, let outcome = await s.commitReviewed(review) {
+            if case .withdrawal(let withdrawal, let paths)? = outcome.problems.first {
+                check(withdrawal.itemCount == 2 && paths.count == 2, "folder withdrawn group carries count, reason and reviewed paths")
+            } else { check(false, "folder withdrawn group carries count, reason and reviewed paths") }
+            check(outcome.removedCount == 0 && f.trashCalls == 0 && s.totalDeletions == 2,
+                  "folder withdrawal preserves decisions and performs no move")
+        } else { check(false, "folder withdrawal commit returned an outcome") }
+        s.discardResult()
+    } catch { check(false, "folder withdrawal fixture: \(error)") }
+
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        f.failAudit = true
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder audit fixture scans")
+        s.presentRemovalReview()
+        if let review = s.removalReview, let outcome = await s.commitReviewed(review) {
+            check(outcome.removedCount == 2 && outcome.problems.contains { if case .auditFailed = $0 { return true }; return false }
+                  && outcome.problems.contains { if case .pendingIntent = $0 { return true }; return false },
+                  "folder audit failure reports committed count and pending intent independently")
+        } else { check(false, "folder audit fixture returned a commit outcome") }
+        // Failed audit leaves an intent. The next launch recovers it, without sharing app B's files.
+        f.failAudit = false
+        let otherBookmarks = FolderBookmarkStore(url: f.root.appendingPathComponent("app-b/folders.json"))
+        let otherHistory = FolderHistoryStore(historyURL: f.root.appendingPathComponent("app-b/history.json"),
+                                             intentURL: f.root.appendingPathComponent("app-b/pending-removal.json"))
+        let other = FolderLibrarySession(bookmarks: otherBookmarks, history: otherHistory)
+        other.loadFolders()
+        check(try other.folders.isEmpty && otherHistory.records().isEmpty && otherHistory.pendingIntent().isEmpty,
+              "folder sessions isolate bookmarks, history and pending intent per app")
+        let launched = f.session()
+        if case .recovered(let count, let unavailable)? = launched.reconcileAtLaunch() {
+            check(count == 2 && unavailable == 0, "folder launch reconciliation reports recovered and unavailable counts")
+        } else { check(false, "folder launch reconciliation reports recovered and unavailable counts") }
+        check(try launched.reconcileAtLaunch() == nil && f.history.records().count == 2
+              && f.history.pendingIntent().isEmpty && f.resolvedStarts == f.resolvedStops,
+              "folder launch reconciliation runs once, clears intent and balances scopes")
+        check((try otherHistory.records()).isEmpty, "folder reconciliation never writes another app history")
+        s.discardResult()
+        try Data("invalid intent".utf8).write(to: f.history.intentURL)
+        let failedLaunch = f.session()
+        if case .failed? = failedLaunch.reconcileAtLaunch() { check(true, "folder reconcile failure is typed") }
+        else { check(false, "folder reconcile failure is typed") }
+        check(!failedLaunch.isBusy && f.resolvedStarts == f.resolvedStops, "folder failed reconciliation releases the lock and scopes")
+        try f.history.clearIntent()
+        failedLaunch.refreshHistory()
+        check(failedLaunch.recoveryOutcome == nil && failedLaunch.historyEntries.count == 2,
+              "folder successful reconciliation retry clears the previous failure")
+    } catch { check(false, "folder reconciliation/storage fixture: \(error)") }
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        var near = ReviewGroup(photos: Array(f.items.prefix(2)).map(\.photo), keeperID: "a.jpg")
+        near.rejected = ["b.jpg"]
+        near.autoSeeded = ["b.jpg"]
+        f.groups = [near]
+        f.cross = [FolderCrossFolderDuplicate(primarySHA256: "same-primary", itemIDs: ["b.jpg", "c.jpg"], folderKeys: ["first", "second"])]
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder cross-folder fixture scans")
+        check(s.groups.count == 2 && s.crossFolderItemIDs == ["b.jpg", "c.jpg"] && s.crossFolderMatches == [["b.jpg", "c.jpg"]]
+              && s.totalDeletions == 0 && s.groups.allSatisfy { $0.autoSeeded.isEmpty },
+              "folder session clears cross-folder suggestions and adds unassigned matches to review")
+        s.removeFolder(s.folders[0].id)
+        check(s.folders.isEmpty && s.result == nil && f.resolvedStarts == f.resolvedStops && f.resultStarts == f.resultStops,
+              "folder removal discards review and stops all accesses")
+    } catch { check(false, "folder cross-folder fixture: \(error)") }
+
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        // A new sidecar protects a previously unprotected marked file at commit.
+        f.groups[0].rejected = ["b.jpg"]
+        f.groups[0].includeProtected = false
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder live protection fixture scans")
+        s.presentRemovalReview()
+        try Data("new edit".utf8).write(to: f.source.appendingPathComponent("b.xmp"))
+        if let review = s.removalReview, let outcome = await s.commitReviewed(review) {
+            check(outcome.removedCount == 0 && outcome.problems.contains { if case .newlyProtected(1) = $0 { return true }; return false }
+                  && f.trashCalls == 0, "folder live protection becomes a typed newly-protected problem")
+        } else { check(false, "folder live protection returned a commit outcome") }
+        s.discardResult()
+    } catch { check(false, "folder live protection fixture: \(error)") }
+
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder pending intent fixture scans")
+        s.presentRemovalReview()
+        let record = FolderHistoryRecord(item: f.items[1], timestamp: "fixture", primarySHA256: "fixture", reason: .userRejected)
+        try f.history.writeIntent([record])
+        if let review = s.removalReview, let outcome = await s.commitReviewed(review) {
+            check(outcome.removedCount == 0 && outcome.problems.count == 2 && f.trashCalls == 0,
+                  "folder pending intent blocks a new removal without overwriting it")
+            if case .commitFailed(let error)? = outcome.problems.first {
+                if let error = error as? FolderHistoryError, case .pendingIntent = error {
+                    check(true, "folder blocked commit retains the typed pending-intent error")
+                } else { check(false, "folder blocked commit retains the typed pending-intent error") }
+            } else { check(false, "folder blocked commit retains the typed pending-intent error") }
+            if case .pendingIntent? = outcome.problems.last { check(true, "folder blocked commit also reports remaining intent") }
+            else { check(false, "folder blocked commit also reports remaining intent") }
+        } else { check(false, "folder pending intent fixture returned a commit outcome") }
+        s.discardResult()
+    } catch { check(false, "folder pending intent fixture: \(error)") }
+
+}
+
+private func checkFolderSessionMessages() {
+    print("Folder session outcome localization compatibility")
+    let url = URL(fileURLWithPath: "/fixture/photo.jpg")
+    let withdrawal = FolderGroupWithdrawal(groupID: ReviewGroup(photos: [ph(950, 0)], keeperID: "U950").id,
+                                            itemCount: 2, reason: .memberMissing(url))
+    let failure = FolderRemovalFailure(itemID: "item", reason: .trash("detail"))
+    for language in Language.allCases {
+        let t = L10n(language)
+        let pairs: [(FolderCommitProblem, String)] = [
+            (.withdrawal(withdrawal, paths: [url.path]), "\(t.folderWithdrawalReport(2, reason: withdrawal.reason))\n\(url.path)"),
+            (.removalFailed(failure, path: url.path), "\(url.path)\n\(t.folderRemovalFailure(failure.reason))"),
+            (.stale(2), t.folderStale(2)), (.newlyProtected(2), t.folderNewlyProtected(2)),
+            (.burstSkipped(2), t.commitBurstSkipped(2)), (.unverifiedKept(2), t.folderUnverifiedKept(2)),
+            (.keeperMissing(2), t.folderKeeperMissing(2)), (.survivorsMissing(2), t.folderSurvivorsMissing(2)),
+            (.auditFailed, t.folderAuditFailed()), (.pendingIntent, t.folderPendingIntent()),
+            (.commitFailed(CommitError.busy), t.folderCommitBusy()),
+            (.commitFailed(CommitError.journalWriteFailed), t.folderJournalFailed()),
+            (.commitFailed(FolderHistoryError.pendingIntent), t.folderPendingIntent()),
+            (.historyFailed(FolderSessionTestError.refused), t.folderHistoryFailed(FolderSessionTestError.refused.localizedDescription)),
+        ]
+        check(pairs.allSatisfy { $0.0.message(t) == $0.1 }, "folder commit outcomes preserve every existing message in \(language.rawValue)")
+        let outcome = FolderCommitOutcome(removedCount: 1, problems: [.stale(2), .auditFailed])
+        check(FolderOperationReport.removalIncomplete(outcome).message(t)
+              == [t.folderRemovalIncomplete(1), t.folderStale(2), t.folderAuditFailed()].joined(separator: "\n\n"),
+              "folder removal report preserves ordering and blank lines in \(language.rawValue)")
+        check(FolderSessionNotice.scanFinished(items: 3, groups: 1).message(t) == t.folderScanFinished(items: 3, groups: 1)
+              && FolderSessionNotice.scanCancelled.message(t) == t.folderScanCancelled()
+              && FolderSessionNotice.removed(2).message(t) == t.folderRemoved(2)
+              && FolderSessionNotice.nothingRemoved.message(t) == t.folderNothingRemoved()
+              && FolderSessionNotice.putBackDone.message(t) == t.folderPutBackDone(),
+              "folder notice outcomes preserve scan, removal and Put Back messages in \(language.rawValue)")
+        let putBack: [(FolderPutBackProblem, String)] = [
+            (.unavailable(.trashMissing), t.folderHistoryUnavailable(.trashMissing)),
+            (.conflict([url]), t.folderPutBackConflict([url])), (.parentMissing([url]), t.folderPutBackParentMissing([url])),
+            (.failed("detail"), t.folderPutBackFailed("detail")),
+            (.rollbackFailed([url], "detail"), t.folderPutBackPartial([url], detail: "detail")),
+            (.persistenceFailed(FolderSessionTestError.refused), t.folderPutBackPersistenceFailed(FolderSessionTestError.refused.localizedDescription)),
+        ]
+        check(putBack.allSatisfy { FolderOperationReport.putBack($0.0).message(t) == $0.1 },
+              "folder Put Back outcomes preserve every existing message in \(language.rawValue)")
+        check(FolderReconciliationOutcome.recovered(count: 2, unavailable: 1).message(t) == t.folderRecovered(2, unavailable: 1)
+              && FolderReconciliationOutcome.failed(FolderSessionTestError.refused).message(t)
+                == t.folderReconcileFailed(FolderSessionTestError.refused.localizedDescription),
+              "folder reconciliation outcomes preserve existing messages in \(language.rawValue)")
+    }
+}
+
+checkFolderSessionMessages()
+
+await checkFolderLibrarySession()
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

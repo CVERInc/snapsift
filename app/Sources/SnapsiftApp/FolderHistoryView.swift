@@ -1,6 +1,5 @@
 import SwiftUI
 import SnapsiftFolder
-import SnapsiftAppSupport
 import Signet
 
 struct FolderHistoryView: View {

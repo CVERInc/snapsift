@@ -2,7 +2,6 @@ import SnapsiftPhotoKit
 import Foundation
 import SnapsiftCore
 import SnapsiftFolder
-import SnapsiftAppSupport
 
 /// All user-facing strings, resolved for one ``Language``. Every message is an
 /// exhaustive `switch`, so the compiler refuses to build until a newly added

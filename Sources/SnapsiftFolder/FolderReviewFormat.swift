@@ -1,6 +1,5 @@
 import Foundation
 import UniformTypeIdentifiers
-import SnapsiftFolder
 
 /// Presentation facts only; member types never change the primary's Core rank.
 public struct FolderReviewFormat: Equatable, Sendable {

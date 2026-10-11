@@ -1,0 +1,1 @@
+../SnapsiftApp/FolderSessionMessages.swift
