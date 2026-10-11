@@ -28,6 +28,41 @@ func ph(_ pk: Int, _ takenAt: Double, w: Int = 4032, h: Int = 3024,
 }
 func sizes(_ g: [[Photo]]) -> [Int] { g.map(\.count) }
 
+func testAlbumTitles() -> PhotoLibraryAlbumTitles {
+    PhotoLibraryAlbumTitles(
+        bursts: .init(name: "Burst album", candidateTitles: ["Burst album"]),
+        blurry: .init(name: "Blurry album", candidateTitles: ["Blurry album"]),
+        documents: .init(name: "Documents album", candidateTitles: ["Documents album"]),
+        exact: .init(name: "Exact album", candidateTitles: ["Exact album"]),
+        needsLook: .init(name: "Needs-a-look album", candidateTitles: ["Needs-a-look album"]))
+}
+
+final class FakeAlbumWriteOperations: AlbumWriter.Operations {
+    var failedAdds: Set<String> = []
+    var failedRemovals: Set<String> = []
+    var addCounts: [String: Int] = [:]
+    var events: [String] = []
+
+    func add(_ assetIDs: [String], toAlbumNamed name: String,
+             candidateTitles: [String]) async throws -> Int {
+        events.append("add:\(name)")
+        if failedAdds.contains(name) { throw AlbumOperationFailure(name: name) }
+        return addCounts[name] ?? assetIDs.count
+    }
+
+    func remove(ids: Set<String>, fromAlbumTitles candidateTitles: [String]) async throws -> Int {
+        let name = candidateTitles[0]
+        events.append("remove:\(name)")
+        if failedRemovals.contains(name) { throw AlbumOperationFailure(name: name) }
+        return ids.count
+    }
+}
+
+struct AlbumOperationFailure: Error, LocalizedError {
+    let name: String
+    var errorDescription: String? { "failed \(name)" }
+}
+
 print("Clustering")
 check(sizes(cluster([ph(1, 0), ph(2, 1), ph(3, 2), ph(4, 100), ph(5, 101)],
                     gapSec: 3, sizeTol: 0.10)) == [3, 2], "basic burst → [3,2]")
@@ -2829,6 +2864,75 @@ do {
           && AlbumWriter.blurryCandidates(groups: [albumGroup], exactGroups: [albumGroup.id]).isEmpty,
           "exact groups never also enter burst/blurry buckets")
 
+}
+
+print("Per-album write outcomes")
+do {
+    let burstGroup = ReviewGroup(photos: [ph(900, 0), ph(901, 1)], keeperID: "U901")
+    let docsGroup = ReviewGroup(photos: [ph(902, 2, isDocument: true)], keeperID: "U902")
+    let exactGroup = ReviewGroup(photos: [ph(903, 3), ph(904, 4)], keeperID: "U903")
+    let needsLookGroup = ReviewGroup(photos: [ph(905, 5, editedUnknown: true)], keeperID: "U905")
+    let groups = [burstGroup, docsGroup, exactGroup, needsLookGroup]
+    let exactIDs: Set<ReviewGroup.ID> = [exactGroup.id]
+    let available = Set((900...905).map { "U\($0)" })
+    let operations = FakeAlbumWriteOperations()
+    operations.failedAdds = ["Burst album"]
+    let report = await AlbumWriter.writeReport(
+        groups: groups, exactGroups: exactIDs, availableAssetIDs: available,
+        titles: testAlbumTitles(), operations: operations)
+    check(report.bursts == .failed("failed Burst album")
+          && report.documents == .added(1)
+          && report.exactDupes == .added(1)
+          && report.needsLook == .added(1),
+          "one album failure does not stop independent writes")
+    check(operations.events.contains("add:Documents album")
+          && operations.events.contains("add:Exact album")
+          && operations.events.contains("add:Needs-a-look album"),
+          "remaining buckets are attempted after a failure")
+
+    let legacyOperations = FakeAlbumWriteOperations()
+    legacyOperations.failedAdds = ["Burst album"]
+    do {
+        _ = try await AlbumWriter.write(
+            groups: groups, exactGroups: exactIDs, availableAssetIDs: available,
+            titles: testAlbumTitles(), operations: legacyOperations)
+        check(false, "legacy write path throws on the first album failure")
+    } catch let error as AlbumOperationFailure {
+        check(error.name == "Burst album"
+              && legacyOperations.events == ["add:Burst album"],
+              "legacy write path still throws immediately for macOS callers")
+    } catch {
+        check(false, "legacy write path preserves the original operation error")
+    }
+}
+
+do {
+    let burstGroup = ReviewGroup(photos: [ph(910, 0), ph(911, 1)], keeperID: "U911")
+    let docsGroup = ReviewGroup(photos: [ph(912, 2, isDocument: true)], keeperID: "U912")
+    let operations = FakeAlbumWriteOperations()
+    operations.addCounts = ["Burst album": 0, "Documents album": 1]
+    let report = await AlbumWriter.writeReport(
+        groups: [burstGroup, docsGroup], exactGroups: [],
+        availableAssetIDs: ["U910", "U911", "U912"],
+        titles: testAlbumTitles(), operations: operations)
+    check(report.bursts == .nothingToAdd && report.documents == .added(1),
+          "report distinguishes an idempotent no-op from a new addition")
+}
+
+do {
+    let exactGroup = ReviewGroup(photos: [ph(920, 0), ph(921, 1)], keeperID: "U920")
+    let needsLookGroup = ReviewGroup(photos: [ph(922, 2, editedUnknown: true)], keeperID: "U922")
+    let operations = FakeAlbumWriteOperations()
+    operations.failedRemovals = ["Needs-a-look album"]
+    let report = await AlbumWriter.writeReport(
+        groups: [exactGroup, needsLookGroup], exactGroups: [exactGroup.id],
+        availableAssetIDs: ["U920", "U921", "U922"],
+        titles: testAlbumTitles(), operations: operations)
+    check(operations.events == ["remove:Exact album", "remove:Needs-a-look album"]
+          && report.exactDupes == .notAttempted
+          && report.needsLook == .failed("failed Needs-a-look album")
+          && report.moved == 1,
+          "reconciliation failure blocks both adds after ordered removals")
 }
 
 do {

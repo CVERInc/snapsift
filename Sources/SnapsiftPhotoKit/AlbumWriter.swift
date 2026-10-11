@@ -21,6 +21,49 @@ public struct AlbumWriteResult {
     public internal(set) var moved: Int = 0
 }
 
+/// Outcome for one app-owned album in a write pass.
+public enum AlbumWriteOutcome: Equatable, Sendable {
+    /// This pass added this many memberships to the album.
+    case added(Int)
+    /// The pass had no new memberships to add (including already-present items).
+    case nothingToAdd
+    /// A PhotoKit operation for this album failed.
+    case failed(String)
+    /// A dependent operation was skipped to preserve reconciliation safety.
+    case notAttempted
+}
+
+/// Per-album results from one Photos membership write pass.
+public struct AlbumWriteReport: Equatable, Sendable {
+    public internal(set) var bursts: AlbumWriteOutcome
+    public internal(set) var blurry: AlbumWriteOutcome
+    public internal(set) var documents: AlbumWriteOutcome
+    public internal(set) var exactDupes: AlbumWriteOutcome
+    public internal(set) var needsLook: AlbumWriteOutcome
+    /// Memberships removed from the two reconciled albums.
+    public internal(set) var moved: Int
+
+    init(bursts: AlbumWriteOutcome = .notAttempted,
+         blurry: AlbumWriteOutcome = .notAttempted,
+         documents: AlbumWriteOutcome = .notAttempted,
+         exactDupes: AlbumWriteOutcome = .notAttempted,
+         needsLook: AlbumWriteOutcome = .notAttempted,
+         moved: Int = 0) {
+        self.bursts = bursts
+        self.blurry = blurry
+        self.documents = documents
+        self.exactDupes = exactDupes
+        self.needsLook = needsLook
+        self.moved = moved
+    }
+
+    static var nothingToAdd: AlbumWriteReport {
+        AlbumWriteReport(bursts: .nothingToAdd, blurry: .nothingToAdd,
+                         documents: .nothingToAdd, exactDupes: .nothingToAdd,
+                         needsLook: .nothingToAdd)
+    }
+}
+
 // MARK: - AlbumWriter
 
 /// Writes scan results into named Photos albums (strictly non-destructive —
@@ -41,6 +84,44 @@ public struct AlbumWriteResult {
 /// `exactDupes` — see Part B in LibraryModel. All other buckets are for
 /// human review, explicitly not labeled as "delete".
 enum AlbumWriter {
+
+    /// Small PhotoKit boundary so write ordering and failure behavior can be
+    /// exercised without a live Photos library.
+    protocol Operations {
+        func add(_ assetIDs: [String], toAlbumNamed name: String,
+                 candidateTitles: [String]) async throws -> Int
+        func remove(ids: Set<String>, fromAlbumTitles candidateTitles: [String]) async throws -> Int
+    }
+
+    private struct Plan {
+        let bursts: [String]
+        let blurry: [String]
+        let documents: [String]
+        let exactRemove: Set<String>
+        let needsLookRemove: Set<String>
+        let exactAdd: [String]
+        let needsLookAdd: [String]
+    }
+
+    struct Execution {
+        let report: AlbumWriteReport
+        let error: Error?
+    }
+
+    private struct PhotoKitOperations: Operations {
+        let assetsByID: [String: PHAsset]
+
+        func add(_ assetIDs: [String], toAlbumNamed name: String,
+                 candidateTitles: [String]) async throws -> Int {
+            try await AlbumWriter.addAssets(assetIDs.compactMap { assetsByID[$0] },
+                                            toAlbumNamed: name,
+                                            candidateTitles: candidateTitles)
+        }
+
+        func remove(ids: Set<String>, fromAlbumTitles candidateTitles: [String]) async throws -> Int {
+            try await AlbumWriter.removeAssets(ids: ids, fromAlbumTitles: candidateTitles)
+        }
+    }
 
     // MARK: - Write
 
@@ -73,84 +154,175 @@ enum AlbumWriter {
         extraNeedsLookAssets: [PHAsset] = [],
         titles: PhotoLibraryAlbumTitles
     ) async throws -> AlbumWriteResult {
+        let allAssets = photoKitAssets(assetsByID: assetsByID,
+                                       extraNeedsLookAssets: extraNeedsLookAssets)
+        let plan = makePlan(groups: groups, exactGroups: exactGroups,
+                            availableAssetIDs: Set(allAssets.keys),
+                            extraNeedsLookIDs: extraNeedsLookAssets.map(\.localIdentifier))
+        let execution = await execute(plan, titles: titles,
+                                      operations: PhotoKitOperations(assetsByID: allAssets),
+                                      stopOnFailure: true)
+        if let error = execution.error { throw error }
+        return legacyResult(from: execution.report)
+    }
+
+    /// PhotoKit-backed report path used by `PhotoLibrarySession`.
+    static func writeReport(
+        groups: [ReviewGroup], exactGroups: Set<ReviewGroup.ID>,
+        assetsByID: [String: PHAsset], extraNeedsLookAssets: [PHAsset] = [],
+        titles: PhotoLibraryAlbumTitles
+    ) async -> AlbumWriteReport {
+        let allAssets = photoKitAssets(assetsByID: assetsByID,
+                                       extraNeedsLookAssets: extraNeedsLookAssets)
+        let plan = makePlan(groups: groups, exactGroups: exactGroups,
+                            availableAssetIDs: Set(allAssets.keys),
+                            extraNeedsLookIDs: extraNeedsLookAssets.map(\.localIdentifier))
+        return await execute(plan, titles: titles,
+                             operations: PhotoKitOperations(assetsByID: allAssets),
+                             stopOnFailure: false).report
+    }
+
+    /// Run the same bucket plan with independent album outcomes. PhotoKit
+    /// failures are captured in the report so other safe writes can proceed.
+    static func writeReport(
+        groups: [ReviewGroup], exactGroups: Set<ReviewGroup.ID>,
+        availableAssetIDs: Set<String>, extraNeedsLookIDs: [String] = [],
+        titles: PhotoLibraryAlbumTitles, operations: any Operations
+    ) async -> AlbumWriteReport {
+        let plan = makePlan(groups: groups, exactGroups: exactGroups,
+                            availableAssetIDs: availableAssetIDs.union(extraNeedsLookIDs),
+                            extraNeedsLookIDs: extraNeedsLookIDs)
+        return await execute(plan, titles: titles, operations: operations,
+                             stopOnFailure: false).report
+    }
+
+    /// Throwing test seam for the existing macOS-compatible fail-fast path.
+    static func write(
+        groups: [ReviewGroup], exactGroups: Set<ReviewGroup.ID>,
+        availableAssetIDs: Set<String>, extraNeedsLookIDs: [String] = [],
+        titles: PhotoLibraryAlbumTitles, operations: any Operations
+    ) async throws -> AlbumWriteResult {
+        let plan = makePlan(groups: groups, exactGroups: exactGroups,
+                            availableAssetIDs: availableAssetIDs.union(extraNeedsLookIDs),
+                            extraNeedsLookIDs: extraNeedsLookIDs)
+        let execution = await execute(plan, titles: titles, operations: operations,
+                                      stopOnFailure: true)
+        if let error = execution.error { throw error }
+        return legacyResult(from: execution.report)
+    }
+
+    private static func makePlan(groups: [ReviewGroup], exactGroups: Set<ReviewGroup.ID>,
+                                 availableAssetIDs: Set<String>,
+                                 extraNeedsLookIDs: [String]) -> Plan {
+        let bursts = burstCandidates(groups: groups, exactGroups: exactGroups)
+            .filter(availableAssetIDs.contains)
+        let blurry = blurryCandidates(groups: groups, exactGroups: exactGroups)
+            .filter(availableAssetIDs.contains)
+        let documents = documentCandidates(groups: groups).filter(availableAssetIDs.contains)
+        let exact = exactCandidates(groups: groups, exactGroups: exactGroups)
+            .filter(availableAssetIDs.contains)
+        var needsLook = needsLookCandidates(groups: groups)
+            .filter(availableAssetIDs.contains)
+        var seenNeedsLook = Set(needsLook)
+        for id in extraNeedsLookIDs where availableAssetIDs.contains(id) && !seenNeedsLook.contains(id) {
+            needsLook.append(id)
+            seenNeedsLook.insert(id)
+        }
+
+        // The plan resolves overlap protectively: needs-a-look wins. Its two
+        // removals must both finish before either reconciled album can be added.
+        let buckets = albumBucketPlan(exactCandidates: exact, needsLookCandidates: needsLook)
+        return Plan(bursts: bursts, blurry: blurry, documents: documents,
+                    exactRemove: buckets.exactRemove,
+                    needsLookRemove: buckets.needsLookRemove,
+                    exactAdd: buckets.exactAdd,
+                    needsLookAdd: buckets.needsLookAdd)
+    }
+
+    private static func photoKitAssets(assetsByID: [String: PHAsset],
+                                       extraNeedsLookAssets: [PHAsset]) -> [String: PHAsset] {
+        var assets: [String: PHAsset] = [:]
+        for asset in assetsByID.values { assets[asset.localIdentifier] = asset }
+        for asset in extraNeedsLookAssets { assets[asset.localIdentifier] = asset }
+        return assets
+    }
+
+    private static func execute(_ plan: Plan, titles: PhotoLibraryAlbumTitles,
+                                operations: any Operations,
+                                stopOnFailure: Bool) async -> Execution {
+        var report = AlbumWriteReport()
+
+        func add(_ ids: [String], title: PhotoLibraryAlbumTitle) async -> Result<AlbumWriteOutcome, Error> {
+            guard !ids.isEmpty else { return .success(.nothingToAdd) }
+            do {
+                let count = try await operations.add(ids, toAlbumNamed: title.name,
+                                                     candidateTitles: title.candidateTitles)
+                return .success(count > 0 ? .added(count) : .nothingToAdd)
+            } catch {
+                return .failure(error)
+            }
+        }
+
+        func store(_ result: Result<AlbumWriteOutcome, Error>, in slot: inout AlbumWriteOutcome) -> Error? {
+            switch result {
+            case .success(let outcome): slot = outcome; return nil
+            case .failure(let error): slot = .failed(error.localizedDescription); return error
+            }
+        }
+
+        if let error = store(await add(plan.bursts, title: titles.bursts), in: &report.bursts), stopOnFailure {
+            return Execution(report: report, error: error)
+        }
+        if let error = store(await add(plan.blurry, title: titles.blurry), in: &report.blurry), stopOnFailure {
+            return Execution(report: report, error: error)
+        }
+        if let error = store(await add(plan.documents, title: titles.documents), in: &report.documents), stopOnFailure {
+            return Execution(report: report, error: error)
+        }
+
+        // Reconciliation remains strict: exact removals happen first, then
+        // needs-a-look removals, and no add occurs until both phases succeed.
+        do {
+            if !plan.exactRemove.isEmpty {
+                report.moved += try await operations.remove(ids: plan.exactRemove,
+                                                            fromAlbumTitles: titles.exact.candidateTitles)
+            }
+        } catch {
+            report.exactDupes = .failed(error.localizedDescription)
+            return Execution(report: report, error: error)
+        }
+        do {
+            if !plan.needsLookRemove.isEmpty {
+                report.moved += try await operations.remove(ids: plan.needsLookRemove,
+                                                            fromAlbumTitles: titles.needsLook.candidateTitles)
+            }
+        } catch {
+            report.needsLook = .failed(error.localizedDescription)
+            report.exactDupes = .notAttempted
+            return Execution(report: report, error: error)
+        }
+
+        if let error = store(await add(plan.exactAdd, title: titles.exact), in: &report.exactDupes), stopOnFailure {
+            return Execution(report: report, error: error)
+        }
+        if let error = store(await add(plan.needsLookAdd, title: titles.needsLook), in: &report.needsLook), stopOnFailure {
+            return Execution(report: report, error: error)
+        }
+        return Execution(report: report, error: nil)
+    }
+
+    private static func legacyResult(from report: AlbumWriteReport) -> AlbumWriteResult {
+        func count(_ outcome: AlbumWriteOutcome) -> Int {
+            if case .added(let value) = outcome { return value }
+            return 0
+        }
         var result = AlbumWriteResult()
-
-        // Gather the assets for each bucket. Computed synchronously before the
-        // performChanges block — PHAsset is not Sendable through the closure.
-        let burstsIDs   = burstCandidates(groups: groups, exactGroups: exactGroups)
-        let blurryIDs   = blurryCandidates(groups: groups, exactGroups: exactGroups)
-        let docsIDs     = documentCandidates(groups: groups)
-        let exactIDs    = exactCandidates(groups: groups, exactGroups: exactGroups)
-        let needsLookIDs = needsLookCandidates(groups: groups)
-
-        let burstsAssets  = burstsIDs.compactMap  { assetsByID[$0] }
-        let blurryAssets  = blurryIDs.compactMap  { assetsByID[$0] }
-        let docsAssets    = docsIDs.compactMap    { assetsByID[$0] }
-        // Exclusivity across scans (red-team r2 P2-3). Within one write the two
-        // buckets cannot overlap, but the album write is membership-only and
-        // never recomputes what a PREVIOUS run put there: a frame filed under
-        // "Exact Duplicates" while Full Disk Access was granted reappears under
-        // "Needs a look" on a run without it, and Photos.app — the surface this
-        // tool deliberately hands the decision to — then shows one photo wearing
-        // "safe to remove" and "snapsift couldn't read this" at the same time.
-        // The plan says what to add and what to take OUT of the other bucket.
-        let exactAssets   = exactIDs.compactMap   { assetsByID[$0] }
-        // De-dup by localIdentifier: a Photo-level unverifiable frame and an
-        // extra (asset-only) frame can never collide in practice, but two
-        // scans' worth of extras could if a caller ever passed the same asset
-        // twice — membership add is idempotent per-call too, so this is belt
-        // and suspenders, not load-bearing.
-        var needsLookAssets = needsLookIDs.compactMap { assetsByID[$0] }
-        var seenNeedsLook = Set(needsLookAssets.map(\.localIdentifier))
-        for a in extraNeedsLookAssets where !seenNeedsLook.contains(a.localIdentifier) {
-            needsLookAssets.append(a)
-            seenNeedsLook.insert(a.localIdentifier)
-        }
-
-        // Each performChanges block is atomic per album — one block per album
-        // keeps the operations small and lets PhotoKit interleave UI updates.
-        if !burstsAssets.isEmpty {
-            result.bursts = try await addAssets(burstsAssets,
-                                                toAlbumNamed: titles.bursts.name,
-                                                candidateTitles: titles.bursts.candidateTitles)
-        }
-        if !blurryAssets.isEmpty {
-            result.blurry = try await addAssets(blurryAssets,
-                                                toAlbumNamed: titles.blurry.name,
-                                                candidateTitles: titles.blurry.candidateTitles)
-        }
-        if !docsAssets.isEmpty {
-            result.documents = try await addAssets(docsAssets,
-                                                   toAlbumNamed: titles.documents.name,
-                                                   candidateTitles: titles.documents.candidateTitles)
-        }
-        // Reconcile FIRST, so the final membership is what this scan believes.
-        // `albumBucketPlan` also resolves an (impossible-by-construction)
-        // overlap in the protective direction: needs-a-look wins, because a
-        // frame we could not classify must never be the one wearing the "safe
-        // to remove" label.
-        let plan = albumBucketPlan(
-            exactCandidates: exactAssets.map(\.localIdentifier),
-            needsLookCandidates: needsLookAssets.map(\.localIdentifier))
-        result.moved = try await removeAssets(
-            ids: plan.exactRemove,
-            fromAlbumTitles: titles.exact.candidateTitles)
-        result.moved += try await removeAssets(
-            ids: plan.needsLookRemove,
-            fromAlbumTitles: titles.needsLook.candidateTitles)
-
-        let exactToAdd = Set(plan.exactAdd)
-        let exactAddAssets = exactAssets.filter { exactToAdd.contains($0.localIdentifier) }
-        if !exactAddAssets.isEmpty {
-            result.exactDupes = try await addAssets(exactAddAssets,
-                                                    toAlbumNamed: titles.exact.name,
-                                                    candidateTitles: titles.exact.candidateTitles)
-        }
-        if !needsLookAssets.isEmpty {
-            result.needsLook = try await addAssets(needsLookAssets,
-                                                    toAlbumNamed: titles.needsLook.name,
-                                                    candidateTitles: titles.needsLook.candidateTitles)
-        }
+        result.bursts = count(report.bursts)
+        result.blurry = count(report.blurry)
+        result.documents = count(report.documents)
+        result.exactDupes = count(report.exactDupes)
+        result.needsLook = count(report.needsLook)
+        result.moved = report.moved
         return result
     }
 

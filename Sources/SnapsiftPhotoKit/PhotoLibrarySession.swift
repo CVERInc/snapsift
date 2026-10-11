@@ -1871,6 +1871,35 @@ public final class PhotoLibrarySession {
         return result
     }
 
+    /// Sort the scan result into Photos albums and report each album outcome.
+    /// Retrying reruns the whole pass; membership additions are idempotent, so
+    /// albums that already succeeded will report `nothingToAdd` on that retry.
+    public func writeAlbumsReport() async -> AlbumWriteReport {
+        guard !isWritingAlbums, !isDeleting else { return AlbumWriteReport() }
+        guard !groups.isEmpty || !pairedVideoUndeterminedAssets.isEmpty else {
+            return .nothingToAdd
+        }
+        isWritingAlbums = true
+        progress = .writingAlbums
+        defer { isWritingAlbums = false; progress = .idle }
+
+        let wasCurrent = PhotoLibraryChangeToken.isCurrent(scanChangeToken)
+        let report = await AlbumWriter.writeReport(
+            groups: groups,
+            exactGroups: exactDupeGroupIDs,
+            assetsByID: photoKitImages.assetsByID,
+            extraNeedsLookAssets: pairedVideoUndeterminedAssets,
+            titles: albumTitles
+        )
+        // A partial pass may still have changed Photos. Apply the same
+        // own-write token and snapshot handling as a successful legacy pass.
+        let ourIDs = Set(groups.flatMap { $0.photos.map(\.uuid) })
+            .union(pairedVideoUndeterminedAssets.map(\.localIdentifier))
+        restampTokenAfterOwnWrite(wasCurrent: wasCurrent, ourIDs: ourIDs)
+        saveSnapshotNow()
+        return report
+    }
+
     /// Delete every reviewed non-keeper, non-favorite frame via PhotoKit. macOS
     /// shows its own confirmation; items land in Recently Deleted (30 days).
     /// Returns the number actually removed.

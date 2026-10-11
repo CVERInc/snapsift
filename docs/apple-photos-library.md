@@ -18,7 +18,7 @@ Read `groups`, `exactDupeGroupIDs`, `categories`, protection counts and `uniqueM
 
 Call `restoreSnapshot()` on launch and `flushSnapshotSync()` when terminating. Decision changes schedule ordered, debounced saves automatically. A stale library token drops app-seeded marks and exact badges while retaining user decisions under the existing protection rules. Protected overrides are never persisted. `staleRestoreClearedCount`, `vanishedMarkCount`, `snapshotSaveFailedNotice` and `snapshotUnreadableNotice` let the shell present loss/degradation notices.
 
-`writeAlbums()` performs membership-only organization using the supplied current, localized and retired titles. `rotate(frameID:clockwise:)` affects display only; after user confirmation, `saveRotationToPhotos(frameID:)` live-checks pristine edit state and writes a reversible Photos adjustment. Unknown or already-edited state refuses the write.
+`writeAlbums()` performs membership-only organization using the supplied current, localized and retired titles. `writeAlbumsReport()` returns an outcome for each app-owned album and captures per-album failures; retrying reruns the whole pass, with membership additions remaining idempotent. `rotate(frameID:clockwise:)` affects display only; after user confirmation, `saveRotationToPhotos(frameID:)` live-checks pristine edit state and writes a reversible Photos adjustment. Unknown or already-edited state refuses the write.
 
 ## Commit and history
 
