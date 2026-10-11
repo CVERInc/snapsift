@@ -48,6 +48,7 @@ let package = Package(
             .product(name: "SnapsiftCore", package: "snapsift"),
             .product(name: "SnapsiftVision", package: "snapsift"),
             .product(name: "SnapsiftFolder", package: "snapsift"),
+            .product(name: "SnapsiftPhotoKit", package: "snapsift"),
         ]),
         // Manual Folder Mode harness. It intentionally uses the real system
         // Trash, but only for uniquely named generated fixtures.

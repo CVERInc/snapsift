@@ -1,3 +1,4 @@
+import SnapsiftPhotoKit
 import Foundation
 import SnapsiftCore
 import SnapsiftFolder

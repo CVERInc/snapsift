@@ -17,7 +17,18 @@ struct ScanSnapshot: Codable {
     /// Bump when the schema changes; loaders reject unknown versions.
     static let currentSchema = 1
 
+    init(schema: Int = currentSchema, kind: String, sourceID: String?, timestamp: Date,
+                changeToken: Data?, groups: [Group], categories: [Category]) {
+        self.schema = schema; self.kind = kind; self.sourceID = sourceID; self.timestamp = timestamp
+        self.changeToken = changeToken; self.groups = groups; self.categories = categories
+    }
+
     struct Group: Codable {
+        init(photos: [Photo], keeperID: String, rejected: [String], autoSeeded: [String],
+                    confidentDupe: Bool, exact: Bool) {
+            self.photos = photos; self.keeperID = keeperID; self.rejected = rejected
+            self.autoSeeded = autoSeeded; self.confidentDupe = confidentDupe; self.exact = exact
+        }
         let photos: [Photo]
         let keeperID: String
         let rejected: [String]
@@ -28,6 +39,7 @@ struct ScanSnapshot: Codable {
     }
 
     struct Category: Codable {
+        init(label: String, photos: [Photo]) { self.label = label; self.photos = photos }
         let label: String
         let photos: [Photo]
     }
@@ -45,24 +57,23 @@ struct ScanSnapshot: Codable {
     let categories: [Category]
 }
 
-enum ScanSnapshotStore {
-    static var url: URL {
-        DeletionAuditLog.directory.appendingPathComponent("last-scan.json")
-    }
+final class ScanSnapshotStore: @unchecked Sendable {
+    let url: URL
+    init(url: URL) { self.url = url }
 
     /// Serializes writes so enqueue order equals on-disk order: two same-priority
     /// detached saves would otherwise race and an older snapshot could overwrite a
     /// newer one, resurrecting just-deleted frames on relaunch. Callers enqueue
     /// from the main actor, so FIFO here preserves capture order.
-    private static let saveQueue = DispatchQueue(label: "net.cver.snapsift.snapshot-save", qos: .utility)
+    private let saveQueue = DispatchQueue(label: "net.cver.snapsift.snapshot-save", qos: .utility)
 
     /// Write failures never break a scan, but the snapshot is the SOLE store of
     /// the user's review decisions (not a rebuildable cache), so a failure must be
     /// surfaced by the caller — returns false so a disk-full loss doesn't go silent.
     @discardableResult
-    static func save(_ snapshot: ScanSnapshot) -> Bool {
+    func save(_ snapshot: ScanSnapshot) -> Bool {
         do {
-            let dir = DeletionAuditLog.directory
+            let dir = url.deletingLastPathComponent()
             if !FileManager.default.fileExists(atPath: dir.path) {
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             }
@@ -77,9 +88,9 @@ enum ScanSnapshotStore {
     /// Enqueue an asynchronous, serialized write and report the outcome on the
     /// caller's actor. The encode+write run on `saveQueue`, so writes land in the
     /// order they were enqueued regardless of scheduler pressure.
-    static func saveAsync(_ snapshot: ScanSnapshot, completion: @escaping @Sendable (Bool) -> Void) {
+    func saveAsync(_ snapshot: ScanSnapshot, completion: @escaping @Sendable (Bool) -> Void) {
         saveQueue.async {
-            let ok = save(snapshot)
+            let ok = self.save(snapshot)
             completion(ok)
         }
     }
@@ -88,7 +99,7 @@ enum ScanSnapshotStore {
     /// same serial queue so it lands AFTER any already-enqueued async writes, and
     /// blocks the caller until the bytes are on disk (the process may exit next).
     @discardableResult
-    static func saveSync(_ snapshot: ScanSnapshot) -> Bool {
+    func saveSync(_ snapshot: ScanSnapshot) -> Bool {
         saveQueue.sync { save(snapshot) }
     }
 
@@ -103,7 +114,7 @@ enum ScanSnapshotStore {
         case ok(ScanSnapshot)
     }
 
-    static func loadOutcome() -> LoadOutcome {
+    func loadOutcome() -> LoadOutcome {
         guard let data = try? Data(contentsOf: url) else { return .none }
         guard let snap = try? JSONDecoder().decode(ScanSnapshot.self, from: data),
               snap.schema == ScanSnapshot.currentSchema else {
@@ -117,24 +128,28 @@ enum ScanSnapshotStore {
         return .ok(snap)
     }
 
-    static func load() -> ScanSnapshot? {
+    func load() -> ScanSnapshot? {
         if case .ok(let snap) = loadOutcome() { return snap }
         return nil
     }
 
-    static func clear() {
+    func clear() {
         try? FileManager.default.removeItem(at: url)
     }
 
+}
+
+/// The library staleness anchor uses only PhotoKit persistent changes.
+enum PhotoLibraryChangeToken {
     /// Archived current library change token (nil when unavailable).
-    static func currentChangeTokenData() -> Data? {
+    static func currentData() -> Data? {
         let token = PHPhotoLibrary.shared().currentChangeToken
         return try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)
     }
 
     /// True when `saved` matches the CURRENT library state (i.e. nothing
     /// changed since the snapshot). False on any mismatch or decode failure.
-    static func changeTokenIsCurrent(_ saved: Data?) -> Bool {
+    static func isCurrent(_ saved: Data?) -> Bool {
         guard let saved,
               let savedToken = try? NSKeyedUnarchiver.unarchivedObject(
                   ofClass: PHPersistentChangeToken.self, from: saved)

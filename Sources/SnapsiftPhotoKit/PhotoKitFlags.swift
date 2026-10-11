@@ -1,6 +1,5 @@
 import Foundation
 import Photos
-import SnapsiftPhotoKit
 
 /// Photos-only metadata flags. Pixel analysis lives in SnapsiftVision.PhotoFlags.
 enum PhotoKitFlags {

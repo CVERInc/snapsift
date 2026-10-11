@@ -6,26 +6,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "→ python tests"
-# Prefer the system interpreter; when it lacks pytest/Pillow and refuses
-# `pip install` (PEP 668 externally-managed, e.g. Homebrew Python), fall
-# back to a project-local venv at .venv-test (created once, reused after).
+# Prefer the system interpreter when prerequisites already exist; otherwise
+# install only in a project-local venv, never into the machine's Python.
 PY=python3
 if ! "$PY" -c 'import pytest, PIL' 2>/dev/null; then
-    if ! "$PY" -m pip install -q pytest "Pillow>=9" 2>/dev/null; then
-        [ -x .venv-test/bin/python ] || "$PY" -m venv .venv-test
-        .venv-test/bin/python -m pip install -q pytest "Pillow>=9"
-        PY=.venv-test/bin/python
-    fi
+    [ -x .venv-test/bin/python ] || "$PY" -m venv .venv-test
+    .venv-test/bin/python -m pip install -q pytest "Pillow>=9"
+    PY=.venv-test/bin/python
 fi
 "$PY" -m pytest -q
 
 echo "→ swift build + tests (needs Xcode)"
-( cd app && swift build && swift run SnapsiftTests )
+( cd app && nice -n 10 swift build -j 3 && nice -n 10 swift run -j 3 SnapsiftTests )
 
 if command -v xcodebuild >/dev/null 2>&1 \
     && xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
     echo "→ iOS library builds (generic device, no signing)"
-    ./scripts/build-ios-libraries.sh
+    nice -n 10 ./scripts/build-ios-libraries.sh -jobs 3
 else
     echo "→ skipping iOS library builds: Xcode/iPhoneOS SDK unavailable locally"
 fi

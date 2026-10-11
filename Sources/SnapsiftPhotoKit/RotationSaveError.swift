@@ -1,6 +1,6 @@
 import Foundation
 
-enum RotationSaveError: LocalizedError {
+public enum RotationSaveError: LocalizedError {
     case noEditingInput
     case noSourceImage
     case renderFailed
@@ -16,7 +16,7 @@ enum RotationSaveError: LocalizedError {
     /// act on a guess.
     case frameEditStateUnknown
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .noEditingInput:
             return "Couldn't get editing access to this photo. Try again, or check that snapsift has Full Photos access."

@@ -7,6 +7,7 @@ import SnapsiftCore
 @MainActor
 public enum PhotoKitCommitPorts {
     public static func make(
+        storage: PhotoLibraryStorage = .init(directory: DeletionAuditLog.directory),
         editedNow: @escaping @MainActor ([(uuid: String, item: PHAsset)]) async -> [String: Bool]
     ) -> CommitPorts<PHAsset, DeletionSession> {
         CommitPorts<PHAsset, DeletionSession>(
@@ -32,13 +33,13 @@ public enum PhotoKitCommitPorts {
                 return ids
             },
             makeJournalEntry: { DeletionSession(timestamp: $0, records: $1) },
-            writeIntent: { DeletionAuditLog.writeIntent($0) },
+            writeIntent: { DeletionAuditLog.writeIntent($0, to: storage.journalURL) },
             delete: { assets in
                 try await PHPhotoLibrary.shared().performChanges {
                     PHAssetChangeRequest.deleteAssets(assets as NSArray)
                 }
             },
-            appendAudit: { DeletionAuditLog.append($0) },
-            clearIntent: { DeletionAuditLog.clearIntent() })
+            appendAudit: { DeletionAuditLog.append($0, to: storage.historyURL) },
+            clearIntent: { DeletionAuditLog.clearIntent(at: storage.journalURL) })
     }
 }

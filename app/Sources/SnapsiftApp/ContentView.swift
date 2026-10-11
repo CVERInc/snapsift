@@ -1,4 +1,5 @@
 import SwiftUI
+import SnapsiftPhotoKit
 import Photos
 import SnapsiftCore
 import SnapsiftAppSupport
@@ -447,7 +448,7 @@ struct ContentView: View {
         }
         // Feature 4: history sheet
         .sheet(isPresented: $showHistorySheet) {
-            DeletionHistoryView(t: t, onClose: { showHistorySheet = false })
+            DeletionHistoryView(store: model.history, t: t, onClose: { showHistorySheet = false })
         }
         // FIX 2: persistent alert when delete fails — never let a destructive
         // action fail silently. Gives the user a direct path to fix the permission.

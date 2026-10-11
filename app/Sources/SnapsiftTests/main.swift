@@ -1,5 +1,6 @@
 import Foundation
 import SnapsiftCore
+@testable import SnapsiftPhotoKit
 import SnapsiftFolder
 import SnapsiftAppSupport
 
@@ -2736,6 +2737,174 @@ folderAppIntegrationTests(check)
 folderReviewFormatTests(check)
 reviewAlbumNamesTests(check)
 await folderRemovalAppTests(check)
+
+
+print("Shared Photos session rules (no live library)")
+do {
+    struct Item { let id: String; let video: Bool }
+    let assets = [Item(id: "still", video: false), Item(id: "paired", video: true),
+                  Item(id: "ordinary", video: true), Item(id: "unknown", video: true)]
+    var probed: [String] = []
+    let result = await PhotoLibraryScanRules.excludePairedVideos(
+        assets, identifier: { $0.id }, isVideo: { $0.video }, isCancelled: { false },
+        pairing: { item in
+            probed.append(item.id)
+            switch item.id { case "paired": return true; case "ordinary": return false; default: return nil }
+        })
+    check(result.kept.map(\.id) == ["still", "ordinary"],
+          "paired and unknown videos are excluded; stills and proven unpaired videos remain")
+    check(result.undetermined.map(\.id) == ["unknown"],
+          "only unknown videos are routed to Needs a look")
+    check(probed == ["paired", "ordinary", "unknown"], "stills never need a paired-video probe")
+    var cancellationProbes = 0
+    _ = await PhotoLibraryScanRules.excludePairedVideos(
+        assets, identifier: { $0.id }, isVideo: { $0.video },
+        isCancelled: { cancellationProbes > 0 }, pairing: { _ in cancellationProbes += 1; return false })
+    check(cancellationProbes == 1, "paired-video exclusion stops probing on cancellation")
+
+    let groups = PhotoLibraryScanRules.reviewGroups([[ph(800, 0), ph(801, 1)],
+                                                     [ph(802, 2), ph(803, 3)]], confident: [0])
+    check(groups[0].confidentDupe && !groups[1].confidentDupe,
+          "neural confidence controls review sections only")
+    check(groups.allSatisfy { $0.rejected.isEmpty && $0.autoSeeded.isEmpty },
+          "confident bursts never pre-mark a deletion; only the exact pass may seed")
+    var faceGroup = ReviewGroup(photos: [ph(804, 0), ph(805, 1), ph(806, 2)], keeperID: "U804")
+    faceGroup.rejected = ["U805", "U806"]
+    faceGroup.autoSeeded = ["U805", "U806"]
+    faceGroup.confidentDupe = true
+    let refined = PhotoLibraryScanRules.refineWithFaces([faceGroup], scores: ["U805": 0.9])[0]
+    check(refined.keeperID == "U805" && refined.rejected == ["U806"] && refined.autoSeeded == ["U806"]
+          && refined.confidentDupe && refined.id == faceGroup.id,
+          "face re-pick unmarks the new keeper without changing other verdicts or group identity")
+    let favoriteGroup = ReviewGroup(photos: [ph(807, 0, fav: true), ph(808, 1)], keeperID: "U808")
+    check(PhotoLibraryScanRules.refineWithFaces([favoriteGroup], scores: ["U808": 1])[0].keeperID == "U807",
+          "favorite priority stays above face score")
+
+    var albumGroup = ReviewGroup(photos: [ph(820, 0), ph(821, 1), ph(822, 2, fav: true),
+                                         ph(823, 3, isDocument: true), ph(824, 4, editedUnknown: true),
+                                         ph(825, 5, docDegraded: true)], keeperID: "U821")
+    albumGroup.includeProtected = true
+    check(AlbumWriter.exactCandidates(groups: [albumGroup], exactGroups: [albumGroup.id]) == ["U820"],
+          "exact album honors the user's promoted keeper and excludes protected/unverifiable frames")
+    check(AlbumWriter.needsLookCandidates(groups: [albumGroup]) == ["U824", "U825"],
+          "unknown edit/document state goes to Needs a look regardless of override")
+    check(AlbumWriter.documentCandidates(groups: [albumGroup]) == ["U823"],
+          "confirmed documents remain organizational album members")
+    check(AlbumWriter.burstCandidates(groups: [albumGroup], exactGroups: [albumGroup.id]).isEmpty
+          && AlbumWriter.blurryCandidates(groups: [albumGroup], exactGroups: [albumGroup.id]).isEmpty,
+          "exact groups never also enter burst/blurry buckets")
+
+}
+
+do {
+    let photos = [ph(810, 0), ph(811, 1), ph(812, 2), ph(813, 3), ph(814, 4, editedUnknown: true)]
+    let snapshot = ScanSnapshot(kind: "lookAlikes", sourceID: "synthetic-album", timestamp: Date(),
+        changeToken: Data([1, 2, 3]),
+        groups: [.init(photos: photos, keeperID: "U810",
+                       rejected: ["U811", "U812", "U813", "U814"], autoSeeded: ["U811"],
+                       confidentDupe: true, exact: true)],
+        categories: [.init(label: "Synthetic set", photos: Array(photos.prefix(2)))])
+    let live = Dictionary(uniqueKeysWithValues: photos.map { ($0.uuid, false) })
+    let current = snapshot.restored(liveFavorites: live, editedNow: [:], tokenCurrent: true)
+    check(current.groups[0].rejected == ["U811", "U812", "U813", "U814"]
+          && current.groups[0].autoSeeded == ["U811"]
+          && current.groups[0].deletionIDs == ["U811", "U812", "U813"],
+          "current restore retains marks while unknown protection stays outside the deletion set")
+    check(current.exactIDs == [current.groups[0].id] && !current.groups[0].includeProtected,
+          "current restore remaps exact badges and resets protected consent")
+    let stale = snapshot.restored(liveFavorites: live, editedNow: [:], tokenCurrent: false)
+    check(stale.groups[0].rejected == ["U812", "U813", "U814"] && stale.groups[0].autoSeeded.isEmpty
+          && stale.groups[0].deletionIDs == ["U812", "U813"]
+          && stale.exactIDs.isEmpty && stale.staleClearedSeeds == 1,
+          "stale restore drops app seeds and exact badges, preserving manual marks")
+    var changed = live
+    changed["U812"] = true
+    changed.removeValue(forKey: "U813")
+    let protected = snapshot.restored(liveFavorites: changed, editedNow: ["U811": true], tokenCurrent: true)
+    check(protected.groups[0].rejected == ["U814"] && protected.groups[0].deletionIDs.isEmpty
+          && protected.vanishedMarks == 1,
+          "live favorite/edit changes re-protect frames and missing marks are counted")
+    check(protected.groups[0].photos.first { $0.uuid == "U811" }?.edited == true,
+          "restore carries newly read edits into the review model")
+    let missingKeeper = snapshot.restored(liveFavorites: ["U811": false, "U812": false],
+                                          editedNow: [:], tokenCurrent: true)
+    check(missingKeeper.groups[0].keeperID == "U811"
+          && !missingKeeper.groups[0].rejected.contains("U811") && missingKeeper.categories.isEmpty,
+          "missing keeper is re-picked and singleton categories dissolve")
+    let singleton = snapshot.restored(liveFavorites: ["U811": false], editedNow: [:], tokenCurrent: false)
+    check(singleton.groups.isEmpty, "groups with fewer than two live frames dissolve")
+
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent(".build/photos-session-tests-\(UUID().uuidString)", isDirectory: true)
+    let storage = PhotoLibraryStorage(directory: root)
+    let otherStorage = PhotoLibraryStorage(directory: root.appendingPathComponent("other-app"))
+    let store = ScanSnapshotStore(url: storage.snapshotURL)
+    defer { try? FileManager.default.removeItem(at: root) }
+    do {
+        check(store.saveSync(snapshot), "snapshot writes to the injected app directory")
+        let decoded = store.load()
+        check(decoded?.sourceID == snapshot.sourceID && decoded?.kind == snapshot.kind
+              && decoded?.changeToken == snapshot.changeToken && decoded?.groups[0].autoSeeded == ["U811"],
+              "schema-1 snapshot round-trips scope, kind, verdict anchor and marks")
+        if let encoded = try? JSONEncoder().encode(snapshot),
+           let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any],
+           let storedGroups = object["groups"] as? [[String: Any]] {
+            check(storedGroups[0]["includeProtected"] == nil, "protected consent is absent from snapshot bytes")
+        } else { check(false, "snapshot JSON is readable") }
+        let newer = ScanSnapshot(kind: "burst", sourceID: nil, timestamp: Date(), changeToken: Data([9]),
+                                 groups: [], categories: [])
+        store.saveAsync(snapshot) { _ in }
+        check(store.saveSync(newer) && store.load()?.changeToken == Data([9]),
+              "termination flush follows queued saves; older state cannot overwrite it")
+        check(!FileManager.default.fileExists(atPath: otherStorage.snapshotURL.path),
+              "one app's snapshot never creates another app's session")
+        let corrupt = Data("corrupt synthetic snapshot".utf8)
+        try corrupt.write(to: storage.snapshotURL)
+        if case .unreadable = store.loadOutcome() { check(true, "corrupt snapshot is distinguished from no session") }
+        else { check(false, "corrupt snapshot is distinguished from no session") }
+        let aside = storage.snapshotURL.deletingPathExtension().appendingPathExtension("unreadable.json")
+        check(try Data(contentsOf: aside) == corrupt, "unreadable snapshot bytes are preserved beside the injected file")
+        let wrongSchema = ScanSnapshot(schema: 999, kind: "burst", sourceID: nil, timestamp: Date(),
+                                       changeToken: nil, groups: [], categories: [])
+        check(store.saveSync(wrongSchema), "synthetic future-schema snapshot fixture is written")
+        if case .unreadable = store.loadOutcome() { check(true, "unsupported snapshot schema never restores verdicts") }
+        else { check(false, "unsupported snapshot schema never restores verdicts") }
+
+        func record(_ id: String) -> DeletionRecord {
+            DeletionRecord(timestamp: "2026-10-11T00:00:00Z", assetIdentifier: id, filename: "fixture.jpg",
+                           sizeBytes: 0, keeperIdentifier: "keeper", keeperFilename: "keeper.jpg", reason: .userRejected)
+        }
+        let intent = DeletionSession(timestamp: "2026-10-11T00:00:00Z",
+                                     records: [record("exists"), record("gone"), record("logged")])
+        let ports = await MainActor.run { PhotoKitCommitPorts.make(storage: storage, editedNow: { _ in [:] }) }
+        let written = await MainActor.run { ports.writeIntent(intent) }
+        check(written && DeletionAuditLog.pendingIntent(at: storage.journalURL)?.records.count == 3,
+              "PhotoKit commit ports journal to the injected location without touching Photos")
+        let logged = DeletionSession(timestamp: intent.timestamp, records: [record("logged")])
+        let audited = await MainActor.run { ports.appendAudit(logged) }
+        check(audited, "PhotoKit commit ports audit to the injected history")
+        let history = PhotoLibraryHistoryStore(storage: storage)
+        var reconciledIDs: [String] = []
+        let recovered = history.reconcile { ids in reconciledIDs = ids; return ["exists"] }
+        check(recovered == 1 && reconciledIDs == ["exists", "gone", "logged"],
+              "reconciliation live-checks intent and books only vanished, unlogged assets")
+        check(history.loadSessions().flatMap { $0.records.map(\.assetIdentifier) } == ["gone", "logged"],
+              "recovered history is newest-first and contains no invented or duplicate removal")
+        check(DeletionAuditLog.pendingIntent(at: storage.journalURL) == nil
+              && history.reconcile { _ in [] } == 0, "journal reconciliation is idempotent")
+        check(PhotoLibraryHistoryStore(storage: otherStorage).loadSessions().isEmpty,
+              "history and journal storage remain isolated per app")
+        check(history.exportText().contains("fixture.jpg"), "injected history supports plain-text export")
+        check(DeletionAuditLog.writeIntent(intent, to: storage.journalURL), "cancelled-commit intent fixture is written")
+        let before = history.loadSessions().count
+        check(history.reconcile { Set($0) } == 0 && history.loadSessions().count == before,
+              "cancelled system confirmation invents no deletion history")
+        check(DeletionAuditLog.writeIntent(intent, to: storage.journalURL), "clear-intent fixture is written")
+        await MainActor.run { ports.clearIntent() }
+        check(!FileManager.default.fileExists(atPath: storage.journalURL.path),
+              "commit ports clear only the injected journal")
+    } catch { check(false, "Photos session synthetic fixture I/O: \(error)") }
+}
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)
