@@ -3,6 +3,35 @@ import SnapsiftCore
 
 // Deterministic scan rules, shared with the framework-free tests.
 enum PhotoLibraryScanRules {
+    /// Filename is used by review/history, UTI by keeper ranking; neither is a
+    /// clustering input. Read each grouped asset once, leaving failures unknown.
+    static func prepareAssetMetadata(
+        _ clusters: [[Photo]], isCancelled: () -> Bool,
+        read: (String) async -> PhotoLibraryAssetMetadata?, progress: (Int, Int) -> Void
+    ) async -> [[Photo]] {
+        var seen: Set<String> = []
+        let ids = clusters.flatMap { $0.map(\.uuid) }.filter { seen.insert($0).inserted }
+        var metadata: [String: PhotoLibraryAssetMetadata] = [:]
+        progress(0, ids.count)
+        for (index, id) in ids.enumerated() {
+            if isCancelled() || Task.isCancelled { return clusters }
+            metadata[id] = await read(id)
+            progress(index + 1, ids.count)
+        }
+        return clusters.map { cluster in
+            cluster.map { p in
+                guard let m = metadata[p.uuid] else { return p }
+                return Photo(uuid: p.uuid, filename: m.filename, takenAt: p.takenAt,
+                             width: p.width, height: p.height, size: p.size, uti: m.uti,
+                             kind: p.kind, favorite: p.favorite, quality: p.quality,
+                             edited: p.edited, isDocument: p.isDocument,
+                             sharpness: p.sharpness, originalCamera: p.originalCamera,
+                             documentEvalDegraded: p.documentEvalDegraded,
+                             editedUndetermined: p.editedUndetermined)
+            }
+        }
+    }
+
     /// Near-identical confidence is only a review section; it never seeds rejections.
     static func reviewGroups(_ clusters: [[Photo]], confident: Set<Int> = []) -> [ReviewGroup] {
         clusters.enumerated().map { index, photos in

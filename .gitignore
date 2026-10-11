@@ -27,6 +27,3 @@ app/.build/
 *groups*.json
 *plan*.json
 *delete-uuids*.txt
-
-# Local verification artifacts
-.evidence/

@@ -2741,6 +2741,41 @@ await folderRemovalAppTests(check)
 
 print("Shared Photos session rules (no live library)")
 do {
+    func photo(_ id: String, _ time: Double) -> Photo {
+        Photo(uuid: id, filename: "", takenAt: time, width: 100, height: 100,
+              size: 0, uti: "", editedUndetermined: true)
+    }
+    let library = [photo("jpeg", 0), photo("heic", 1), photo("unknown", 100),
+                   photo("other", 101), photo("singleton", 200)]
+    let clustered = cluster(library, gapSec: 3, sizeTol: 0.1)
+    var reads: [String] = []
+    var reported: [(Int, Int)] = []
+    let prepared = await PhotoLibraryScanRules.prepareAssetMetadata(
+        clustered + [clustered[0]], isCancelled: { false }, read: { id in
+            reads.append(id)
+            guard id != "unknown" else { return nil }
+            return PhotoLibraryAssetMetadata(filename: "\(id).image",
+                                             uti: id == "heic" ? "public.heic" : "public.jpeg")
+        }, progress: { reported.append(($0, $1)) })
+    check(reads == ["jpeg", "heic", "unknown", "other"],
+          "resource reads visit grouped assets once, never library singletons")
+    check(prepared[0].map(\.uuid) == clustered[0].map(\.uuid)
+          && PhotoLibraryScanRules.reviewGroups(prepared)[0].keeperID == "heic",
+          "resource fields do not change clustering and UTI is ready before keeper ranking")
+    check(prepared[0][1].filename == "heic.image" && prepared[1][0] == library[2]
+          && prepared.flatMap { $0 }.allSatisfy { $0.size == 0 && $0.editedUndetermined && !$0.isDeletable },
+          "metadata failure keeps unknown fields; resource enrichment preserves unknown size and protection")
+    check(reported.map { $0.0 } == [0, 1, 2, 3, 4] && reported.allSatisfy { $0.1 == 4 },
+          "grouped resource phase reports progress from start through completion")
+    reads = []
+    _ = await PhotoLibraryScanRules.prepareAssetMetadata(
+        clustered, isCancelled: { !reads.isEmpty }, read: { id in
+            reads.append(id)
+            return nil
+        }, progress: { _, _ in })
+    check(reads == ["jpeg"], "grouped resource reads stop on cancellation")
+}
+do {
     struct Item { let id: String; let video: Bool }
     let assets = [Item(id: "still", video: false), Item(id: "paired", video: true),
                   Item(id: "ordinary", video: true), Item(id: "unknown", video: true)]
@@ -2858,6 +2893,41 @@ do {
               "termination flush follows queued saves; older state cannot overwrite it")
         check(!FileManager.default.fileExists(atPath: otherStorage.snapshotURL.path),
               "one app's snapshot never creates another app's session")
+        func checkSnapshotOrdering() {
+            let sameFile = ScanSnapshotStore(url: root.appendingPathComponent("unused/../last-scan.json"))
+            let otherFile = ScanSnapshotStore(url: otherStorage.snapshotURL)
+            check(sameFile.url == store.url, "snapshot URL normalization is stable before and after file creation")
+            let blocked = DispatchSemaphore(value: 0)
+            let resume = DispatchSemaphore(value: 0)
+            let olderDone = DispatchSemaphore(value: 0)
+            let newerDone = DispatchSemaphore(value: 0)
+            let otherDone = DispatchSemaphore(value: 0)
+            // Hold the first store's queue after a write, so independent queues
+            // deterministically let the newer write overtake the queued older one.
+            store.saveAsync(snapshot) { _ in
+                blocked.signal()
+                resume.wait()
+            }
+            check(blocked.wait(timeout: .now() + 5) == .success, "snapshot ordering fixture holds the first queue")
+            store.saveAsync(snapshot) { _ in olderDone.signal() }
+            sameFile.saveAsync(newer) { _ in newerDone.signal() }
+            otherFile.saveAsync(newer) { _ in otherDone.signal() }
+            check(otherDone.wait(timeout: .now() + 5) == .success && otherFile.load()?.changeToken == Data([9]),
+                  "a different snapshot URL writes independently of a blocked file")
+            let newerOvertook = newerDone.wait(timeout: .now() + 0.1) == .success
+            check(!newerOvertook, "stores at equivalent standardized URLs share one save queue")
+            resume.signal()
+            check(olderDone.wait(timeout: .now() + 5) == .success, "older queued snapshot finishes")
+            if !newerOvertook {
+                check(newerDone.wait(timeout: .now() + 5) == .success, "last-enqueued snapshot finishes")
+            }
+            check(store.load()?.changeToken == Data([9]),
+                  "two store instances retain the last-enqueued state after all writes finish")
+            store.saveAsync(snapshot) { _ in }
+            check(sameFile.saveSync(newer) && store.load()?.changeToken == Data([9]),
+                  "termination flush orders behind another store's asynchronous saves")
+        }
+        checkSnapshotOrdering()
         let corrupt = Data("corrupt synthetic snapshot".utf8)
         try corrupt.write(to: storage.snapshotURL)
         if case .unreadable = store.loadOutcome() { check(true, "corrupt snapshot is distinguished from no session") }

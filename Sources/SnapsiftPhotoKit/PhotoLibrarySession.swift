@@ -544,8 +544,6 @@ public final class PhotoLibrarySession {
         // The re-probe costs one failed sqlite open per scan for a no-FDA user.
         await loadEnrichmentIfNeeded(assets: assets)
         if bailIfCancelled() { return }
-        await prepareAssetMetadata(assets)
-        if bailIfCancelled() { return }
         // Chunked with yields: a 120K-asset map monopolises the main actor for
         // long enough that even the Cancel click can't be processed.
         var enriched: [Photo] = []
@@ -605,7 +603,9 @@ public final class PhotoLibrarySession {
         // just the verified cluster members, then build each group from the
         // enriched photos so the keeper respects sharpness and documents are
         // protected. Index-aligned with `verified` so the confident flags line up.
-        let flagged = await enrichFlags(verified.map(\.photos)) { done, total in
+        let resourcePhotos = await prepareAssetMetadata(verified.map(\.photos))
+        if bailIfCancelled() { return }
+        let flagged = await enrichFlags(resourcePhotos) { done, total in
             self.progress = .verifying(done, total)
             if total > 0 { self.progressFraction = 0.8 + 0.1 * Double(done) / Double(total) }
         }
@@ -648,7 +648,6 @@ public final class PhotoLibrarySession {
         let memberIDs = Set(groups.flatMap { $0.photos.map(\.uuid) }
             + categories.flatMap { $0.photos.map(\.uuid) })
         photoKitImages = photoKitImages.retaining(memberIDs)
-        assetMetadata = [:]
     }
 
     /// Drop Live Photo paired videos — the independent `.mov` companion that
@@ -703,26 +702,25 @@ public final class PhotoLibrarySession {
         libraryIdentity = enrichmentPort?.libraryIdentity ?? .unverified(.pathUnknown)
     }
 
-    private var assetMetadata: [String: PhotoLibraryAssetMetadata] = [:]
-
-    private func prepareAssetMetadata(_ assets: [PHAsset]) async {
-        assetMetadata = [:]
-        guard enrichmentPort == nil else { return }
-        for asset in assets {
-            if abortFlag.isSet || Task.isCancelled { return }
-            assetMetadata[asset.localIdentifier] = await PhotoKitSyncLane.call {
-                let resources = PHAssetResource.assetResources(for: asset)
-                let primary = resources.first { $0.type == .photo || $0.type == .video }
-                return PhotoLibraryAssetMetadata(filename: primary?.originalFilename ?? "",
-                                                 uti: primary?.uniformTypeIdentifier ?? "")
-            }
-        }
+    private func prepareAssetMetadata(_ clusters: [[Photo]]) async -> [[Photo]] {
+        // macOS already read these fields through its existing enrichment port.
+        guard enrichmentPort == nil else { return clusters }
+        return await PhotoLibraryScanRules.prepareAssetMetadata(
+            clusters, isCancelled: { self.abortFlag.isSet }, read: { id in
+                guard let asset = self.asset(for: id) else { return nil }
+                return await PhotoKitSyncLane.call {
+                    let resources = PHAssetResource.assetResources(for: asset)
+                    let primary = resources.first { $0.type == .photo || $0.type == .video }
+                    return PhotoLibraryAssetMetadata(filename: primary?.originalFilename ?? "",
+                                                     uti: primary?.uniformTypeIdentifier ?? "")
+                }
+            }, progress: { done, total in self.progress = .verifying(done, total) })
     }
 
     private func makePhoto(from asset: PHAsset) -> Photo {
         let id = asset.localIdentifier
         let e = enrichmentPort?.enrichment(for: id)
-        let metadata = enrichmentPort?.assetMetadata(for: asset) ?? assetMetadata[id]
+        let metadata = enrichmentPort?.assetMetadata(for: asset)
         let uti = metadata?.uti ?? ""
         let name = metadata?.filename ?? ""
         return Photo(uuid: id, filename: name,
@@ -885,16 +883,15 @@ public final class PhotoLibrarySession {
         }
         if bailIfCancelled() { return }
 
-        await prepareAssetMetadata(idGroups.flatMap { $0 }.compactMap { map[$0] })
-        if bailIfCancelled() { return }
-
         let raw = idGroups.compactMap { ids -> [Photo]? in
             let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0) }
                 .sorted { $0.takenAt < $1.takenAt }
             return photos.count >= 2 ? photos : nil
         }
         // Document protection + sharpness ranking over the cluster members only.
-        let enriched = await enrichFlags(raw) { done, total in
+        let resourcePhotos = await prepareAssetMetadata(raw)
+        if bailIfCancelled() { return }
+        let enriched = await enrichFlags(resourcePhotos) { done, total in
             self.progress = .verifying(done, total)
             if total > 0 { self.progressFraction = 0.7 + 0.15 * Double(done) / Double(total) }
         }
@@ -985,9 +982,6 @@ public final class PhotoLibrarySession {
         }
         if bailIfCancelled() { return }
 
-        await prepareAssetMetadata(idGroups.flatMap { $0 }.compactMap { map[$0] })
-        if bailIfCancelled() { return }
-
         // Build the qualifying buckets first (cheap, main-actor), THEN name them
         // with bounded concurrency. Each name awaits a Vision classify plus a fresh
         // apfel LLM subprocess (Apple Intelligence), so a serial loop over hundreds
@@ -1001,6 +995,11 @@ public final class PhotoLibrarySession {
                 .sorted { $0.takenAt < $1.takenAt }
             guard photos.count >= 2 else { continue }
             pending.append(PendingSet(photos: photos, rep: photos.first.map(\.uuid)))
+        }
+        if enrichmentPort == nil {
+            let resourcePhotos = await prepareAssetMetadata(pending.map(\.photos))
+            if bailIfCancelled() { return }
+            pending = resourcePhotos.map { PendingSet(photos: $0, rep: $0.first.map(\.uuid)) }
         }
         var names = [String?](repeating: nil, count: pending.count)
         let total = pending.count

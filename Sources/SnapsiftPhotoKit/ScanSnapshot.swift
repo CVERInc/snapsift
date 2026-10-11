@@ -59,19 +59,35 @@ struct ScanSnapshot: Codable {
 
 final class ScanSnapshotStore: @unchecked Sendable {
     let url: URL
-    init(url: URL) { self.url = url }
+    init(url: URL) {
+        // Normalize dot components without depending on whether the file exists.
+        self.url = url.absoluteURL.standardized
+        self.saveQueue = Self.queue(for: self.url)
+    }
 
     /// Serializes writes so enqueue order equals on-disk order: two same-priority
     /// detached saves would otherwise race and an older snapshot could overwrite a
     /// newer one, resurrecting just-deleted frames on relaunch. Callers enqueue
     /// from the main actor, so FIFO here preserves capture order.
-    private let saveQueue = DispatchQueue(label: "net.cver.snapsift.snapshot-save", qos: .utility)
+    private let saveQueue: DispatchQueue
+    private static let queuesLock = NSLock()
+    private static var queues: [URL: DispatchQueue] = [:]
+
+    /// Windows share one file; separate apps' snapshot files stay independent.
+    private static func queue(for url: URL) -> DispatchQueue {
+        queuesLock.lock()
+        defer { queuesLock.unlock() }
+        if let queue = queues[url] { return queue }
+        let queue = DispatchQueue(label: "net.cver.snapsift.snapshot-save", qos: .utility)
+        queues[url] = queue
+        return queue
+    }
 
     /// Write failures never break a scan, but the snapshot is the SOLE store of
     /// the user's review decisions (not a rebuildable cache), so a failure must be
     /// surfaced by the caller — returns false so a disk-full loss doesn't go silent.
     @discardableResult
-    func save(_ snapshot: ScanSnapshot) -> Bool {
+    private func save(_ snapshot: ScanSnapshot) -> Bool {
         do {
             let dir = url.deletingLastPathComponent()
             if !FileManager.default.fileExists(atPath: dir.path) {
