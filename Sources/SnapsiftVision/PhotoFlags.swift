@@ -109,6 +109,7 @@ public enum PhotoFlags {
 
                 // Pass 1: document segmentation.
                 let docRequest = VNDetectDocumentSegmentationRequest()
+                VisionGuards.useSupportedComputeDevices([docRequest])
                 do {
                     try handler.perform([docRequest])
                 } catch {
@@ -123,6 +124,7 @@ public enum PhotoFlags {
                 let textRequest = VNRecognizeTextRequest()
                 textRequest.recognitionLevel = .fast   // fast: lower latency, still good for counting
                 textRequest.usesLanguageCorrection = false   // no hallucinated words
+                VisionGuards.useSupportedComputeDevices([textRequest])
                 do {
                     try handler.perform([textRequest])
                 } catch {
@@ -184,6 +186,7 @@ public enum PhotoFlags {
             visionQueue.async {
                 let handler = VNImageRequestHandler(cgImage: cg, options: [:])
                 let req = VNDetectDocumentSegmentationRequest()
+                VisionGuards.useSupportedComputeDevices([req])
                 do { try handler.perform([req]) } catch { cont.resume(returning: 0); return }
                 cont.resume(returning: req.results?.first?.confidence ?? 0)
             }

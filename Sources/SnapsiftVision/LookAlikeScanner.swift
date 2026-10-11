@@ -340,6 +340,7 @@ public enum LookAlikeScanner {
         return await withCheckedContinuation { cont in
             visionQueue.async {
                 let request = VNGenerateImageFeaturePrintRequest()
+                VisionGuards.useSupportedComputeDevices([request])
                 let handler = VNImageRequestHandler(cgImage: cg, options: [:])
                 do {
                     try handler.perform([request])
