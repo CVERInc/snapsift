@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import CoreGraphics
+import SnapsiftCore
 import SnapsiftVision
 #if canImport(AppKit)
 import AppKit
@@ -16,18 +17,25 @@ public final class PhotoKitImageProvider: ImageProvider {
     public let assetsByID: [String: PHAsset]
     public let itemIdentifiers: Set<String>
     private let manager: PHCachingImageManager
+    public let iCloudDownloadPolicy: ICloudDownloadPolicy
+    private let downloadAccounting: PhotoKitDownloadAccounting?
 
-    public init(assetsByID: [String: PHAsset], manager: PHCachingImageManager) {
+    public init(assetsByID: [String: PHAsset], manager: PHCachingImageManager,
+                iCloudDownloadPolicy: ICloudDownloadPolicy = .allowed,
+                downloadAccounting: PhotoKitDownloadAccounting? = nil) {
         self.assetsByID = assetsByID
         self.itemIdentifiers = Set(assetsByID.keys)
         self.manager = manager
+        self.iCloudDownloadPolicy = iCloudDownloadPolicy
+        self.downloadAccounting = downloadAccounting
     }
 
     public func asset(for itemIdentifier: String) -> PHAsset? { assetsByID[itemIdentifier] }
 
     public func retaining(_ itemIdentifiers: Set<String>) -> PhotoKitImageProvider {
         PhotoKitImageProvider(assetsByID: assetsByID.filter { itemIdentifiers.contains($0.key) },
-                              manager: manager)
+                              manager: manager, iCloudDownloadPolicy: iCloudDownloadPolicy,
+                              downloadAccounting: downloadAccounting)
     }
 
     private struct Settings {
@@ -87,18 +95,28 @@ public final class PhotoKitImageProvider: ImageProvider {
         guard let asset = assetsByID[itemIdentifier] else { return nil }
         let settings = settings(for: profile)
         let opts = PHImageRequestOptions()
-        opts.isNetworkAccessAllowed = settings.network
+        opts.isNetworkAccessAllowed = settings.network && iCloudDownloadPolicy == .allowed
         // Opportunistic serves whatever is cached locally NOW, even if smaller
         // than requested; fastFormat could wait forever for a forbidden download.
         // As before, the first callback wins, including a nil/degraded callback.
         opts.deliveryMode = settings.delivery
         opts.resizeMode = settings.resize
         opts.version = .current   // the PHImageRequestOptions default in every old call
+        let download = opts.isNetworkAccessAllowed ? downloadAccounting?.request(for: itemIdentifier) : nil
+        if let download {
+            opts.progressHandler = { progress, error, _, _ in
+                download.progress(progress, failed: error != nil)
+            }
+        }
         let box = ImageBox()
         let img: PhotoKitImage? = await withCheckedContinuation { cont in
             box.set(cont)
             manager.requestImage(for: asset, targetSize: settings.target,
-                                 contentMode: settings.contentMode, options: opts) { image, _ in
+                                 contentMode: settings.contentMode, options: opts) { image, info in
+                download?.complete(hasImage: image != nil,
+                                   degraded: (info?[PHImageResultIsDegradedKey] as? Bool) == true,
+                                   failed: (info?[PHImageCancelledKey] as? Bool) == true
+                                       || info?[PHImageErrorKey] != nil)
                 box.finish(image)
             }
             Task { try? await Task.sleep(nanoseconds: settings.timeoutNs); box.finish(nil) }

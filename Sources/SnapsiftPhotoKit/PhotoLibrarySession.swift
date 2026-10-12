@@ -26,15 +26,44 @@ public final class PhotoLibrarySession {
     private var albumTitles: PhotoLibraryAlbumTitles
     private var namingLanguage = "en-US"
     private var fallbackSetName = "Similar set"
+    /// Policy for subsequent operations, including restored review sets.
+    /// Requests already captured by an in-flight pass retain their policy.
+    public var iCloudDownloadPolicy: ICloudDownloadPolicy = .allowed {
+        willSet { onChange?() }
+        didSet { photoKitImages = makeImageProvider(assetsByID: photoKitImages.assetsByID) }
+    }
+    public private(set) var downloadingAssetCount = 0 { willSet { onChange?() } }
+    /// Completed image downloads in the latest scan or faces pass, not originals
+    /// or a byte/space estimate. Reset at the start of either operation.
+    public private(set) var downloadedAssetIDs: Set<String> = [] { willSet { onChange?() } }
+    private var downloadRevision: UInt64 = 0
+    private lazy var downloadAccounting = PhotoKitDownloadAccounting { [weak self] snapshot in
+        Task { @MainActor [weak self] in
+            guard let self, snapshot.revision > self.downloadRevision else { return }
+            self.downloadRevision = snapshot.revision
+            self.downloadingAssetCount = snapshot.downloadingAssetCount
+            self.downloadedAssetIDs = snapshot.downloadedAssetIDs
+        }
+    }
+
+    private func resetDownloadAccounting() {
+        downloadAccounting.reset()
+        let snapshot = downloadAccounting.snapshot
+        downloadRevision = snapshot.revision
+        downloadingAssetCount = 0
+        downloadedAssetIDs = []
+    }
 
     /// Storage is required so separate apps never share snapshots or deletion records.
     public init(storage: PhotoLibraryStorage, albumTitles: PhotoLibraryAlbumTitles,
-                enrichment: (any PhotoLibraryEnrichmentPort)? = nil) {
+                enrichment: (any PhotoLibraryEnrichmentPort)? = nil,
+                imageManager: PHCachingImageManager = PHCachingImageManager()) {
         self.storage = storage
         self.history = PhotoLibraryHistoryStore(storage: storage)
         self.snapshotStore = ScanSnapshotStore(url: storage.snapshotURL)
         self.albumTitles = albumTitles
         self.enrichmentPort = enrichment
+        self.imageManager = imageManager
     }
 
     /// Update localized output before a scan or album write; algorithms use no UI strings.
@@ -239,10 +268,25 @@ public final class PhotoLibrarySession {
     /// A running face-refine mutates keepers concurrently, so the two pipelines
     /// are mutually exclusive here (and again in `refineWithFaces`).
     public func startScan(_ kind: ScanKind) {
+        guard beginScan(kind) else { return }
+        scanTask = Task { [weak self] in
+            guard let self else { return }
+            switch kind {
+            case .burst:       await self.scan()
+            case .lookAlikes:  await self.scanLookAlikes()
+            case .similarSets: await self.scanSimilarSets()
+            }
+        }
+    }
+
+    /// Synchronous operation boundary, also exercisable without a real library.
+    @discardableResult
+    func beginScan(_ kind: ScanKind) -> Bool {
         // isWritingAlbums: writeAlbums suspends across performChanges and then
         // saves a snapshot — a scan started in that window would wipe `groups`
         // out from under it (the save itself is also guarded, belt-and-braces).
-        guard !isScanning, !refiningFaces, !isDeleting, !isWritingAlbums else { return }
+        guard !isScanning, !refiningFaces, !isDeleting, !isWritingAlbums else { return false }
+        resetDownloadAccounting()
         // Set synchronously — the scan method body runs in a separately-enqueued
         // task, and a guard that only trips once the body executes lets a second
         // startScan in the same runloop turn clobber scanTask/abortFlag (Cancel
@@ -257,14 +301,7 @@ public final class PhotoLibrarySession {
         staleRestoreClearedCount = nil
         lastScanKind = kind
         abortFlag = AbortFlag()
-        scanTask = Task { [weak self] in
-            guard let self else { return }
-            switch kind {
-            case .burst:       await self.scan()
-            case .lookAlikes:  await self.scanLookAlikes()
-            case .similarSets: await self.scanSimilarSets()
-            }
-        }
+        return true
     }
 
     /// Cancel the in-flight scan OR face-refine. The pipeline drains
@@ -309,9 +346,15 @@ public final class PhotoLibrarySession {
     var sizeTol = 0.10
     var maxSpan = 30.0
 
-    public let imageManager = PHCachingImageManager()
-    private lazy var photoKitImages = PhotoKitImageProvider(assetsByID: [:], manager: imageManager)
+    public let imageManager: PHCachingImageManager
+    private lazy var photoKitImages = makeImageProvider(assetsByID: [:])
     private var imageProvider: any ImageProvider { photoKitImages }
+
+    func makeImageProvider(assetsByID: [String: PHAsset]) -> PhotoKitImageProvider {
+        PhotoKitImageProvider(assetsByID: assetsByID, manager: imageManager,
+                             iCloudDownloadPolicy: iCloudDownloadPolicy,
+                             downloadAccounting: downloadAccounting)
+    }
 
     /// The library-state change token as of when the current review verdicts were
     /// last known valid (scan end, or restore). `makeSnapshot` persists THIS verbatim
@@ -513,7 +556,7 @@ public final class PhotoLibrarySession {
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
         groups = []
         categories = []
-        photoKitImages = PhotoKitImageProvider(assetsByID: [:], manager: imageManager)
+        photoKitImages = makeImageProvider(assetsByID: [:])
         facesApplied = false
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
@@ -534,7 +577,7 @@ public final class PhotoLibrarySession {
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
-        photoKitImages = PhotoKitImageProvider(assetsByID: map, manager: imageManager)
+        photoKitImages = makeImageProvider(assetsByID: map)
 
         // Enrich with Apple's quality scores + real file size from the library's
         // Photos.sqlite (read-only). A SUCCESSFUL load is cached for the session;
@@ -870,7 +913,7 @@ public final class PhotoLibrarySession {
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
-        photoKitImages = PhotoKitImageProvider(assetsByID: map, manager: imageManager)
+        photoKitImages = makeImageProvider(assetsByID: map)
 
         await loadEnrichmentIfNeeded(assets: assets)
         if bailIfCancelled() { return }
@@ -943,7 +986,7 @@ public final class PhotoLibrarySession {
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
         groups = []
         categories = []
-        photoKitImages = PhotoKitImageProvider(assetsByID: [:], manager: imageManager)
+        photoKitImages = makeImageProvider(assetsByID: [:])
         facesApplied = false
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
@@ -963,7 +1006,7 @@ public final class PhotoLibrarySession {
         var map: [String: PHAsset] = [:]
         map.reserveCapacity(assets.count)
         for a in assets { map[a.localIdentifier] = a }
-        photoKitImages = PhotoKitImageProvider(assetsByID: map, manager: imageManager)
+        photoKitImages = makeImageProvider(assetsByID: map)
 
         await loadEnrichmentIfNeeded(assets: assets)
         if bailIfCancelled() { return }
@@ -1302,6 +1345,7 @@ public final class PhotoLibrarySession {
         // stomp the scan's progress text; one racing a delete re-crowns keepers
         // in groups the delete is about to rewrite.
         guard !refiningFaces, !isScanning, !isDeleting else { return }
+        resetDownloadAccounting()
         refiningFaces = true
         // Fresh abort flag so a prior cancelled scan/refine can't abort this one;
         // cancelScan() sets it and the loop below drains cooperatively.
@@ -1782,7 +1826,7 @@ public final class PhotoLibrarySession {
         let vanishedMarks = restored.vanishedMarks
         guard !restoredGroups.isEmpty || !restoredCats.isEmpty else { return false }
 
-        photoKitImages = PhotoKitImageProvider(assetsByID: map, manager: imageManager)
+        photoKitImages = makeImageProvider(assetsByID: map)
         groups = restoredGroups
         exactDupeGroupIDs = exactIDs
         categories = restoredCats
@@ -2000,9 +2044,9 @@ public final class PhotoLibrarySession {
             fetched.enumerateObjects { asset, _, _ in
                 freshMap[asset.localIdentifier] = asset
             }
-            photoKitImages = PhotoKitImageProvider(assetsByID: freshMap, manager: imageManager)
+            photoKitImages = makeImageProvider(assetsByID: freshMap)
         } else {
-            photoKitImages = PhotoKitImageProvider(assetsByID: [:], manager: imageManager)
+            photoKitImages = makeImageProvider(assetsByID: [:])
         }
 
         // Our own delete advanced the library token; move the staleness anchor

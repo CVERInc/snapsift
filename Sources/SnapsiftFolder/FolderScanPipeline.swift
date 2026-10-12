@@ -3,6 +3,8 @@ import SnapsiftCore
 import SnapsiftVision
 
 public struct FolderScanOptions: Sendable {
+    public var iCloudDownloadPolicy: ICloudDownloadPolicy = .allowed
+    public var iCloudDownloadTimeout: TimeInterval = 30
     public var gapSec = 3.0
     public var sizeTol = 0.10
     public var maxSpan = 30.0
@@ -29,6 +31,17 @@ public struct FolderCrossFolderDuplicate {
 }
 
 public struct FolderScanResult {
+    public internal(set) var downloadedFiles: [FolderDownloadedFile] = []
+    public var downloadedURLs: Set<URL> { Set(downloadedFiles.map(\.url)) }
+    var ubiquityPort: FolderUbiquityPort = .system
+
+    /// Evicts only this scan's recorded downloads, with per-file live gates.
+    /// Keep the result/accesses alive until this call returns.
+    public func evictDownloadedFiles() async -> [FolderICloudEvictionResult] {
+        await Task.detached(priority: .utility) {
+            FolderICloudAccess.evict(downloadedFiles, port: ubiquityPort)
+        }.value
+    }
     public let items: [FolderItem]
     public let groups: [ReviewGroup]
     public let exactGroupIDs: Set<ReviewGroup.ID>
@@ -94,7 +107,8 @@ public func seedFolderExactRejections(
 /// No Photos stores or commit effects are reachable from this pipeline.
 @MainActor
 public enum FolderScanPipeline {
-    public static func scan(roots: [URL], options: FolderScanOptions = FolderScanOptions()) async throws
+    public static func scan(roots: [URL], options: FolderScanOptions = FolderScanOptions(),
+                            ubiquityPort: FolderUbiquityPort = .system) async throws
         -> FolderScanResult {
         let accesses = try roots.map { try FolderAccess(url: $0) }
         var succeeded = false
@@ -102,11 +116,13 @@ public enum FolderScanPipeline {
         var scannedRoots: [FolderScannedRoot] = []
         var items: [FolderItem] = []
         var issues: [FolderEnumerationIssue] = []
+        let cloud = FolderICloudAccess(policy: options.iCloudDownloadPolicy, port: ubiquityPort,
+                                      timeout: options.iCloudDownloadTimeout)
         for access in accesses {
             try Task.checkCancellation()
             let root = access.url
             let enumeration = try await Task.detached(priority: .utility) {
-                try FolderEnumerator.enumerate(root: root)
+                try FolderEnumerator.enumerate(root: root, cloud: cloud)
             }.value
             scannedRoots.append(FolderScannedRoot(url: root, volume: probeVolume(at: root)))
             items.append(contentsOf: enumeration.items)
@@ -115,7 +131,7 @@ public enum FolderScanPipeline {
         // Overlapping chosen roots must not duplicate one filesystem identity.
         var seen: Set<String> = []
         items = items.filter { seen.insert($0.id).inserted }
-        let provider = FolderImageProvider(items: items)
+        let provider = FolderImageProvider(items: items, ubiquityPort: ubiquityPort)
         await LookAlikeScanner.clearCache()
         items = await enrich(items, provider: provider)
         try Task.checkCancellation()
@@ -141,7 +157,7 @@ public enum FolderScanPipeline {
 
         // Index full primary bytes independently of time/size/recall limits:
         // copies in different folders must still surface when dates differ.
-        let hasher = FolderOriginalHasher(items: items)
+        let hasher = FolderOriginalHasher(items: items, ubiquityPort: ubiquityPort)
         var digests: [String: String] = [:]
         for item in items {
             try Task.checkCancellation()
@@ -195,7 +211,8 @@ public enum FolderScanPipeline {
         items = items.map { $0.with(photo: finalPhotos[$0.id] ?? $0.photo) }
         await LookAlikeScanner.clearCache()
         succeeded = true
-        return FolderScanResult(items: items, groups: seeded.groups, exactGroupIDs: exact,
+        return FolderScanResult(downloadedFiles: cloud.downloadedFiles, ubiquityPort: ubiquityPort,
+                                items: items, groups: seeded.groups, exactGroupIDs: exact,
                                 crossFolderDuplicates: cross, roots: scannedRoots, issues: issues,
                                 primaryHashes: digests, uniqueMetadataWithheld: seeded.uniqueMetadataWithheld,
                                 uniqueMetadataIDs: seeded.uniqueMetadataIDs,

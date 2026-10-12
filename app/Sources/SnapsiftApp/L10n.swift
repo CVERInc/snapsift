@@ -341,7 +341,7 @@ struct L10n: Sendable {
     }
     func folderIssue(_ reason: FolderEnumerationIssue.Reason) -> String {
         switch reason {
-        case .unreadable:
+        case .unreadable, .notOnDevice:
             switch language {
             case .en: return "Unreadable"
             case .ja: return "読み込み不可"

@@ -49,8 +49,10 @@ public struct FolderItem: Identifiable, Sendable {
                    directoryURL: directoryURL, folderKey: folderKey)
     }
 
-    static func build(members: [FolderMember], primary: FolderMember) throws -> FolderItem {
-        guard let source = CGImageSourceCreateWithURL(primary.url as CFURL, nil),
+    static func build(members: [FolderMember], primary: FolderMember,
+                      cloud: FolderICloudAccess) throws -> FolderItem {
+        guard cloud.isLocal(primary.url),
+              let source = CGImageSourceCreateWithURL(primary.url as CFURL, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int,
               let height = properties[kCGImagePropertyPixelHeight] as? Int,
@@ -115,7 +117,7 @@ public struct FolderItem: Identifiable, Sendable {
 public struct FolderEnumerationIssue: Sendable {
     public let url: URL
     public let reason: Reason
-    public enum Reason: Sendable { case unreadable, invalidImage, ambiguousMembers }
+    public enum Reason: Sendable { case unreadable, invalidImage, ambiguousMembers, notOnDevice }
 }
 
 public struct FolderEnumerationResult {
@@ -128,7 +130,14 @@ public enum FolderEnumerator {
     /// encodings stay separate unless a RAW+JPEG/HEIC relation joins them.
     /// HEIC/HEIF, then JPEG, then other non-RAW, then RAW is the primary order.
     /// RAW+JPEG therefore has JPEG pixels/facts/UTI for the unchanged Core rank.
-    public static func enumerate(root: URL) throws -> FolderEnumerationResult {
+    public static func enumerate(root: URL, iCloudDownloadPolicy: ICloudDownloadPolicy = .allowed,
+                                 downloadTimeout: TimeInterval = 30,
+                                 ubiquityPort: FolderUbiquityPort = .system) throws -> FolderEnumerationResult {
+        try enumerate(root: root, cloud: FolderICloudAccess(policy: iCloudDownloadPolicy,
+                                                           port: ubiquityPort, timeout: downloadTimeout))
+    }
+
+    static func enumerate(root: URL, cloud: FolderICloudAccess) throws -> FolderEnumerationResult {
         guard root.isFileURL else { throw FolderSourceError.notLocalDirectory }
         let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey])
         guard rootValues.isDirectory == true,
@@ -140,21 +149,27 @@ public enum FolderEnumerator {
         var issues: [FolderEnumerationIssue] = []
         guard let enumerator = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            options: [.skipsPackageDescendants],
             errorHandler: { url, _ in
                 issues.append(FolderEnumerationIssue(url: url, reason: .unreadable))
                 return true
             }) else { throw FolderSourceError.notLocalDirectory }
         var buckets: [String: [URL]] = [:]
         var types: [URL: UTType] = [:]
+        var unavailableKeys: Set<String> = []
+        var unavailableURLs: Set<URL> = []
+        var seenURLs: Set<URL> = []
         for case let entry as URL in enumerator {
-            let url = entry.standardizedFileURL
+            let entryURL = entry.standardizedFileURL
             if Task.isCancelled { throw CancellationError() }
             do {
-                let values = try url.resourceValues(forKeys: Set(keys))
+                let values = try entryURL.resourceValues(forKeys: Set(keys))
+                let placeholderURL = values.isSymbolicLink != true && values.isRegularFile == true
+                    ? cloud.logicalURL(for: entryURL) : nil
+                let url = placeholderURL ?? entryURL
                 let name = url.lastPathComponent
-                if name.hasPrefix(".") || values.isHidden == true || values.isPackage == true
-                    || values.isSymbolicLink == true {
+                if (placeholderURL == nil && (name.hasPrefix(".") || values.isHidden == true))
+                    || values.isPackage == true || values.isSymbolicLink == true {
                     if values.isDirectory == true { enumerator.skipDescendants() }
                     continue
                 }
@@ -165,12 +180,25 @@ public enum FolderEnumerator {
                 let isImage = type?.conforms(to: .image) == true
                 let companion = ["mov", "xmp", "aae"].contains(url.pathExtension.lowercased())
                 guard isImage || companion else { continue }
+                guard seenURLs.insert(url).inserted else { continue }
                 if isImage { types[url] = type }
                 let key = url.deletingLastPathComponent().path + "/"
                     + url.deletingPathExtension().lastPathComponent.lowercased()
                 buckets[key, default: []].append(url)
+                if let issue = try cloud.prepareForScan(url, placeholder: placeholderURL == nil ? nil : entryURL) {
+                    unavailableURLs.insert(url)
+                    issues.append(issue)
+                }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
-                issues.append(FolderEnumerationIssue(url: url, reason: .unreadable))
+                issues.append(FolderEnumerationIssue(url: entryURL, reason: .unreadable))
+                // Failed resource reads must not leave a sibling image eligible
+                // without its companion's edit/motion facts.
+                let logical = cloud.logicalURL(for: entryURL) ?? entryURL
+                let key = logical.deletingLastPathComponent().path + "/"
+                    + logical.deletingPathExtension().lastPathComponent.lowercased()
+                unavailableKeys.insert(key)
             }
         }
         var items: [FolderItem] = []
@@ -181,6 +209,8 @@ public enum FolderEnumerator {
                 return a == b ? $0.path < $1.path : a > b
             }
             guard !images.isEmpty else { continue } // orphan companions
+            // Unreadable member metadata cannot establish a safe grouping.
+            guard !unavailableKeys.contains(key) else { continue }
             let raw = images.filter { types[$0]!.conforms(to: .rawImage) }
             let processed = images.filter { primaryPriority(types[$0]!) >= 2 }
             let photoFiles: [[URL]]
@@ -198,10 +228,18 @@ public enum FolderEnumerator {
             }
             for photo in photoFiles {
                 let primaryURL = photo[0]
+                let memberURLs = photo + companions
+                // Never split a pair or drop a cloud-only editing sidecar; a
+                // separate same-stem encoding with no companions can still scan.
+                guard !memberURLs.contains(where: { unavailableURLs.contains($0) }) else { continue }
                 do {
-                    let members = try (photo + companions).map { try FolderMember.read(at: $0) }
+                    let members = try memberURLs.map { try FolderMember.read(at: $0) }
                     let primary = members.first { $0.url == primaryURL }!
-                    items.append(try FolderItem.build(members: members, primary: primary))
+                    guard memberURLs.allSatisfy({ cloud.isLocal($0) }) else {
+                        issues.append(FolderEnumerationIssue(url: primaryURL, reason: .notOnDevice))
+                        continue
+                    }
+                    items.append(try FolderItem.build(members: members, primary: primary, cloud: cloud))
                 } catch {
                     issues.append(FolderEnumerationIssue(url: primaryURL,
                                                          reason: (error as? FolderSourceError) == .invalidImage

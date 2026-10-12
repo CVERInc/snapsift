@@ -9,12 +9,14 @@ import SnapsiftVision
 public final class FolderImageProvider: ImageProvider, @unchecked Sendable {
     public let itemIdentifiers: Set<String>
     private let primaryURLs: [String: URL]
+    private let ubiquityPort: FolderUbiquityPort
     private let queue = DispatchQueue(label: "net.cver.snapsift.folder-images",
                                       qos: .userInitiated, attributes: .concurrent)
     private let lock = NSLock()
     private var inFlight = 0
 
-    public init(items: [FolderItem]) {
+    public init(items: [FolderItem], ubiquityPort: FolderUbiquityPort = .system) {
+        self.ubiquityPort = ubiquityPort
         primaryURLs = Dictionary(items.map { ($0.id, $0.primary.url) },
                                  uniquingKeysWith: { first, _ in first })
         itemIdentifiers = Set(primaryURLs.keys)
@@ -53,18 +55,19 @@ public final class FolderImageProvider: ImageProvider, @unchecked Sendable {
             let reply = Reply(continuation)
             reply.startTimeout(seconds: seconds)
             queue.async {
-                let image = Self.thumbnail(at: url, side: side)
+                let image = Self.thumbnail(at: url, side: side, ubiquityPort: self.ubiquityPort)
                 self.release()
                 reply.finish(image)
             }
         }
     }
 
-    private static func thumbnail(at url: URL, side: Int) -> CGImage? {
+    private static func thumbnail(at url: URL, side: Int, ubiquityPort: FolderUbiquityPort) -> CGImage? {
         // Re-read rather than trusting enumeration's cached resource values.
         var freshURL = url
         freshURL.removeAllCachedResourceValues()
-        guard (try? freshURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]))
+        guard (try? ubiquityPort.state(url).isLocal) == true,
+              (try? freshURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]))
             .map({ $0.isRegularFile == true && $0.isSymbolicLink != true }) == true,
               let source = CGImageSourceCreateWithURL(url as CFURL,
                                                      [kCGImageSourceShouldCache: false] as CFDictionary)

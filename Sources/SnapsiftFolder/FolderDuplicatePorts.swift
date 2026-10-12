@@ -7,11 +7,13 @@ import SnapsiftCore
 /// Companions are NOT included: this port describes primary-file identity,
 /// not interchangeability of a Live Photo/RAW pair. The scan's exact-certifying
 /// adapter withholds multi-member items, matching the PhotoKit safety gate.
-public struct FolderOriginalHasher: OriginalBytesHasher {
+public struct FolderOriginalHasher: OriginalBytesHasher, Sendable {
     private let items: [String: FolderItem]
+    private let ubiquityPort: FolderUbiquityPort
 
-    public init(items: [FolderItem]) {
+    public init(items: [FolderItem], ubiquityPort: FolderUbiquityPort = .system) {
         self.items = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        self.ubiquityPort = ubiquityPort
     }
 
     public func sha256(itemIdentifier: String) async -> String? {
@@ -19,13 +21,13 @@ public struct FolderOriginalHasher: OriginalBytesHasher {
         // Disk reads stay off the main actor and cooperative pool.
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: Self.hash(member))
+                continuation.resume(returning: Self.hash(member, ubiquityPort: ubiquityPort))
             }
         }
     }
 
-    private static func hash(_ member: FolderMember) -> String? {
-        guard member.url.isFileURL else { return nil }
+    private static func hash(_ member: FolderMember, ubiquityPort: FolderUbiquityPort) -> String? {
+        guard member.url.isFileURL, (try? ubiquityPort.state(member.url).isLocal) == true else { return nil }
         let descriptor = member.url.path.withCString { open($0, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) }
         guard descriptor >= 0 else { return nil }
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
