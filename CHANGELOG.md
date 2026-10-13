@@ -6,6 +6,23 @@ reserved for the first signed and notarized build.
 ## [Unreleased]
 
 ### Added
+- **Album names in Apple Photos review.** Review tiles and the pre-commit
+  review show user album names in English, Japanese and Taiwan Traditional
+  Chinese, excluding snapsift's organizational albums. Names load only when
+  a group or pre-commit review opens; ranking and marking are unchanged.
+- **Folder Mode scanning, Trash removal and Put Back.** Choose multiple folders with saved
+  access, compare duplicate and similar photos, and review grouped Live Photo,
+  RAW + JPEG and sidecar files together. Cross-folder duplicates remain
+  unmarked, and scan-only volumes show why removal is unavailable. Folder
+  review is separate from Apple Photos scans, decisions and history, with
+  English, Japanese and Taiwan Traditional Chinese interface text. Review
+  counts, sizes, volumes and protected items before moving files to Trash.
+  Folder history records original and Trash paths, recovers interrupted
+  removals at launch, and offers Put Back without overwriting existing files.
+  Partial moves, changed files and history failures are reported.
+  Review tiles and the pre-commit sheet show distinct file-format labels,
+  highlight RAW and grouped RAW companions, and flag mixed RAW/processed
+  groups where an export may be worth keeping. Ranking and marking are unchanged.
 - **⇧K — "keep only this one."** In a group of five, one keystroke nominates the
   focused photo as the keeper and crosses out the rest, instead of pressing `X`
   four times (or `D` then `K`, which passes through a state where every photo is
@@ -23,6 +40,15 @@ reserved for the first signed and notarized build.
     force-crossed-out yourself with ⇧X **stays** crossed out.
   - Marks made this way are attributed as "marked by you" in the audit log,
     never as an app suggestion.
+
+### Changed
+- Shared Core and PhotoKit libraries are now published from the root Swift
+  package for macOS 14 and iOS 17. The macOS app and its tools continue to build
+  from `app/`, consuming the same libraries locally.
+- **Deleting from Apple Photos now stops if its recovery journal cannot be
+  written.** Previously the deletion went ahead without the journal; now
+  nothing is deleted and the usual "nothing was deleted" alert appears, so an
+  interrupted deletion always leaves a record.
 
 ## [0.10.0] — 2026-09-18
 

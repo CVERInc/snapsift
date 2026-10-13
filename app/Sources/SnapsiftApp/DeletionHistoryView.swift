@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import SnapsiftCore
+import SnapsiftPhotoKit
 import Signet
 
 // MARK: - History view
@@ -14,6 +15,7 @@ import Signet
 ///
 /// Footer: "Export Log…" → NSSavePanel → write .txt or .jsonl to a user location.
 struct DeletionHistoryView: View {
+    let store: PhotoLibraryHistoryStore
     let t: L10n
     let onClose: () -> Void
 
@@ -121,7 +123,7 @@ struct DeletionHistoryView: View {
         // deletions.jsonl, which grows to thousands of records at dogfood scale.
         .task {
             sessions = await Task.detached(priority: .userInitiated) {
-                DeletionAuditLog.loadSessions()
+                store.loadSessions()
             }.value
         }
         .fileExporter(isPresented: $exporting,

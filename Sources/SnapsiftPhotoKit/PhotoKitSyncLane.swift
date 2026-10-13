@@ -19,11 +19,11 @@ import os
 ///     over-exclude — never guess the permissive answer);
 ///   • the first timeout trips a shared breaker (one daemon = one failure
 ///     domain) and every later call returns nil immediately.
-enum PhotoKitSyncLane {
+public enum PhotoKitSyncLane {
 
     /// Run one synchronous PhotoKit metadata lookup wedge-proof.
     /// nil = could not determine (timed out, or the breaker already tripped).
-    static func call<T: Sendable>(timeoutNs: UInt64 = 10_000_000_000,
+    public static func call<T: Sendable>(timeoutNs: UInt64 = 10_000_000_000,
                                   _ work: @escaping @Sendable () -> T) async -> T? {
         guard !breaker.isTripped else { return nil }
         let once = ClaimOnce()

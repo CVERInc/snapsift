@@ -1,5 +1,7 @@
 import Foundation
 import SnapsiftCore
+@testable import SnapsiftPhotoKit
+@testable import SnapsiftFolder
 
 // Framework-free test runner: `swift run SnapsiftTests`.
 // Exits non-zero on any failure so it can gate CI. Mirrors the Python pytest
@@ -24,6 +26,41 @@ func ph(_ pk: Int, _ takenAt: Double, w: Int = 4032, h: Int = 3024,
           documentEvalDegraded: docDegraded, editedUndetermined: editedUnknown)
 }
 func sizes(_ g: [[Photo]]) -> [Int] { g.map(\.count) }
+
+func testAlbumTitles() -> PhotoLibraryAlbumTitles {
+    PhotoLibraryAlbumTitles(
+        bursts: .init(name: "Burst album", candidateTitles: ["Burst album"]),
+        blurry: .init(name: "Blurry album", candidateTitles: ["Blurry album"]),
+        documents: .init(name: "Documents album", candidateTitles: ["Documents album"]),
+        exact: .init(name: "Exact album", candidateTitles: ["Exact album"]),
+        needsLook: .init(name: "Needs-a-look album", candidateTitles: ["Needs-a-look album"]))
+}
+
+final class FakeAlbumWriteOperations: AlbumWriter.Operations {
+    var failedAdds: Set<String> = []
+    var failedRemovals: Set<String> = []
+    var addCounts: [String: Int] = [:]
+    var events: [String] = []
+
+    func add(_ assetIDs: [String], toAlbumNamed name: String,
+             candidateTitles: [String]) async throws -> Int {
+        events.append("add:\(name)")
+        if failedAdds.contains(name) { throw AlbumOperationFailure(name: name) }
+        return addCounts[name] ?? assetIDs.count
+    }
+
+    func remove(ids: Set<String>, fromAlbumTitles candidateTitles: [String]) async throws -> Int {
+        let name = candidateTitles[0]
+        events.append("remove:\(name)")
+        if failedRemovals.contains(name) { throw AlbumOperationFailure(name: name) }
+        return ids.count
+    }
+}
+
+struct AlbumOperationFailure: Error, LocalizedError {
+    let name: String
+    var errorDescription: String? { "failed \(name)" }
+}
 
 print("Clustering")
 check(sizes(cluster([ph(1, 0), ph(2, 1), ph(3, 2), ph(4, 100), ph(5, 101)],
@@ -2254,6 +2291,1176 @@ do {
     check(everyReachable == [.exactDuplicate, .userRejected],
           "only the two reasons real state can back are reachable (.notPicked is W2)")
 }
+
+// Drive the same orchestration the app uses, with no PhotoKit or disk effects.
+struct TestCommitEntry {
+    let timestamp: String
+    let records: [DeletionRecord]
+}
+
+enum TestDeleteError: Error { case refused }
+
+@MainActor
+final class CommitFixture {
+    var groups: [ReviewGroup]
+    var resolved: Set<String>
+    var edited: [String: Bool]
+    var favorites: Set<String> = []
+    var bursts: [String: [String]] = [:]
+    var events: [String] = []
+    var intent: TestCommitEntry?
+    var audits: [TestCommitEntry] = []
+    var result: CommitResult?
+    var journalWritable = true
+    var auditWritable = true
+    var deleteThrows = false
+    var proceedOnStale = true
+    let orchestrator = CommitOrchestrator()
+
+    init(_ groups: [ReviewGroup]) {
+        self.groups = groups
+        let ids = groups.flatMap { $0.photos.map(\.uuid) }
+        resolved = Set(ids)
+        edited = Dictionary(ids.map { ($0, false) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    var ports: CommitPorts<String, TestCommitEntry> {
+        CommitPorts(
+            fetchLive: { ids in
+                self.events.append("fetch:\(ids.sorted().joined(separator: ","))")
+                return Dictionary(uniqueKeysWithValues: ids.filter { self.resolved.contains($0) }
+                    .map { ($0, $0) })
+            },
+            editedNow: { targets in
+                self.events.append("edited:\(targets.map(\.uuid).joined(separator: ","))")
+                return self.edited
+            },
+            favoriteNow: { id in
+                self.events.append("favorite:\(id)")
+                return self.favorites.contains(id)
+            },
+            burstSiblings: { id in
+                self.events.append("burst:\(id)")
+                return self.bursts[id]
+            },
+            timestamp: {
+                self.events.append("timestamp")
+                return "2026-10-09T00:00:00Z"
+            },
+            makeJournalEntry: { timestamp, records in
+                self.events.append("entry")
+                return TestCommitEntry(timestamp: timestamp, records: records)
+            },
+            writeIntent: { entry in
+                self.events.append("intent")
+                if self.journalWritable { self.intent = entry }
+                return self.journalWritable
+            },
+            delete: { ids in
+                self.events.append("delete:\(ids.joined(separator: ","))")
+                if self.deleteThrows { throw TestDeleteError.refused }
+            },
+            appendAudit: { entry in
+                self.events.append("audit")
+                if self.auditWritable { self.audits.append(entry) }
+                return self.auditWritable
+            },
+            clearIntent: {
+                self.events.append("clear")
+                self.intent = nil
+            })
+    }
+
+    var callbacks: CommitCallbacks {
+        CommitCallbacks(
+            staleWarning: { stale, found in
+                self.events.append("stale:\(stale),\(found)")
+                return self.proceedOnStale
+            },
+            onProtectedDropped: { self.events.append("protected:\($0)") },
+            onBurstSkipped: { self.events.append("burstSkipped:\($0)") },
+            onUndeterminedSkipped: { self.events.append("undetermined:\($0)") },
+            onKeeperMissing: { self.events.append("keeperMissing:\($0)") },
+            onNoSurvivorLeft: { self.events.append("noSurvivor:\($0)") },
+            onGroupsChanged: {
+                self.events.append("groups")
+                self.groups = $0
+            },
+            onCommittingChanged: { self.events.append($0 ? "lock" : "unlock") },
+            saveSnapshot: { self.events.append("snapshot") },
+            beforeDelete: { self.events.append("anchor") },
+            onCommitted: {
+                self.events.append("committed")
+                self.result = $0
+            })
+    }
+
+    func run(isBusy: Bool = false) async throws -> Int {
+        try await orchestrator.commit(groups: groups, isBusy: isBusy,
+                                      ports: ports, callbacks: callbacks)
+    }
+}
+
+@MainActor
+func checkCommitOrchestration() async {
+    print("Commit orchestration through fake ports")
+    func group(_ photos: [Photo], keeper: String = "U1", rejected: Set<String> = ["U2"],
+               seeded: Set<String> = [], includeProtected: Bool = false) -> ReviewGroup {
+        var g = ReviewGroup(photos: photos, keeperID: keeper)
+        g.rejected = rejected
+        g.autoSeeded = seeded
+        g.includeProtected = includeProtected
+        return g
+    }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], seeded: ["U2"])])
+        let n = try await f.run()
+        check(n == 1 && f.result?.deletedIDs == ["U2"], "orchestration: happy path deletes the marked frame")
+        check(f.events == ["lock", "fetch:U1,U2", "edited:U2", "favorite:U2", "burst:U2",
+                           "timestamp", "anchor", "entry", "intent", "delete:U2", "audit", "clear",
+                           "committed", "unlock"], "orchestration: exact port and callback order")
+        let record = f.audits.first?.records.first
+        check(record?.assetIdentifier == "U2" && record?.filename == "IMG_2.heic"
+              && record?.sizeBytes == 2_000_000, "orchestration: audit captures the actual deleted frame")
+        check(record?.keeperIdentifier == "U1" && record?.keeperFilename == "IMG_1.heic"
+              && record?.reason == .exactDuplicate, "orchestration: keeper and auto-seed attribution survive extraction")
+        check(f.audits.first?.timestamp == record?.timestamp && f.intent == nil
+              && f.result?.auditFailed == false, "orchestration: source journal payload carries the batch timestamp")
+    } catch { check(false, "orchestration: happy path threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)])])
+        f.resolved.remove("U1")
+        check(try await f.run() == 0, "orchestration: vanished keeper withdraws the group")
+        check(f.events.contains("keeperMissing:1") && !f.events.contains("noSurvivor:1"),
+              "orchestration: vanished keeper reports its specific callback")
+        check(f.audits.isEmpty && !f.events.contains("intent") && f.groups[0].rejected == ["U2"],
+              "orchestration: keeper withdrawal retains marks and performs no delete")
+    } catch { check(false, "orchestration: vanished keeper threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1), ph(3, 2)], rejected: ["U1", "U2"])])
+        f.resolved.remove("U3")
+        check(try await f.run() == 0, "orchestration: vanished alternate survivor withdraws the group")
+        check(f.events.contains("fetch:U1,U2,U3") && f.events.contains("noSurvivor:1")
+              && !f.events.contains("keeperMissing:1") && !f.events.contains("intent"),
+              "orchestration: every survivor is fetched and no-survivor callback is distinct")
+    } catch { check(false, "orchestration: vanished survivor threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], seeded: ["U2"], includeProtected: true)])
+        f.favorites.insert("U2")
+        check(try await f.run() == 0, "orchestration: newly favorited frame is skipped even with prior override")
+        check(f.groups[0].photos[1].favorite && f.groups[0].rejected.isEmpty
+              && f.groups[0].autoSeeded.isEmpty, "orchestration: new protection updates flags and clears both marks")
+        check(Array(f.events.suffix(4)) == ["groups", "protected:1", "snapshot", "unlock"],
+              "orchestration: publish protection before callback and save the changed snapshot")
+    } catch { check(false, "orchestration: newly favorited frame threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], seeded: ["U2"])])
+        f.edited.removeValue(forKey: "U2")
+        check(try await f.run() == 0, "orchestration: undetermined edit state never reaches deletion")
+        check(f.groups[0].photos[1].editedUndetermined && f.groups[0].rejected.isEmpty
+              && f.groups[0].autoSeeded.isEmpty, "orchestration: uncertainty is stored and unmarked")
+        check(Array(f.events.suffix(4)) == ["groups", "undetermined:1", "snapshot", "unlock"],
+              "orchestration: undetermined callback and snapshot order")
+    } catch { check(false, "orchestration: undetermined edit state threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)])])
+        f.bursts["U2"] = ["U2", "unreviewed-sibling"]
+        check(try await f.run() == 0, "orchestration: partial burst skips the representative")
+        check(Array(f.events.suffix(3)) == ["burstSkipped:1", "snapshot", "unlock"]
+              && !f.events.contains("intent") && f.groups[0].rejected == ["U2"],
+              "orchestration: burst skip preserves the mark, saves snapshot, and does not journal")
+        f.bursts["U2"] = ["U2"]
+        check(try await f.run() == 1, "orchestration: representative is deletable when every sibling is marked")
+    } catch { check(false, "orchestration: partial burst threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1), ph(3, 2)], rejected: ["U2", "U3"])])
+        f.bursts["U2"] = ["U2", "U3"]
+        check(try await f.run() == 2 && f.audits.first?.records.count == 2,
+              "orchestration: whole marked burst deletes and audits all siblings")
+    } catch { check(false, "orchestration: whole burst threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)])])
+        f.journalWritable = false
+        do {
+            _ = try await f.run()
+            check(false, "orchestration: journal failure must throw")
+        } catch CommitError.journalWriteFailed {
+            check(true, "orchestration: journal failure reports a blocked commit")
+        }
+        check(!f.events.contains("delete:U2") && f.audits.isEmpty && f.intent == nil,
+              "orchestration: journal failure never performs deletion or appends audit")
+        check(f.events.last == "unlock" && f.groups[0].rejected == ["U2"],
+              "orchestration: journal failure releases busy guard and retains marks")
+        f.journalWritable = true
+        check(try await f.run() == 1, "orchestration: retry after journal failure is allowed")
+    } catch { check(false, "orchestration: journal failure test threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)])])
+        f.deleteThrows = true
+        do {
+            _ = try await f.run()
+            check(false, "orchestration: performer failure must propagate")
+        } catch TestDeleteError.refused {
+            check(true, "orchestration: performer error is preserved")
+        }
+        check(Array(f.events.suffix(4)) == ["intent", "delete:U2", "clear", "unlock"],
+              "orchestration: performer throw clears intent before unlocking")
+        check(f.intent == nil && f.audits.isEmpty && f.result == nil,
+              "orchestration: performer throw creates no audit or post-commit effects")
+    } catch { check(false, "orchestration: performer failure test threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)])])
+        do {
+            _ = try await f.run(isBusy: true)
+            check(false, "orchestration: busy guard must throw")
+        } catch CommitError.busy {
+            check(true, "orchestration: busy guard preserves CommitError.busy")
+        }
+        check(f.events.isEmpty, "orchestration: busy guard runs before every port and callback")
+        var ports = f.ports
+        ports.editedNow = { _ in
+            do {
+                _ = try await f.run()
+                check(false, "orchestration: overlapping commit must throw")
+            } catch CommitError.busy {
+                check(true, "orchestration: actor re-entry is blocked while awaiting a port")
+            } catch { check(false, "orchestration: unexpected re-entry error \(error)") }
+            return f.edited
+        }
+        check(try await f.orchestrator.commit(groups: f.groups, ports: ports, callbacks: f.callbacks) == 1,
+              "orchestration: outer commit completes after blocking re-entry")
+    } catch { check(false, "orchestration: busy guard test threw \(error)") }
+
+    for proceed in [false, true] {
+        do {
+            let f = CommitFixture([group([ph(1, 0), ph(2, 1), ph(3, 2)], rejected: ["U2", "U3"])])
+            f.resolved.remove("U2")
+            f.proceedOnStale = proceed
+            check(try await f.run() == (proceed ? 1 : 0), "orchestration: stale warning decision \(proceed) is honored")
+            check(f.events.contains("stale:1,1") && f.groups[0].rejected.contains("U2"),
+                  "orchestration: stale callback receives exact counts and vanished marks stay")
+            check(f.audits.flatMap(\.records).map(\.assetIdentifier) == (proceed ? ["U3"] : []),
+                  "orchestration: stale items never enter the audit")
+        } catch { check(false, "orchestration: stale warning threw \(error)") }
+    }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], rejected: ["U1", "U2"])])
+        f.auditWritable = false
+        check(try await f.run() == 2 && f.result?.auditFailed == true && f.intent == nil,
+              "orchestration: audit failure is best-effort after successful deletion, intent cleared last")
+    } catch { check(false, "orchestration: audit failure threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], rejected: ["U1", "U2"])])
+        check(try await f.run() == 2, "orchestration: deliberate no-survivor commit remains allowed")
+        check(f.audits[0].records.allSatisfy { $0.keeperIdentifier.isEmpty && $0.keeperFilename.isEmpty
+              && $0.reason == .userRejected }, "orchestration: deleted keeper uses the empty audit sentinel")
+    } catch { check(false, "orchestration: deliberate no-survivor commit threw \(error)") }
+
+    do {
+        let f = CommitFixture([
+            group((1...6).map { ph($0, Double($0)) }, rejected: ["U2", "U3", "U4", "U5", "U6"]),
+            group([ph(7, 0), ph(8, 1)], keeper: "U7", rejected: ["U8"]),
+            group([ph(9, 0), ph(10, 1), ph(11, 2)], keeper: "U9", rejected: ["U9", "U11"])
+        ])
+        f.resolved.subtract(["U4", "U7", "U10"])
+        f.favorites.insert("U2")
+        f.edited.removeValue(forKey: "U3")
+        f.bursts["U5"] = ["U5", "unreviewed-sibling"]
+        check(try await f.run() == 1 && f.result?.deletedIDs == ["U6"],
+              "orchestration: mixed withdrawals, sweeps, and burst skips leave only the admissible frame")
+        let outcomes = f.events.filter {
+            $0 == "groups" || $0.hasPrefix("protected:") || $0.hasPrefix("undetermined:")
+                || $0.hasPrefix("keeperMissing:") || $0.hasPrefix("noSurvivor:")
+                || $0.hasPrefix("stale:") || $0.hasPrefix("burstSkipped:")
+        }
+        check(outcomes == ["groups", "protected:1", "undetermined:1", "keeperMissing:1",
+                           "noSurvivor:1", "stale:1,2", "burstSkipped:1"],
+              "orchestration: every mixed outcome retains the original callback order and counts")
+        check(f.audits[0].records.map(\.assetIdentifier) == ["U6"]
+              && f.groups[0].rejected == ["U4", "U5", "U6"],
+              "orchestration: audit excludes withdrawn and burst-skipped frames; only protection clears marks")
+    } catch { check(false, "orchestration: mixed outcome test threw \(error)") }
+
+    do {
+        let g = group([ph(1, 0), ph(2, 1, edited: true), ph(3, 2, editedUnknown: true),
+                       ph(4, 3, fav: true)], rejected: ["U2", "U3", "U4"], includeProtected: true)
+        check(g.deletionIDs == ["U2", "U4"] && g.isKeeper(g.photos[0]),
+              "ReviewGroup: imported model uses the real protection and survivor rules")
+        let f = CommitFixture([g])
+        check(try await f.run() == 2 && !f.events.contains(where: { $0.hasPrefix("edited:")
+              || $0.hasPrefix("favorite:") }),
+              "orchestration: consented known protection is not re-swept; unverifiable still survives")
+        check(f.audits[0].records.map(\.reason) == [.forceIncludedProtectedEdited, .forceIncludedProtectedFavorite],
+              "orchestration: forced protection audit attribution is unchanged")
+    } catch { check(false, "orchestration: force-included protection threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1), ph(3, 2)], rejected: ["U2", "U3"])])
+        f.resolved.remove("U2")
+        var callbacks = f.callbacks
+        callbacks.staleWarning = nil
+        check(try await f.orchestrator.commit(groups: f.groups, ports: f.ports, callbacks: callbacks) == 1
+              && !f.events.contains("stale:1,1"),
+              "orchestration: omitted stale handler retains legacy proceed behavior")
+    } catch { check(false, "orchestration: omitted stale handler threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1), ph(3, 2), ph(4, 3)], rejected: ["U2", "U3", "U4"])])
+        f.favorites.insert("U2")
+        f.resolved.remove("U3")
+        f.proceedOnStale = false
+        check(try await f.run() == 0 && f.groups[0].photos[1].favorite,
+              "orchestration: stale cancellation keeps the earlier protection verdict")
+        check(!f.events.contains("snapshot") && !f.events.contains("intent"),
+              "orchestration: stale cancellation retains the original snapshot timing")
+    } catch { check(false, "orchestration: stale cancellation after sweep threw \(error)") }
+
+    do {
+        let f = CommitFixture([group([ph(1, 0), ph(2, 1)], rejected: [])])
+        check(try await f.run() == 0 && f.events == ["lock", "unlock"],
+              "orchestration: empty candidate set skips every source effect")
+    } catch { check(false, "orchestration: empty candidate test threw \(error)") }
+}
+
+await checkCommitOrchestration()
+await checkExactDuplicatePass()
+await checkImageProviderSeam()
+await checkPhotoICloudPolicy()
+await checkFolderICloudPolicy()
+await checkFolderSource()
+await checkFolderCommitAndHistory()
+
+print("Folder volume capability")
+do {
+    func facts(local: Bool? = true, readOnly: Bool? = false,
+               mountedReadOnly: Bool? = false, fileSystem: String? = "apfs",
+               root: Bool? = false) -> VolumeFacts {
+        VolumeFacts(isLocal: local, isReadOnly: readOnly,
+                    mntRdOnly: mountedReadOnly, fileSystemType: fileSystem,
+                    isRootFileSystem: root)
+    }
+
+    let researchRows: [(String, VolumeFacts, VolumeCapability)] = [
+        ("startup APFS", facts(root: true), .removalSupported),
+        ("external APFS", facts(fileSystem: "apfs"), .removalSupported),
+        ("external HFS+", facts(fileSystem: "hfs"), .removalSupported),
+        ("external ExFAT", facts(fileSystem: "exfat"), .removalSupported),
+        ("external FAT32", facts(fileSystem: "msdos"), .removalSupported),
+        ("read-only ExFAT", facts(readOnly: true, mountedReadOnly: true,
+                                   fileSystem: "exfat"), .scanOnly(.readOnly)),
+        ("read-only APFS", facts(readOnly: true, mountedReadOnly: true,
+                                  fileSystem: "apfs"), .scanOnly(.readOnly)),
+        ("MNT_RDONLY alone", facts(readOnly: false, mountedReadOnly: true),
+         .scanOnly(.readOnly)),
+        ("Foundation read-only alone", facts(readOnly: true, mountedReadOnly: false),
+         .scanOnly(.readOnly)),
+    ]
+    for (name, row, expected) in researchRows {
+        check(classifyVolume(row) == expected, "research volume row: \(name)")
+    }
+
+    let unsupportedRows: [(String, VolumeFacts, VolumeCapability)] = [
+        ("NTFS", facts(fileSystem: "ntfs"), .scanOnly(.unsupportedFilesystemType)),
+        ("SMB", facts(local: false, fileSystem: "smbfs"), .scanOnly(.networkVolume)),
+        ("NFS", facts(local: false, fileSystem: "nfs"), .scanOnly(.networkVolume)),
+        ("AFP", facts(local: false, fileSystem: "afp"), .scanOnly(.networkVolume)),
+        ("unknown filesystem", facts(fileSystem: "futurefs"),
+         .scanOnly(.unsupportedFilesystemType)),
+    ]
+    for (name, row, expected) in unsupportedRows {
+        check(classifyVolume(row) == expected, "unsupported volume row: \(name)")
+    }
+
+    let complete = facts()
+    let unavailableRows: [(String, VolumeFacts)] = [
+        ("isLocal", VolumeFacts(isLocal: nil, isReadOnly: complete.isReadOnly,
+                                 mntRdOnly: complete.mntRdOnly,
+                                 fileSystemType: complete.fileSystemType,
+                                 isRootFileSystem: complete.isRootFileSystem)),
+        ("isReadOnly", VolumeFacts(isLocal: complete.isLocal, isReadOnly: nil,
+                                   mntRdOnly: complete.mntRdOnly,
+                                   fileSystemType: complete.fileSystemType,
+                                   isRootFileSystem: complete.isRootFileSystem)),
+        ("MNT_RDONLY", VolumeFacts(isLocal: complete.isLocal,
+                                   isReadOnly: complete.isReadOnly, mntRdOnly: nil,
+                                   fileSystemType: complete.fileSystemType,
+                                   isRootFileSystem: complete.isRootFileSystem)),
+        ("filesystem type", VolumeFacts(isLocal: complete.isLocal,
+                                        isReadOnly: complete.isReadOnly,
+                                        mntRdOnly: complete.mntRdOnly,
+                                        fileSystemType: nil,
+                                        isRootFileSystem: complete.isRootFileSystem)),
+        ("root filesystem", VolumeFacts(isLocal: complete.isLocal,
+                                        isReadOnly: complete.isReadOnly,
+                                        mntRdOnly: complete.mntRdOnly,
+                                        fileSystemType: complete.fileSystemType,
+                                        isRootFileSystem: nil)),
+    ]
+    for (name, row) in unavailableRows {
+        check(classifyVolume(row) == .scanOnly(.signalsUnavailable),
+              "nil signal forces scan-only: \(name)")
+    }
+
+    let sourceKey = VolumeKey(rawValue: "volume-a")
+    check(!validateTrashResult(
+        sourceVolumeKey: sourceKey,
+        result: TrashResultFacts(hasResultingURL: false, itemExists: false, volumeKey: nil)
+    ), "Trash validator rejects a nil result URL")
+    check(!validateTrashResult(
+        sourceVolumeKey: sourceKey,
+        result: TrashResultFacts(hasResultingURL: true, itemExists: false, volumeKey: sourceKey)
+    ), "Trash validator rejects a missing item")
+    check(!validateTrashResult(
+        sourceVolumeKey: sourceKey,
+        result: TrashResultFacts(hasResultingURL: true, itemExists: true,
+                                 volumeKey: VolumeKey(rawValue: "volume-b"))
+    ), "Trash validator rejects a different volume")
+    check(validateTrashResult(
+        sourceVolumeKey: sourceKey,
+        result: TrashResultFacts(hasResultingURL: true, itemExists: true, volumeKey: sourceKey)
+    ), "Trash validator accepts an existing item on the same volume")
+
+    // Probe where user files live. On macOS 10.15+ `/` is the sealed, read-only
+    // system volume (MNT_RDONLY set), so it is correctly scan-only; the
+    // writable startup Data volume is what a user folder resolves to.
+    let startup = probeVolume(at: FileManager.default.temporaryDirectory)
+    check(startup.capability == .removalSupported
+          && startup.facts.fileSystemType?.lowercased() == "apfs"
+          && startup.facts.isLocal == true
+          && startup.facts.isReadOnly == false
+          && startup.facts.mntRdOnly == false,
+          "real startup-volume probe: the temporary directory is on writable local APFS; got \(startup.capability), \(startup.facts)")
+
+    let temporaryDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("snapsift-volume-\(UUID().uuidString)", isDirectory: true)
+    do {
+        try FileManager.default.createDirectory(at: temporaryDirectory,
+                                                withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let existingItem = temporaryDirectory.appendingPathComponent("trash-result")
+        let missingItem = temporaryDirectory.appendingPathComponent("missing-result")
+        try Data("temporary volume validator fixture".utf8).write(to: existingItem)
+        if let sourceVolumeKey = startup.volumeKey {
+            check(!validateTrashResult(sourceVolumeKey: sourceVolumeKey, resultingURL: nil),
+                  "Trash probe wrapper rejects a nil URL")
+            check(!validateTrashResult(sourceVolumeKey: sourceVolumeKey,
+                                       resultingURL: missingItem),
+                  "Trash probe wrapper rejects a missing item")
+            check(validateTrashResult(sourceVolumeKey: sourceVolumeKey,
+                                      resultingURL: existingItem),
+                  "Trash probe wrapper accepts an existing same-volume item")
+        } else {
+            check(false, "Trash probe wrapper has a startup volume key")
+        }
+    } catch {
+        check(false, "temporary Trash validator fixture setup: \(error)")
+    }
+}
+
+folderAppIntegrationTests(check)
+folderReviewFormatTests(check)
+reviewAlbumNamesTests(check)
+await folderRemovalAppTests(check)
+
+
+print("Shared Photos session rules (no live library)")
+do {
+    func photo(_ id: String, _ time: Double) -> Photo {
+        Photo(uuid: id, filename: "", takenAt: time, width: 100, height: 100,
+              size: 0, uti: "", editedUndetermined: true)
+    }
+    let library = [photo("jpeg", 0), photo("heic", 1), photo("unknown", 100),
+                   photo("other", 101), photo("singleton", 200)]
+    let clustered = cluster(library, gapSec: 3, sizeTol: 0.1)
+    var reads: [String] = []
+    var reported: [(Int, Int)] = []
+    let prepared = await PhotoLibraryScanRules.prepareAssetMetadata(
+        clustered + [clustered[0]], isCancelled: { false }, read: { id in
+            reads.append(id)
+            guard id != "unknown" else { return nil }
+            return PhotoLibraryAssetMetadata(filename: "\(id).image",
+                                             uti: id == "heic" ? "public.heic" : "public.jpeg")
+        }, progress: { reported.append(($0, $1)) })
+    check(reads == ["jpeg", "heic", "unknown", "other"],
+          "resource reads visit grouped assets once, never library singletons")
+    check(prepared[0].map(\.uuid) == clustered[0].map(\.uuid)
+          && PhotoLibraryScanRules.reviewGroups(prepared)[0].keeperID == "heic",
+          "resource fields do not change clustering and UTI is ready before keeper ranking")
+    check(prepared[0][1].filename == "heic.image" && prepared[1][0] == library[2]
+          && prepared.flatMap { $0 }.allSatisfy { $0.size == 0 && $0.editedUndetermined && !$0.isDeletable },
+          "metadata failure keeps unknown fields; resource enrichment preserves unknown size and protection")
+    check(reported.map { $0.0 } == [0, 1, 2, 3, 4] && reported.allSatisfy { $0.1 == 4 },
+          "grouped resource phase reports progress from start through completion")
+    reads = []
+    _ = await PhotoLibraryScanRules.prepareAssetMetadata(
+        clustered, isCancelled: { !reads.isEmpty }, read: { id in
+            reads.append(id)
+            return nil
+        }, progress: { _, _ in })
+    check(reads == ["jpeg"], "grouped resource reads stop on cancellation")
+}
+do {
+    struct Item { let id: String; let video: Bool }
+    let assets = [Item(id: "still", video: false), Item(id: "paired", video: true),
+                  Item(id: "ordinary", video: true), Item(id: "unknown", video: true)]
+    var probed: [String] = []
+    let result = await PhotoLibraryScanRules.excludePairedVideos(
+        assets, identifier: { $0.id }, isVideo: { $0.video }, isCancelled: { false },
+        pairing: { item in
+            probed.append(item.id)
+            switch item.id { case "paired": return true; case "ordinary": return false; default: return nil }
+        })
+    check(result.kept.map(\.id) == ["still", "ordinary"],
+          "paired and unknown videos are excluded; stills and proven unpaired videos remain")
+    check(result.undetermined.map(\.id) == ["unknown"],
+          "only unknown videos are routed to Needs a look")
+    check(probed == ["paired", "ordinary", "unknown"], "stills never need a paired-video probe")
+    var cancellationProbes = 0
+    _ = await PhotoLibraryScanRules.excludePairedVideos(
+        assets, identifier: { $0.id }, isVideo: { $0.video },
+        isCancelled: { cancellationProbes > 0 }, pairing: { _ in cancellationProbes += 1; return false })
+    check(cancellationProbes == 1, "paired-video exclusion stops probing on cancellation")
+
+    let groups = PhotoLibraryScanRules.reviewGroups([[ph(800, 0), ph(801, 1)],
+                                                     [ph(802, 2), ph(803, 3)]], confident: [0])
+    check(groups[0].confidentDupe && !groups[1].confidentDupe,
+          "neural confidence controls review sections only")
+    check(groups.allSatisfy { $0.rejected.isEmpty && $0.autoSeeded.isEmpty },
+          "confident bursts never pre-mark a deletion; only the exact pass may seed")
+    var faceGroup = ReviewGroup(photos: [ph(804, 0), ph(805, 1), ph(806, 2)], keeperID: "U804")
+    faceGroup.rejected = ["U805", "U806"]
+    faceGroup.autoSeeded = ["U805", "U806"]
+    faceGroup.confidentDupe = true
+    let refined = PhotoLibraryScanRules.refineWithFaces([faceGroup], scores: ["U805": 0.9])[0]
+    check(refined.keeperID == "U805" && refined.rejected == ["U806"] && refined.autoSeeded == ["U806"]
+          && refined.confidentDupe && refined.id == faceGroup.id,
+          "face re-pick unmarks the new keeper without changing other verdicts or group identity")
+    let favoriteGroup = ReviewGroup(photos: [ph(807, 0, fav: true), ph(808, 1)], keeperID: "U808")
+    check(PhotoLibraryScanRules.refineWithFaces([favoriteGroup], scores: ["U808": 1])[0].keeperID == "U807",
+          "favorite priority stays above face score")
+
+    var albumGroup = ReviewGroup(photos: [ph(820, 0), ph(821, 1), ph(822, 2, fav: true),
+                                         ph(823, 3, isDocument: true), ph(824, 4, editedUnknown: true),
+                                         ph(825, 5, docDegraded: true)], keeperID: "U821")
+    albumGroup.includeProtected = true
+    check(AlbumWriter.exactCandidates(groups: [albumGroup], exactGroups: [albumGroup.id]) == ["U820"],
+          "exact album honors the user's promoted keeper and excludes protected/unverifiable frames")
+    check(AlbumWriter.needsLookCandidates(groups: [albumGroup]) == ["U824", "U825"],
+          "unknown edit/document state goes to Needs a look regardless of override")
+    check(AlbumWriter.documentCandidates(groups: [albumGroup]) == ["U823"],
+          "confirmed documents remain organizational album members")
+    check(AlbumWriter.burstCandidates(groups: [albumGroup], exactGroups: [albumGroup.id]).isEmpty
+          && AlbumWriter.blurryCandidates(groups: [albumGroup], exactGroups: [albumGroup.id]).isEmpty,
+          "exact groups never also enter burst/blurry buckets")
+
+}
+
+print("Per-album write outcomes")
+do {
+    let burstGroup = ReviewGroup(photos: [ph(900, 0), ph(901, 1)], keeperID: "U901")
+    let docsGroup = ReviewGroup(photos: [ph(902, 2, isDocument: true)], keeperID: "U902")
+    let exactGroup = ReviewGroup(photos: [ph(903, 3), ph(904, 4)], keeperID: "U903")
+    let needsLookGroup = ReviewGroup(photos: [ph(905, 5, editedUnknown: true)], keeperID: "U905")
+    let groups = [burstGroup, docsGroup, exactGroup, needsLookGroup]
+    let exactIDs: Set<ReviewGroup.ID> = [exactGroup.id]
+    let available = Set((900...905).map { "U\($0)" })
+    let operations = FakeAlbumWriteOperations()
+    operations.failedAdds = ["Burst album"]
+    let report = await AlbumWriter.writeReport(
+        groups: groups, exactGroups: exactIDs, availableAssetIDs: available,
+        titles: testAlbumTitles(), operations: operations)
+    check(report.bursts == .failed("failed Burst album")
+          && report.documents == .added(1)
+          && report.exactDupes == .added(1)
+          && report.needsLook == .added(1),
+          "one album failure does not stop independent writes")
+    check(operations.events.contains("add:Documents album")
+          && operations.events.contains("add:Exact album")
+          && operations.events.contains("add:Needs-a-look album"),
+          "remaining buckets are attempted after a failure")
+
+    let legacyOperations = FakeAlbumWriteOperations()
+    legacyOperations.failedAdds = ["Burst album"]
+    do {
+        _ = try await AlbumWriter.write(
+            groups: groups, exactGroups: exactIDs, availableAssetIDs: available,
+            titles: testAlbumTitles(), operations: legacyOperations)
+        check(false, "legacy write path throws on the first album failure")
+    } catch let error as AlbumOperationFailure {
+        check(error.name == "Burst album"
+              && legacyOperations.events == ["add:Burst album"],
+              "legacy write path still throws immediately for macOS callers")
+    } catch {
+        check(false, "legacy write path preserves the original operation error")
+    }
+}
+
+do {
+    let burstGroup = ReviewGroup(photos: [ph(910, 0), ph(911, 1)], keeperID: "U911")
+    let docsGroup = ReviewGroup(photos: [ph(912, 2, isDocument: true)], keeperID: "U912")
+    let operations = FakeAlbumWriteOperations()
+    operations.addCounts = ["Burst album": 0, "Documents album": 1]
+    let report = await AlbumWriter.writeReport(
+        groups: [burstGroup, docsGroup], exactGroups: [],
+        availableAssetIDs: ["U910", "U911", "U912"],
+        titles: testAlbumTitles(), operations: operations)
+    check(report.bursts == .nothingToAdd && report.documents == .added(1),
+          "report distinguishes an idempotent no-op from a new addition")
+}
+
+do {
+    let exactGroup = ReviewGroup(photos: [ph(920, 0), ph(921, 1)], keeperID: "U920")
+    let needsLookGroup = ReviewGroup(photos: [ph(922, 2, editedUnknown: true)], keeperID: "U922")
+    let operations = FakeAlbumWriteOperations()
+    operations.failedRemovals = ["Needs-a-look album"]
+    let report = await AlbumWriter.writeReport(
+        groups: [exactGroup, needsLookGroup], exactGroups: [exactGroup.id],
+        availableAssetIDs: ["U920", "U921", "U922"],
+        titles: testAlbumTitles(), operations: operations)
+    check(operations.events == ["remove:Exact album", "remove:Needs-a-look album"]
+          && report.exactDupes == .notAttempted
+          && report.needsLook == .failed("failed Needs-a-look album")
+          && report.moved == 1,
+          "reconciliation failure blocks both adds after ordered removals")
+}
+
+do {
+    let photos = [ph(810, 0), ph(811, 1), ph(812, 2), ph(813, 3), ph(814, 4, editedUnknown: true)]
+    let snapshot = ScanSnapshot(kind: "lookAlikes", sourceID: "synthetic-album", timestamp: Date(),
+        changeToken: Data([1, 2, 3]),
+        groups: [.init(photos: photos, keeperID: "U810",
+                       rejected: ["U811", "U812", "U813", "U814"], autoSeeded: ["U811"],
+                       confidentDupe: true, exact: true)],
+        categories: [.init(label: "Synthetic set", photos: Array(photos.prefix(2)))])
+    let live = Dictionary(uniqueKeysWithValues: photos.map { ($0.uuid, false) })
+    let current = snapshot.restored(liveFavorites: live, editedNow: [:], tokenCurrent: true)
+    check(current.groups[0].rejected == ["U811", "U812", "U813", "U814"]
+          && current.groups[0].autoSeeded == ["U811"]
+          && current.groups[0].deletionIDs == ["U811", "U812", "U813"],
+          "current restore retains marks while unknown protection stays outside the deletion set")
+    check(current.exactIDs == [current.groups[0].id] && !current.groups[0].includeProtected,
+          "current restore remaps exact badges and resets protected consent")
+    let stale = snapshot.restored(liveFavorites: live, editedNow: [:], tokenCurrent: false)
+    check(stale.groups[0].rejected == ["U812", "U813", "U814"] && stale.groups[0].autoSeeded.isEmpty
+          && stale.groups[0].deletionIDs == ["U812", "U813"]
+          && stale.exactIDs.isEmpty && stale.staleClearedSeeds == 1,
+          "stale restore drops app seeds and exact badges, preserving manual marks")
+    var changed = live
+    changed["U812"] = true
+    changed.removeValue(forKey: "U813")
+    let protected = snapshot.restored(liveFavorites: changed, editedNow: ["U811": true], tokenCurrent: true)
+    check(protected.groups[0].rejected == ["U814"] && protected.groups[0].deletionIDs.isEmpty
+          && protected.vanishedMarks == 1,
+          "live favorite/edit changes re-protect frames and missing marks are counted")
+    check(protected.groups[0].photos.first { $0.uuid == "U811" }?.edited == true,
+          "restore carries newly read edits into the review model")
+    let missingKeeper = snapshot.restored(liveFavorites: ["U811": false, "U812": false],
+                                          editedNow: [:], tokenCurrent: true)
+    check(missingKeeper.groups[0].keeperID == "U811"
+          && !missingKeeper.groups[0].rejected.contains("U811") && missingKeeper.categories.isEmpty,
+          "missing keeper is re-picked and singleton categories dissolve")
+    let singleton = snapshot.restored(liveFavorites: ["U811": false], editedNow: [:], tokenCurrent: false)
+    check(singleton.groups.isEmpty, "groups with fewer than two live frames dissolve")
+
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        .appendingPathComponent(".build/photos-session-tests-\(UUID().uuidString)", isDirectory: true)
+    let storage = PhotoLibraryStorage(directory: root)
+    let otherStorage = PhotoLibraryStorage(directory: root.appendingPathComponent("other-app"))
+    let store = ScanSnapshotStore(url: storage.snapshotURL)
+    defer { try? FileManager.default.removeItem(at: root) }
+    do {
+        check(store.saveSync(snapshot), "snapshot writes to the injected app directory")
+        let decoded = store.load()
+        check(decoded?.sourceID == snapshot.sourceID && decoded?.kind == snapshot.kind
+              && decoded?.changeToken == snapshot.changeToken && decoded?.groups[0].autoSeeded == ["U811"],
+              "schema-1 snapshot round-trips scope, kind, verdict anchor and marks")
+        if let encoded = try? JSONEncoder().encode(snapshot),
+           let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any],
+           let storedGroups = object["groups"] as? [[String: Any]] {
+            check(storedGroups[0]["includeProtected"] == nil, "protected consent is absent from snapshot bytes")
+        } else { check(false, "snapshot JSON is readable") }
+        let newer = ScanSnapshot(kind: "burst", sourceID: nil, timestamp: Date(), changeToken: Data([9]),
+                                 groups: [], categories: [])
+        store.saveAsync(snapshot) { _ in }
+        check(store.saveSync(newer) && store.load()?.changeToken == Data([9]),
+              "termination flush follows queued saves; older state cannot overwrite it")
+        check(!FileManager.default.fileExists(atPath: otherStorage.snapshotURL.path),
+              "one app's snapshot never creates another app's session")
+        func checkSnapshotOrdering() {
+            let sameFile = ScanSnapshotStore(url: root.appendingPathComponent("unused/../last-scan.json"))
+            let otherFile = ScanSnapshotStore(url: otherStorage.snapshotURL)
+            check(sameFile.url == store.url, "snapshot URL normalization is stable before and after file creation")
+            let blocked = DispatchSemaphore(value: 0)
+            let resume = DispatchSemaphore(value: 0)
+            let olderDone = DispatchSemaphore(value: 0)
+            let newerDone = DispatchSemaphore(value: 0)
+            let otherDone = DispatchSemaphore(value: 0)
+            // Hold the first store's queue after a write, so independent queues
+            // deterministically let the newer write overtake the queued older one.
+            store.saveAsync(snapshot) { _ in
+                blocked.signal()
+                resume.wait()
+            }
+            check(blocked.wait(timeout: .now() + 5) == .success, "snapshot ordering fixture holds the first queue")
+            store.saveAsync(snapshot) { _ in olderDone.signal() }
+            sameFile.saveAsync(newer) { _ in newerDone.signal() }
+            otherFile.saveAsync(newer) { _ in otherDone.signal() }
+            check(otherDone.wait(timeout: .now() + 5) == .success && otherFile.load()?.changeToken == Data([9]),
+                  "a different snapshot URL writes independently of a blocked file")
+            let newerOvertook = newerDone.wait(timeout: .now() + 0.1) == .success
+            check(!newerOvertook, "stores at equivalent standardized URLs share one save queue")
+            resume.signal()
+            check(olderDone.wait(timeout: .now() + 5) == .success, "older queued snapshot finishes")
+            if !newerOvertook {
+                check(newerDone.wait(timeout: .now() + 5) == .success, "last-enqueued snapshot finishes")
+            }
+            check(store.load()?.changeToken == Data([9]),
+                  "two store instances retain the last-enqueued state after all writes finish")
+            store.saveAsync(snapshot) { _ in }
+            check(sameFile.saveSync(newer) && store.load()?.changeToken == Data([9]),
+                  "termination flush orders behind another store's asynchronous saves")
+        }
+        checkSnapshotOrdering()
+        let corrupt = Data("corrupt synthetic snapshot".utf8)
+        try corrupt.write(to: storage.snapshotURL)
+        if case .unreadable = store.loadOutcome() { check(true, "corrupt snapshot is distinguished from no session") }
+        else { check(false, "corrupt snapshot is distinguished from no session") }
+        let aside = storage.snapshotURL.deletingPathExtension().appendingPathExtension("unreadable.json")
+        check(try Data(contentsOf: aside) == corrupt, "unreadable snapshot bytes are preserved beside the injected file")
+        let wrongSchema = ScanSnapshot(schema: 999, kind: "burst", sourceID: nil, timestamp: Date(),
+                                       changeToken: nil, groups: [], categories: [])
+        check(store.saveSync(wrongSchema), "synthetic future-schema snapshot fixture is written")
+        if case .unreadable = store.loadOutcome() { check(true, "unsupported snapshot schema never restores verdicts") }
+        else { check(false, "unsupported snapshot schema never restores verdicts") }
+
+        func record(_ id: String) -> DeletionRecord {
+            DeletionRecord(timestamp: "2026-10-11T00:00:00Z", assetIdentifier: id, filename: "fixture.jpg",
+                           sizeBytes: 0, keeperIdentifier: "keeper", keeperFilename: "keeper.jpg", reason: .userRejected)
+        }
+        let intent = DeletionSession(timestamp: "2026-10-11T00:00:00Z",
+                                     records: [record("exists"), record("gone"), record("logged")])
+        let ports = await MainActor.run { PhotoKitCommitPorts.make(storage: storage, editedNow: { _ in [:] }) }
+        let written = await MainActor.run { ports.writeIntent(intent) }
+        check(written && DeletionAuditLog.pendingIntent(at: storage.journalURL)?.records.count == 3,
+              "PhotoKit commit ports journal to the injected location without touching Photos")
+        let logged = DeletionSession(timestamp: intent.timestamp, records: [record("logged")])
+        let audited = await MainActor.run { ports.appendAudit(logged) }
+        check(audited, "PhotoKit commit ports audit to the injected history")
+        let history = PhotoLibraryHistoryStore(storage: storage)
+        var reconciledIDs: [String] = []
+        let recovered = history.reconcile { ids in reconciledIDs = ids; return ["exists"] }
+        check(recovered == 1 && reconciledIDs == ["exists", "gone", "logged"],
+              "reconciliation live-checks intent and books only vanished, unlogged assets")
+        check(history.loadSessions().flatMap { $0.records.map(\.assetIdentifier) } == ["gone", "logged"],
+              "recovered history is newest-first and contains no invented or duplicate removal")
+        check(DeletionAuditLog.pendingIntent(at: storage.journalURL) == nil
+              && history.reconcile { _ in [] } == 0, "journal reconciliation is idempotent")
+        check(PhotoLibraryHistoryStore(storage: otherStorage).loadSessions().isEmpty,
+              "history and journal storage remain isolated per app")
+        check(history.exportText().contains("fixture.jpg"), "injected history supports plain-text export")
+        check(DeletionAuditLog.writeIntent(intent, to: storage.journalURL), "cancelled-commit intent fixture is written")
+        let before = history.loadSessions().count
+        check(history.reconcile { Set($0) } == 0 && history.loadSessions().count == before,
+              "cancelled system confirmation invents no deletion history")
+        check(DeletionAuditLog.writeIntent(intent, to: storage.journalURL), "clear-intent fixture is written")
+        await MainActor.run { ports.clearIntent() }
+        check(!FileManager.default.fileExists(atPath: storage.journalURL.path),
+              "commit ports clear only the injected journal")
+    } catch { check(false, "Photos session synthetic fixture I/O: \(error)") }
+}
+
+// Shared Folder session integration: no image decoder, Photos library or system Trash.
+private enum FolderSessionTestError: Error { case refused }
+
+@MainActor
+private final class FolderSessionFixture {
+    let root: URL
+    let source: URL
+    let trash: URL
+    var items: [FolderItem] = []
+    var groups: [ReviewGroup] = []
+    var resolvedStarts = 0
+    var resolvedStops = 0
+    var resultStarts = 0
+    var resultStops = 0
+    var pauseScan = false
+    var pauseMetadata = false
+    var scanGate: CheckedContinuation<Void, Never>?
+    var metadataGate: CheckedContinuation<Void, Never>?
+    var failScan = false
+    var failTrashName: String?
+    var failAudit = false
+    var trashCalls = 0
+    var cross: [FolderCrossFolderDuplicate] = []
+    lazy var bookmarks = FolderBookmarkStore(url: root.appendingPathComponent("app-a/folders.json"), makeAccess: { url in
+        try FolderAccess(url: url, startAccess: { _ in self.resolvedStarts += 1; return true },
+                         stopAccess: { _ in self.resolvedStops += 1 })
+    }, resolveBookmark: { _ in (self.source, false) })
+    lazy var history = FolderHistoryStore(historyURL: root.appendingPathComponent("app-a/history.json"),
+        intentURL: root.appendingPathComponent("app-a/pending-removal.json"), write: { data, url in
+            if self.failAudit && url.lastPathComponent == "history.json" { throw FolderSessionTestError.refused }
+            try FolderHistoryStore.atomicWrite(data, url)
+        })
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("snapsift-folder-session-\(UUID())")
+        source = root.appendingPathComponent("source")
+        trash = root.appendingPathComponent("fake-trash")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: false)
+        for (index, name) in ["a.jpg", "b.jpg", "c.jpg"].enumerated() {
+            let url = source.appendingPathComponent(name)
+            try Data("fixture \(name)".utf8).write(to: url)
+            let member = try FolderMember.read(at: url)
+            let photo = Photo(uuid: name, filename: name, takenAt: Double(index), width: 16, height: 16,
+                              size: member.size, uti: "public.jpeg", edited: index == 2, editedUndetermined: false)
+            items.append(FolderItem(photo: photo, primary: member, members: [member],
+                                    directoryURL: source, folderKey: "source"))
+        }
+        var group = ReviewGroup(photos: items.map(\.photo), keeperID: items[0].id)
+        group.rejected = [items[1].id, items[2].id]
+        group.includeProtected = true
+        groups = [group]
+    }
+
+    func cleanup() { try? FileManager.default.removeItem(at: root) }
+    func session() -> FolderLibrarySession {
+        FolderLibrarySession(bookmarks: bookmarks, history: history,
+            trashPort: FolderTrashPort(trash: { url in
+                self.trashCalls += 1
+                if url.lastPathComponent == self.failTrashName { throw FolderSessionTestError.refused }
+                let destination = self.trash.appendingPathComponent(url.lastPathComponent)
+                try FolderTrashPort.moveWithoutOverwrite(url, destination)
+                return destination
+            }),
+            scan: { _ in
+                if self.pauseScan { await withCheckedContinuation { self.scanGate = $0 } }
+                if self.failScan { throw FolderSessionTestError.refused }
+                let access = try FolderAccess(url: self.source,
+                    startAccess: { _ in self.resultStarts += 1; return true },
+                    stopAccess: { _ in self.resultStops += 1 })
+                return FolderScanResult(items: self.items, groups: self.groups, exactGroupIDs: [],
+                    crossFolderDuplicates: self.cross,
+                    roots: [FolderScannedRoot(url: self.source, volume: probeVolume(at: self.source))],
+                    issues: [], primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [],
+                    imageProvider: FolderImageProvider(items: self.items), accesses: [access])
+            }, metadata: { _ in
+                if self.pauseMetadata { await withCheckedContinuation { self.metadataGate = $0 } }
+                return ["b.jpg": LibraryMetadata(albumCount: 0, hasDescription: true),
+                        "c.jpg": LibraryMetadata(albumCount: 0, hasDescription: nil)]
+            })
+    }
+}
+
+@MainActor
+private func waitForFolderSession(_ condition: () -> Bool) async -> Bool {
+    for _ in 0..<10_000 {
+        if condition() { return true }
+        await Task.yield()
+    }
+    return condition()
+}
+
+@MainActor
+private func checkFolderLibrarySession() async {
+    print("Shared Folder session orchestration")
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        f.pauseMetadata = true
+        let s = f.session()
+        s.addFolders([f.source])
+        s.addFolders([f.source])
+        check(s.folders.count == 1 && f.resolvedStarts == f.resolvedStops,
+              "folder session deduplicates selected URLs and balances selection scopes")
+        let before = f.resolvedStops
+        s.startScan()
+        check(s.isScanning, "folder session synchronously blocks scan re-entry")
+        check(await waitForFolderSession { f.metadataGate != nil }, "folder session cancellation reaches delayed metadata probe")
+        s.cancelScan()
+        f.metadataGate?.resume(); f.metadataGate = nil
+        check(await waitForFolderSession { !s.isScanning }, "folder session cancelled scan finishes")
+        check(s.result == nil && s.groups.isEmpty && s.uniqueMetadataIDs.isEmpty && s.crossFolderItemIDs.isEmpty
+              && !s.hasScanned && s.selection == nil && s.focusedFrame == nil,
+              "folder session never installs results or decisions after metadata cancellation")
+        check(f.resolvedStops == before + 1 && f.resultStarts == 1 && f.resultStops == 1,
+              "folder session cancellation stops bookmark and returned pipeline accesses")
+        if case .scanCancelled? = s.notice { check(true, "folder scan cancellation is a typed outcome") }
+        else { check(false, "folder scan cancellation is a typed outcome") }
+
+        f.pauseMetadata = false
+        f.pauseScan = true
+        s.startScan()
+        check(await waitForFolderSession { f.scanGate != nil }, "folder cancellation reaches delayed pipeline")
+        s.cancelScan()
+        f.scanGate?.resume(); f.scanGate = nil
+        check(await waitForFolderSession { !s.isScanning }, "folder delayed decoder finishes after cancellation")
+        check(s.result == nil && f.resultStarts == f.resultStops && f.resolvedStarts == f.resolvedStops,
+              "folder late pipeline result is released without installation")
+
+        f.pauseScan = false
+        var observedBeforeScanning = false
+        s.onChange = { if !s.isScanning { observedBeforeScanning = true } }
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder session synthetic scan completes")
+        check(observedBeforeScanning && s.hasScanned && s.groups.count == 1
+              && s.selection == s.groups[0].id && s.focusedFrame == "a.jpg" && s.uniqueMetadataIDs == ["b.jpg"],
+              "folder session installs review, metadata badges, focus and observation")
+        if case .scanFinished(let items, let groups)? = s.notice {
+            check(items == 3 && groups == 1, "folder scan completion carries item and group counts")
+        } else { check(false, "folder scan completion carries item and group counts") }
+        s.onChange = nil
+        s.presentRemovalReview()
+        check(s.isBusy && s.removalReview?.summary.itemCount == 2, "folder session final review locks actions and uses committer summary")
+        s.discardResult()
+        check(s.result != nil, "folder session cannot discard during final review")
+        s.cancelRemovalReview()
+        let retained = s.result // Explicit stop must work even while another owner retains the value.
+        s.discardResult()
+        check(s.result == nil && !s.hasScanned && s.groups.isEmpty && s.selection == nil && s.focusedFrame == nil
+              && s.notice == nil && s.item(for: "a.jpg") == nil && s.uniqueMetadataIDs.isEmpty && s.crossFolderMatches.isEmpty,
+              "folder discard clears all scan and review state")
+        check(retained != nil && f.resultStarts == f.resultStops && f.resolvedStarts == f.resolvedStops,
+              "folder discard explicitly stops retained pipeline accesses")
+        f.failScan = true
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder failed scan completes")
+        if case .scan? = s.errorOutcome { check(true, "folder scan failure is data without localization") }
+        else { check(false, "folder scan failure is data without localization") }
+        check(s.result == nil && f.resolvedStarts == f.resolvedStops, "folder failed scan installs nothing and stops scopes")
+    } catch { check(false, "folder cancellation/discard fixture: \(error)") }
+
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        f.failTrashName = "c.jpg"
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder partial commit fixture scans")
+        s.presentRemovalReview()
+        guard let review = s.removalReview else { check(false, "folder removal review exists"); return }
+        let outcome = await s.commitReviewed(review)
+        check(outcome?.removedCount == 1 && !s.isBusy && s.removalReview == nil,
+              "folder commit counts only successful moves and releases the operation lock")
+        if case .removalFailed(let failure, let path)? = outcome?.problems.first {
+            check(failure.itemID == "c.jpg" && path == f.items[2].primary.url.path,
+                  "folder per-item failure carries its reason and original path")
+        } else { check(false, "folder per-item failure carries its reason and original path") }
+        check(s.groups.count == 1 && s.groups[0].deletionIDs == ["c.jpg"] && s.groups[0].includeProtected
+              && s.item(for: "b.jpg") == nil && s.uniqueMetadataIDs.isEmpty,
+              "folder commit finishes successful removals and retains failed protected decisions")
+        check(await s.commitReviewed(review) == nil, "folder commit rejects a consumed final review")
+        s.presentHistory()
+        check(s.historyEntries.count == 1 && s.historyEntries[0].record.itemID == "b.jpg", "folder session reloads actual removal history")
+        if let entry = s.historyEntries.first {
+            await s.putBack(entry)
+            if case .putBackDone? = s.notice { check(true, "folder Put Back returns the restored outcome") }
+            else { check(false, "folder Put Back returns the restored outcome") }
+            check(s.historyEntries.first?.record.state == .restored && FileManager.default.fileExists(atPath: f.items[1].primary.url.path),
+                  "folder Put Back uses the injected move port and reloads history")
+        }
+        s.showHistory = false
+        f.failTrashName = nil
+        s.presentRemovalReview()
+        if let retry = s.removalReview {
+            let retryOutcome = await s.commitReviewed(retry)
+            check(retryOutcome?.removedCount == 1 && retryOutcome?.problems.isEmpty == true && s.groups.isEmpty
+                  && s.selection == nil && s.focusedFrame == nil, "folder successful retry repairs groups and focus")
+            if case .removed(1)? = s.notice { check(true, "folder successful removal count is typed") }
+            else { check(false, "folder successful removal count is typed") }
+        }
+        s.discardResult()
+    } catch { check(false, "folder partial commit fixture: \(error)") }
+
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder withdrawal fixture scans")
+        s.presentRemovalReview()
+        try Data("changed bytes".utf8).write(to: f.items[1].primary.url)
+        if let review = s.removalReview, let outcome = await s.commitReviewed(review) {
+            if case .withdrawal(let withdrawal, let paths)? = outcome.problems.first {
+                check(withdrawal.itemCount == 2 && paths.count == 2, "folder withdrawn group carries count, reason and reviewed paths")
+            } else { check(false, "folder withdrawn group carries count, reason and reviewed paths") }
+            check(outcome.removedCount == 0 && f.trashCalls == 0 && s.totalDeletions == 2,
+                  "folder withdrawal preserves decisions and performs no move")
+        } else { check(false, "folder withdrawal commit returned an outcome") }
+        s.discardResult()
+    } catch { check(false, "folder withdrawal fixture: \(error)") }
+
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        f.failAudit = true
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder audit fixture scans")
+        s.presentRemovalReview()
+        if let review = s.removalReview, let outcome = await s.commitReviewed(review) {
+            check(outcome.removedCount == 2 && outcome.problems.contains { if case .auditFailed = $0 { return true }; return false }
+                  && outcome.problems.contains { if case .pendingIntent = $0 { return true }; return false },
+                  "folder audit failure reports committed count and pending intent independently")
+        } else { check(false, "folder audit fixture returned a commit outcome") }
+        // Failed audit leaves an intent. The next launch recovers it, without sharing app B's files.
+        f.failAudit = false
+        let otherBookmarks = FolderBookmarkStore(url: f.root.appendingPathComponent("app-b/folders.json"))
+        let otherHistory = FolderHistoryStore(historyURL: f.root.appendingPathComponent("app-b/history.json"),
+                                             intentURL: f.root.appendingPathComponent("app-b/pending-removal.json"))
+        let other = FolderLibrarySession(bookmarks: otherBookmarks, history: otherHistory)
+        other.loadFolders()
+        check(try other.folders.isEmpty && otherHistory.records().isEmpty && otherHistory.pendingIntent().isEmpty,
+              "folder sessions isolate bookmarks, history and pending intent per app")
+        let launched = f.session()
+        if case .recovered(let count, let unavailable)? = launched.reconcileAtLaunch() {
+            check(count == 2 && unavailable == 0, "folder launch reconciliation reports recovered and unavailable counts")
+        } else { check(false, "folder launch reconciliation reports recovered and unavailable counts") }
+        check(try launched.reconcileAtLaunch() == nil && f.history.records().count == 2
+              && f.history.pendingIntent().isEmpty && f.resolvedStarts == f.resolvedStops,
+              "folder launch reconciliation runs once, clears intent and balances scopes")
+        check((try otherHistory.records()).isEmpty, "folder reconciliation never writes another app history")
+        s.discardResult()
+        try Data("invalid intent".utf8).write(to: f.history.intentURL)
+        let failedLaunch = f.session()
+        if case .failed? = failedLaunch.reconcileAtLaunch() { check(true, "folder reconcile failure is typed") }
+        else { check(false, "folder reconcile failure is typed") }
+        check(!failedLaunch.isBusy && f.resolvedStarts == f.resolvedStops, "folder failed reconciliation releases the lock and scopes")
+        try f.history.clearIntent()
+        failedLaunch.refreshHistory()
+        check(failedLaunch.recoveryOutcome == nil && failedLaunch.historyEntries.count == 2,
+              "folder successful reconciliation retry clears the previous failure")
+    } catch { check(false, "folder reconciliation/storage fixture: \(error)") }
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        var near = ReviewGroup(photos: Array(f.items.prefix(2)).map(\.photo), keeperID: "a.jpg")
+        near.rejected = ["b.jpg"]
+        near.autoSeeded = ["b.jpg"]
+        f.groups = [near]
+        f.cross = [FolderCrossFolderDuplicate(primarySHA256: "same-primary", itemIDs: ["b.jpg", "c.jpg"], folderKeys: ["first", "second"])]
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder cross-folder fixture scans")
+        check(s.groups.count == 2 && s.crossFolderItemIDs == ["b.jpg", "c.jpg"] && s.crossFolderMatches == [["b.jpg", "c.jpg"]]
+              && s.totalDeletions == 0 && s.groups.allSatisfy { $0.autoSeeded.isEmpty },
+              "folder session clears cross-folder suggestions and adds unassigned matches to review")
+        s.removeFolder(s.folders[0].id)
+        check(s.folders.isEmpty && s.result == nil && f.resolvedStarts == f.resolvedStops && f.resultStarts == f.resultStops,
+              "folder removal discards review and stops all accesses")
+    } catch { check(false, "folder cross-folder fixture: \(error)") }
+
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        // A new sidecar protects a previously unprotected marked file at commit.
+        f.groups[0].rejected = ["b.jpg"]
+        f.groups[0].includeProtected = false
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder live protection fixture scans")
+        s.presentRemovalReview()
+        try Data("new edit".utf8).write(to: f.source.appendingPathComponent("b.xmp"))
+        if let review = s.removalReview, let outcome = await s.commitReviewed(review) {
+            check(outcome.removedCount == 0 && outcome.problems.contains { if case .newlyProtected(1) = $0 { return true }; return false }
+                  && f.trashCalls == 0, "folder live protection becomes a typed newly-protected problem")
+        } else { check(false, "folder live protection returned a commit outcome") }
+        s.discardResult()
+    } catch { check(false, "folder live protection fixture: \(error)") }
+
+    do {
+        let f = try FolderSessionFixture()
+        defer { f.cleanup() }
+        let s = f.session()
+        s.addFolders([f.source])
+        s.startScan()
+        check(await waitForFolderSession { !s.isScanning }, "folder pending intent fixture scans")
+        s.presentRemovalReview()
+        let record = FolderHistoryRecord(item: f.items[1], timestamp: "fixture", primarySHA256: "fixture", reason: .userRejected)
+        try f.history.writeIntent([record])
+        if let review = s.removalReview, let outcome = await s.commitReviewed(review) {
+            check(outcome.removedCount == 0 && outcome.problems.count == 2 && f.trashCalls == 0,
+                  "folder pending intent blocks a new removal without overwriting it")
+            if case .commitFailed(let error)? = outcome.problems.first {
+                if let error = error as? FolderHistoryError, case .pendingIntent = error {
+                    check(true, "folder blocked commit retains the typed pending-intent error")
+                } else { check(false, "folder blocked commit retains the typed pending-intent error") }
+            } else { check(false, "folder blocked commit retains the typed pending-intent error") }
+            if case .pendingIntent? = outcome.problems.last { check(true, "folder blocked commit also reports remaining intent") }
+            else { check(false, "folder blocked commit also reports remaining intent") }
+        } else { check(false, "folder pending intent fixture returned a commit outcome") }
+        s.discardResult()
+    } catch { check(false, "folder pending intent fixture: \(error)") }
+
+}
+
+private func checkFolderSessionMessages() {
+    print("Folder session outcome localization compatibility")
+    let url = URL(fileURLWithPath: "/fixture/photo.jpg")
+    let withdrawal = FolderGroupWithdrawal(groupID: ReviewGroup(photos: [ph(950, 0)], keeperID: "U950").id,
+                                            itemCount: 2, reason: .memberMissing(url))
+    let failure = FolderRemovalFailure(itemID: "item", reason: .trash("detail"))
+    for language in Language.allCases {
+        let t = L10n(language)
+        let pairs: [(FolderCommitProblem, String)] = [
+            (.withdrawal(withdrawal, paths: [url.path]), "\(t.folderWithdrawalReport(2, reason: withdrawal.reason))\n\(url.path)"),
+            (.removalFailed(failure, path: url.path), "\(url.path)\n\(t.folderRemovalFailure(failure.reason))"),
+            (.stale(2), t.folderStale(2)), (.newlyProtected(2), t.folderNewlyProtected(2)),
+            (.burstSkipped(2), t.commitBurstSkipped(2)), (.unverifiedKept(2), t.folderUnverifiedKept(2)),
+            (.keeperMissing(2), t.folderKeeperMissing(2)), (.survivorsMissing(2), t.folderSurvivorsMissing(2)),
+            (.auditFailed, t.folderAuditFailed()), (.pendingIntent, t.folderPendingIntent()),
+            (.commitFailed(CommitError.busy), t.folderCommitBusy()),
+            (.commitFailed(CommitError.journalWriteFailed), t.folderJournalFailed()),
+            (.commitFailed(FolderHistoryError.pendingIntent), t.folderPendingIntent()),
+            (.historyFailed(FolderSessionTestError.refused), t.folderHistoryFailed(FolderSessionTestError.refused.localizedDescription)),
+        ]
+        check(pairs.allSatisfy { $0.0.message(t) == $0.1 }, "folder commit outcomes preserve every existing message in \(language.rawValue)")
+        let outcome = FolderCommitOutcome(removedCount: 1, problems: [.stale(2), .auditFailed])
+        check(FolderOperationReport.removalIncomplete(outcome).message(t)
+              == [t.folderRemovalIncomplete(1), t.folderStale(2), t.folderAuditFailed()].joined(separator: "\n\n"),
+              "folder removal report preserves ordering and blank lines in \(language.rawValue)")
+        check(FolderSessionNotice.scanFinished(items: 3, groups: 1).message(t) == t.folderScanFinished(items: 3, groups: 1)
+              && FolderSessionNotice.scanCancelled.message(t) == t.folderScanCancelled()
+              && FolderSessionNotice.removed(2).message(t) == t.folderRemoved(2)
+              && FolderSessionNotice.nothingRemoved.message(t) == t.folderNothingRemoved()
+              && FolderSessionNotice.putBackDone.message(t) == t.folderPutBackDone(),
+              "folder notice outcomes preserve scan, removal and Put Back messages in \(language.rawValue)")
+        let putBack: [(FolderPutBackProblem, String)] = [
+            (.unavailable(.trashMissing), t.folderHistoryUnavailable(.trashMissing)),
+            (.conflict([url]), t.folderPutBackConflict([url])), (.parentMissing([url]), t.folderPutBackParentMissing([url])),
+            (.failed("detail"), t.folderPutBackFailed("detail")),
+            (.rollbackFailed([url], "detail"), t.folderPutBackPartial([url], detail: "detail")),
+            (.persistenceFailed(FolderSessionTestError.refused), t.folderPutBackPersistenceFailed(FolderSessionTestError.refused.localizedDescription)),
+        ]
+        check(putBack.allSatisfy { FolderOperationReport.putBack($0.0).message(t) == $0.1 },
+              "folder Put Back outcomes preserve every existing message in \(language.rawValue)")
+        check(FolderReconciliationOutcome.recovered(count: 2, unavailable: 1).message(t) == t.folderRecovered(2, unavailable: 1)
+              && FolderReconciliationOutcome.failed(FolderSessionTestError.refused).message(t)
+                == t.folderReconcileFailed(FolderSessionTestError.refused.localizedDescription),
+              "folder reconciliation outcomes preserve existing messages in \(language.rawValue)")
+    }
+}
+
+checkFolderSessionMessages()
+
+await checkFolderLibrarySession()
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

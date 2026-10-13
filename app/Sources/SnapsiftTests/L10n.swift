@@ -1,0 +1,1 @@
+../SnapsiftApp/L10n.swift

@@ -31,9 +31,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Swift version
         run: swift --version
-      - name: Build SnapsiftCore
+      - name: Build macOS app and libraries
         run: swift build
         working-directory: app
       - name: Run Core tests
         run: swift run SnapsiftTests
         working-directory: app
+      - name: Build shared libraries for iOS
+        run: ./scripts/build-ios-libraries.sh

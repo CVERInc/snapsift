@@ -1,84 +1,11 @@
 import Foundation
-import Photos
+import CoreGraphics
 import Vision
 import SnapsiftCore
 
-/// On-device detection of the slice-1 protection / ranking flags for a Photo.
-///
-/// EVERYTHING here runs on-device with NO network access — consistent with the
-/// scan path (`LookAlikeScanner` sets `isNetworkAccessAllowed = false`). False
-/// positives only over-protect or reorder a keeper, which is the safe direction;
-/// the #1 rule is to never mark a frame a human likely wants to keep.
-///
-/// Split by cost:
-///   • `edited` and `originalCamera` are derived from cheap PhotoKit metadata
-///     synchronously while building the Photo (no pixels needed).
-///   • `isDocument` and `sharpness` need pixel access, so they run only over the
-///     members of real clusters in a bounded-concurrency pass AFTER clustering —
-///     never the whole library — and only matter for photos that could be
-///     deleted or chosen as keeper anyway.
-enum PhotoFlags {
-
-    // MARK: - `edited` via PhotoKit — FALLBACK ONLY (sidecar unavailable)
-
-    /// True when the user applied adjustments to this asset — PhotoKit path.
-    ///
-    /// We rely on the reliable PUBLIC PhotoKit signals, NOT `modificationDate !=
-    /// creationDate` — iCloud sync, metadata writes (favoriting, captioning),
-    /// face/scene reprocessing and library migrations all bump modificationDate
-    /// without any user edit, so that heuristic would wrongly flag (here: over-
-    /// protect — harmless) AND, worse, would be noise we can't trust. Instead:
-    ///   1. `PHAssetResource.assetResources(for:)` contains a resource of type
-    ///      `.adjustmentData` once an edit has been committed (any editor —
-    ///      Photos' own crop/filter or a third-party extension writes it). This
-    ///      is the canonical "this asset carries edit data" signal.
-    ///   2. `PHAsset.adjustmentFormatIdentifier` (macOS 12+) is non-nil for an
-    ///      edited asset — a cheap corroborating signal, OR-ed in.
-    ///
-    /// ⚠️ Both signals are SYNCHRONOUS XPC round-trips into photolibraryd with
-    /// no timeout of their own. If the daemon restarts mid-call the reply never
-    /// arrives and the calling thread wedges FOREVER — and because the fetch
-    /// funnels through the one shared library CoreData queue, every later
-    /// PhotoKit metadata call convoys behind it (live incident 2026-07-03: a
-    /// scan hung >24 h with all 8 enrich workers — the entire Swift-concurrency
-    /// cooperative pool — blocked behind one wedged call). NEVER call this from
-    /// a concurrency task; go through `editedFallback`. The primary source for
-    /// `edited` is the sidecar's `ZASSET.ZADJUSTMENTSSTATE` (semantically
-    /// identical, zero XPC — see `QualitySidecar`).
-    private static func editedViaPhotoKit(_ asset: PHAsset) -> Bool {
-        if asset.adjustmentFormatIdentifier != nil { return true }
-        let resources = PHAssetResource.assetResources(for: asset)
-        return resources.contains { $0.type == .adjustmentData }
-    }
-
-    /// Wedge-proof wrapper around `editedViaPhotoKit`, for when the sidecar is
-    /// unreadable (no Full Disk Access) — see `PhotoKitSyncLane` for the
-    /// machinery. nil = could not determine (timed out, or the lane's breaker
-    /// already tripped): callers keep their stored value (protection simply
-    /// isn't upgraded — the safe direction for a best-effort signal).
-    static func editedFallback(_ asset: PHAsset) async -> Bool? {
-        await PhotoKitSyncLane.call { editedViaPhotoKit(asset) }
-    }
-
-    // MARK: - cheap, metadata-only (no pixels)
-
-    /// True when the frame still carries original camera-capture metadata (EXIF
-    /// Make/Model) rather than an EXIF-stripped social re-save.
-    ///
-    /// TODO(slice-1): reliable EXIF Make/Model is not cheaply available in the
-    /// current Photo-building path. Reading it means
-    /// `requestImageDataAndOrientation` (full image data → CGImageSource EXIF),
-    /// which with `isNetworkAccessAllowed = false` returns nil for iCloud-evicted
-    /// originals and is expensive per asset. Rather than ship a half-working
-    /// heuristic that could mis-rank keepers, we leave this defaulting to `false`
-    /// for now. Because it is purely a RANKING tiebreaker (never a delete
-    /// trigger), a uniform `false` is safe: it just falls through to the existing
-    /// format/size/earliest signals, exactly as before this slice. A pending
-    /// Swift test (`original-camera ranking, pending real EXIF`) documents the
-    /// intended behaviour for when this is wired.
-    static func originalCamera(_ asset: PHAsset) -> Bool {
-        false   // see TODO above — pending reliable on-device EXIF Make/Model
-    }
+/// Provider-backed document protection and sharpness ranking. Document fetches
+/// use a local thumbnail first and escalate suspicious frames to high quality.
+public enum PhotoFlags {
 
     // MARK: - pixel-based, cluster-members only
 
@@ -105,10 +32,10 @@ enum PhotoFlags {
     ///     strict that difficult scan angles fail.
     ///   • Fast language correction is off (`usesLanguageCorrection = false`) to
     ///     avoid hallucinated words inflating the count.
-    ///   • Network is disabled (`isNetworkAccessAllowed = false` on all requests) —
-    ///     100 % on-device, consistent with the rest of the scan pipeline.
+    ///   • Vision runs on-device; the local profile never downloads images.
+    ///     Only high-quality escalation permits a network fetch.
     ///
-    /// FIX #4 — iCloud-eviction: when `cgImage()` returns nil (image not on-device
+    /// FIX #4 — iCloud-eviction: when the provider returns nil (image not on-device
     /// / 2 s timeout) we cannot determine whether this frame is a document. Rather
     /// than silently returning `false` (which could let a real document slip into
     /// the auto-reject set), the primary entry point `isDocumentResult` returns
@@ -119,9 +46,9 @@ enum PhotoFlags {
     /// `localCG`: the 512px local thumbnail, if the caller already fetched it
     /// (enrichFlags shares one fetch with the sharpness pass — see `localThumb`).
     /// nil → fetch here, exactly as before.
-    static func isDocumentResult(_ asset: PHAsset,
-                                 manager: PHCachingImageManager,
-                                 localCG: CGImage? = nil) async -> (isDocument: Bool, degraded: Bool) {
+    public static func isDocumentResult(_ itemIdentifier: String,
+                                        provider: any ImageProvider,
+                                        localCG: CGImage? = nil) async -> (isDocument: Bool, degraded: Bool) {
         // TWO-TIER fetch. Document detection dies on tiny thumbnails (measured
         // on a real handwritten-form scan: 256px → seg 0.46 and zero text —
         // no threshold survives that; 512px → seg 0.90 + text). But fetching
@@ -134,7 +61,8 @@ enum PhotoFlags {
         //           512px high quality (network allowed, timeout-guarded) and
         //           run the full two-path predicate on trustworthy pixels.
         let resolved: CGImage?
-        if let localCG { resolved = localCG } else { resolved = await cgImage(asset, manager) }
+        if let localCG { resolved = localCG }
+        else { resolved = await provider.image(for: itemIdentifier, profile: .documentLocal) }
         guard let localCG = resolved else {
             // Not even a local thumbnail → we genuinely do not know.
             return (false, true)
@@ -157,10 +85,7 @@ enum PhotoFlags {
         // iCloud (several MB) — the default 10s bound produced false "degraded"
         // results on real suspicious frames. Few frames reach this tier, so the
         // longer bound doesn't threaten overall scan time.
-        guard let cg = await VisionGuards.cgImage(asset, manager,
-                                                  target: CGSize(width: 512, height: 512),
-                                                  mode: .aspectFit, resize: .fast,
-                                                  timeoutNs: 30_000_000_000) else {
+        guard let cg = await provider.image(for: itemIdentifier, profile: .documentHighQuality) else {
             // Escalation needed but image unavailable / timed out → unknown.
             return (false, true)
         }
@@ -184,6 +109,7 @@ enum PhotoFlags {
 
                 // Pass 1: document segmentation.
                 let docRequest = VNDetectDocumentSegmentationRequest()
+                VisionGuards.useSupportedComputeDevices([docRequest])
                 do {
                     try handler.perform([docRequest])
                 } catch {
@@ -198,6 +124,7 @@ enum PhotoFlags {
                 let textRequest = VNRecognizeTextRequest()
                 textRequest.recognitionLevel = .fast   // fast: lower latency, still good for counting
                 textRequest.usesLanguageCorrection = false   // no hallucinated words
+                VisionGuards.useSupportedComputeDevices([textRequest])
                 do {
                     try handler.perform([textRequest])
                 } catch {
@@ -246,11 +173,8 @@ enum PhotoFlags {
     /// (measured seg=0.0 on a handwritten-form scan), so the suggestion path
     /// must judge on trustworthy pixels no matter what the browse-time badge
     /// said. Runs on a handful of frames (exact groups only) — cost is noise.
-    static func isDocumentHiQ(_ asset: PHAsset, manager: PHCachingImageManager) async -> Bool? {
-        guard let cg = await VisionGuards.cgImage(asset, manager,
-                                                  target: CGSize(width: 512, height: 512),
-                                                  mode: .aspectFit, resize: .fast,
-                                                  timeoutNs: 30_000_000_000) else {
+    public static func isDocumentHiQ(_ itemIdentifier: String, provider: any ImageProvider) async -> Bool? {
+        guard let cg = await provider.image(for: itemIdentifier, profile: .documentHighQuality) else {
             return nil   // couldn't verify — caller must stay protective
         }
         return await documentVerdict(cg)
@@ -262,6 +186,7 @@ enum PhotoFlags {
             visionQueue.async {
                 let handler = VNImageRequestHandler(cgImage: cg, options: [:])
                 let req = VNDetectDocumentSegmentationRequest()
+                VisionGuards.useSupportedComputeDevices([req])
                 do { try handler.perform([req]) } catch { cont.resume(returning: 0); return }
                 cont.resume(returning: req.results?.first?.confidence ?? 0)
             }
@@ -269,8 +194,8 @@ enum PhotoFlags {
     }
 
     /// Convenience bool-only wrapper (for callers that do not need the degraded flag).
-    static func isDocument(_ asset: PHAsset, manager: PHCachingImageManager) async -> Bool {
-        await isDocumentResult(asset, manager: manager).isDocument
+    public static func isDocument(_ itemIdentifier: String, provider: any ImageProvider) async -> Bool {
+        await isDocumentResult(itemIdentifier, provider: provider).isDocument
     }
 
     /// On-device sharpness estimate (higher = sharper) via Laplacian variance over
@@ -280,15 +205,15 @@ enum PhotoFlags {
     /// cluster matters. Normalised to roughly 0…~1 by the `/ 1000` scale so it
     /// quantises into the same tenths buckets as quality in `rankKey`. Unreadable
     /// image → 0 (just doesn't win the sharpness tiebreak).
-    static func sharpness(_ asset: PHAsset, manager: PHCachingImageManager) async -> Double {
-        guard let gray = await grayBuffer(asset, manager, side: 64) else { return 0 }
-        return laplacianVariance(gray.pixels, width: gray.width, height: gray.height)
+    public static func sharpness(_ itemIdentifier: String, provider: any ImageProvider) async -> Double {
+        guard let cg = await provider.image(for: itemIdentifier, profile: .documentLocal) else { return 0 }
+        return sharpness(from: cg)
     }
 
     /// Sharpness from an already-fetched thumbnail — lets a caller pay a single
     /// thumbnail fetch and feed it to both the document check and this pass
     /// (enrichFlags), instead of two identical 512px requests per member.
-    static func sharpness(from cg: CGImage) -> Double {
+    public static func sharpness(from cg: CGImage) -> Double {
         guard let gray = grayBuffer(from: cg, side: 64) else { return 0 }
         return laplacianVariance(gray.pixels, width: gray.width, height: gray.height)
     }
@@ -296,8 +221,8 @@ enum PhotoFlags {
     /// The 512px local-only thumbnail both `isDocumentResult`'s tier-1 screen and
     /// `sharpness` consume. Exposed so a caller can fetch once and thread it into
     /// both, halving thumbnail I/O per cluster member.
-    static func localThumb(_ asset: PHAsset, _ manager: PHCachingImageManager) async -> CGImage? {
-        await cgImage(asset, manager)
+    public static func localThumb(_ itemIdentifier: String, provider: any ImageProvider) async -> CGImage? {
+        await provider.image(for: itemIdentifier, profile: .documentLocal)
     }
 
     /// Variance of the 4-neighbour Laplacian over a grayscale buffer. High in a
@@ -322,55 +247,13 @@ enum PhotoFlags {
         return variance / 1000.0
     }
 
-    // MARK: - image helpers (on-device, never network)
+    // MARK: - pixel helpers
+
+    // Synchronous Vision stays off the cooperative pool so its awaited image
+    // callbacks and timeouts can run, just as in the feature-print/aux queues.
 
     private static let visionQueue = DispatchQueue(label: "net.cver.snapsift.photoflags",
                                                    qos: .userInitiated, attributes: .concurrent)
-
-    private static let imageTimeoutNs: UInt64 = 2_000_000_000
-
-    /// One-shot continuation guarded by a timeout, mirroring LookAlikeScanner:
-    /// a non-responding PhotoKit request (possible on an iCloud-optimised
-    /// library) can never freeze the pass — after the deadline the frame is
-    /// treated as unreadable.
-    private final class ImageBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var cont: CheckedContinuation<PlatformImage?, Never>?
-        func set(_ c: CheckedContinuation<PlatformImage?, Never>) { lock.lock(); cont = c; lock.unlock() }
-        func finish(_ img: PlatformImage?) {
-            lock.lock(); let c = cont; cont = nil; lock.unlock()
-            c?.resume(returning: img)
-        }
-    }
-
-    /// 512px, NOT smaller: document detection dies on tiny thumbnails.
-    /// Measured on a real handwritten-form scan — at 256px the segmentation
-    /// confidence collapses to 0.46 with ZERO recognisable text (no threshold
-    /// can save that); at 512px the same photo reads 0.90 + text. 512 is still
-    /// cheap because this only ever runs on cluster members.
-    private static func cgImage(_ asset: PHAsset, _ manager: PHCachingImageManager) async -> CGImage? {
-        let opts = PHImageRequestOptions()
-        opts.isNetworkAccessAllowed = false          // on-device only — never pull from iCloud
-        opts.deliveryMode = .opportunistic           // whatever is cached locally now
-        opts.resizeMode = .fast
-        let box = ImageBox()
-        let img: PlatformImage? = await withCheckedContinuation { cont in
-            box.set(cont)
-            manager.requestImage(for: asset, targetSize: CGSize(width: 512, height: 512),
-                                 contentMode: .aspectFit, options: opts) { image, _ in
-                box.finish(image)
-            }
-            Task { try? await Task.sleep(nanoseconds: imageTimeoutNs); box.finish(nil) }
-        }
-        guard let img else { return nil }
-        return img.cgImageForProcessing
-    }
-
-    private static func grayBuffer(_ asset: PHAsset, _ manager: PHCachingImageManager,
-                                   side: Int) async -> (pixels: [Double], width: Int, height: Int)? {
-        guard let cg = await cgImage(asset, manager) else { return nil }
-        return grayBuffer(from: cg, side: side)
-    }
 
     private static func grayBuffer(from cg: CGImage,
                                    side: Int) -> (pixels: [Double], width: Int, height: Int)? {

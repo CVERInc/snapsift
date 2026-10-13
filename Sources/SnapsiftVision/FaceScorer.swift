@@ -1,20 +1,18 @@
 import Foundation
-import Photos
+import CoreGraphics
 import Vision
 
 /// Scores a frame by its faces using Vision, on-device. Within a burst the best
 /// keeper is usually the frame where the most people are present with their eyes
 /// open — exactly what a human would pick. Runs only on cluster members (a few
 /// thousand images at most), never the whole library.
-enum FaceScorer {
+public enum FaceScorer {
 
     /// Higher = a better "everyone looking good" frame. 0 when no faces / no image.
-    static func score(asset: PHAsset, manager: PHCachingImageManager) async -> Double {
+    public static func score(itemIdentifier: String, provider: any ImageProvider) async -> Double {
         // 512px: enough to find small faces. Timeout-guarded + off-pool Vision
         // via VisionGuards, so one stuck iCloud asset can't stall the pass.
-        guard let cg = await VisionGuards.cgImage(asset, manager,
-                                                  target: CGSize(width: 512, height: 512),
-                                                  mode: .aspectFit, resize: .exact)
+        guard let cg = await provider.image(for: itemIdentifier, profile: .faceScoring)
         else { return 0 }
         let request = VNDetectFaceLandmarksRequest()
         guard await VisionGuards.perform([request], on: cg) else { return 0 }

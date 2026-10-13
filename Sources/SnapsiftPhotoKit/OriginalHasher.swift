@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import CryptoKit
+import SnapsiftCore
 
 /// SHA-256 over an asset's original file, streamed via PHAssetResourceManager.
 /// Used as the final, non-perceptual gate of the exact-duplicate pass: a
@@ -9,7 +10,15 @@ import CryptoKit
 /// Never touches the network (`isNetworkAccessAllowed = false`): an
 /// iCloud-evicted original returns nil, and nil means "cannot verify" — the
 /// caller must treat that as NOT exact, never download gigabytes to find out.
-enum OriginalHasher {
+public struct OriginalHasher: OriginalBytesHasher {
+    private let asset: (String) -> PHAsset?
+
+    public init(asset: @escaping (String) -> PHAsset?) { self.asset = asset }
+
+    public func sha256(itemIdentifier: String) async -> String? {
+        guard let asset = asset(itemIdentifier) else { return nil }
+        return await Self.sha256(asset: asset)
+    }
 
     /// Streaming hash box so the escaping data handler can accumulate chunks.
     private final class HashBox: @unchecked Sendable {
@@ -36,7 +45,7 @@ enum OriginalHasher {
     /// original is unavailable locally, the read fails, OR the asset carries
     /// more than its primary still — in which case hashing that one resource
     /// would falsely certify interchangeability the byte gate never proved.
-    static func sha256(asset: PHAsset) async -> String? {
+    public static func sha256(asset: PHAsset) async -> String? {
         // A multi-resource asset is NEVER interchangeable with a single-resource
         // still even when the primary photo bytes match — the very rationale
         // `exactGroupPrecheck` states for RAW+JPEG. We hash only the primary

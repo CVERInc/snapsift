@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Single entry point — the SAME checks .github/workflows/ci.yml runs.
-# Python half runs anywhere with pytest + Pillow; the Swift half needs Xcode (macOS).
+# Python half runs anywhere with pytest + Pillow; Swift needs macOS, and the
+# iOS library check needs Xcode with the iPhoneOS SDK installed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,5 +21,13 @@ fi
 
 echo "→ swift build + tests (needs Xcode)"
 ( cd app && swift build && swift run SnapsiftTests )
+
+if command -v xcodebuild >/dev/null 2>&1 \
+    && xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+    echo "→ iOS library builds (generic device, no signing)"
+    ./scripts/build-ios-libraries.sh
+else
+    echo "→ skipping iOS library builds: Xcode/iPhoneOS SDK unavailable locally"
+fi
 
 echo "✅ ALL GREEN"
