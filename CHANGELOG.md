@@ -45,6 +45,10 @@ reserved for the first signed and notarized build.
 - Shared Core and PhotoKit libraries are now published from the root Swift
   package for macOS 14 and iOS 17. The macOS app and its tools continue to build
   from `app/`, consuming the same libraries locally.
+- The shared PhotoKit library lets an app without a Photos sidecar review
+  similar sets as groups: set photos get the same favorite, edited and document
+  protection checks as group photos, and removal from sets goes through the same
+  guarded deletion, journal and history. The macOS app's similar sets are unchanged.
 - **Deleting from Apple Photos now stops if its recovery journal cannot be
   written.** Previously the deletion went ahead without the journal; now
   nothing is deleted and the usual "nothing was deleted" alert appears, so an

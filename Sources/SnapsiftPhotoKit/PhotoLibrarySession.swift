@@ -6,11 +6,25 @@ import SnapsiftVision
 /// A semantic bucket from the "Similar sets" pass: all photos Vision tagged with
 /// the same content label, across the whole library and across time.
 public struct CategoryBucket: Identifiable {
-    public let id = UUID()
+    public let id: UUID
     public let label: String      // already a display-ready name (apfel or top Vision tag)
     public let photos: [Photo]
+    /// `id` is kept when a removal shrinks the set, so a shell's selection survives.
+    init(id: UUID = UUID(), label: String, photos: [Photo]) {
+        self.id = id; self.label = label; self.photos = photos
+    }
     public var count: Int { photos.count }
     public var display: String { label }
+}
+
+/// Outcome of `PhotoLibrarySession.deleteReviewed(in:)`.
+public struct ReviewGroupCommitResult {
+    /// The given groups after the commit: ids and order kept, commit-time
+    /// protection applied, removed photos and their marks dropped; a group left
+    /// with fewer than two photos is omitted.
+    public let groups: [ReviewGroup]
+    /// Photos actually removed, in commit order.
+    public let deletedIDs: [String]
 }
 
 /// Shared Photos enumeration, scan/review persistence and guarded recoverable deletion.
@@ -74,13 +88,18 @@ public final class PhotoLibrarySession {
         self.fallbackSetName = fallbackSetName
     }
 
-    public private(set) var groups: [ReviewGroup] = [] { willSet { onChange?() } }
+    public internal(set) var groups: [ReviewGroup] = [] { willSet { onChange?() } }
     public private(set) var isScanning = false { willSet { onChange?() } }
     /// True while `deleteReviewed` runs. Scans, face refines, album writes and
     /// snapshot flushes all gate on it: they mutate `groups` (or persist them),
     /// and racing a delete's post-await state rewrite corrupts both sides.
     public private(set) var isDeleting = false { willSet { onChange?() } }
     private let commitOrchestrator = CommitOrchestrator()
+    /// Library-facing effects of scans' edited fallback, commits and withdrawal
+    /// checks. PhotoKit by default; the framework-free tests substitute them.
+    /// Busy gating, journal, audit, History and the edited re-check order stay
+    /// the session's own.
+    var effects = LibraryEffects.photoKit
     public private(set) var progress: PhotoLibraryProgress = .idle { willSet { onChange?() } }
     public var includeVideo = false { willSet { onChange?() } }
     /// True once Apple's quality scores have been read from the library sidecar.
@@ -200,7 +219,7 @@ public final class PhotoLibrarySession {
     public private(set) var facesApplied = false { willSet { onChange?() } }
     /// Semantic category buckets from the "Similar sets" pass. When non-empty the
     /// UI is in browse mode (categories), not cluster-review mode.
-    public private(set) var categories: [CategoryBucket] = [] { willSet { onChange?() } }
+    public internal(set) var categories: [CategoryBucket] = [] { willSet { onChange?() } }
     public var browseMode: Bool { !categories.isEmpty }
     /// ReviewGroup IDs that passed the exact-duplicate predicate (dHash distance 0
     /// + feature-print ≈0 + same dimensions). Populated by `detectExactDuplicates`
@@ -347,7 +366,7 @@ public final class PhotoLibrarySession {
     var maxSpan = 30.0
 
     public let imageManager: PHCachingImageManager
-    private lazy var photoKitImages = makeImageProvider(assetsByID: [:])
+    lazy var photoKitImages = makeImageProvider(assetsByID: [:])
     private var imageProvider: any ImageProvider { photoKitImages }
 
     func makeImageProvider(assetsByID: [String: PHAsset]) -> PhotoKitImageProvider {
@@ -817,6 +836,7 @@ public final class PhotoLibrarySession {
         // be trusted for protection — no Full Disk Access, OR a database we
         // could not prove is the library PhotoKit serves.
         let needEditedFallback = !sidecarTrusted
+        let editedFallback = effects.editedFallback
         await withTaskGroup(of: (String, Bool, Bool, Double, Bool?).self) { group in
             var next = 0
             let limit = 8
@@ -832,7 +852,7 @@ public final class PhotoLibrarySession {
                         async let docResult = PhotoFlags.isDocumentResult(id, provider: provider, localCG: localCG)
                         let edited: Bool?
                         if needEditedFallback, let asset = photos.asset(for: id) {
-                            edited = await PhotoKitFlags.editedFallback(asset)
+                            edited = await editedFallback(asset)
                         } else { edited = nil }
                         let shp = localCG.map(PhotoFlags.sharpness(from:)) ?? 0
                         let (isDoc, degraded) = await docResult
@@ -963,7 +983,8 @@ public final class PhotoLibrarySession {
     /// near-same shots (like three poses of the same cat) — by clustering the
     /// chosen source on visual similarity (looser than Look-alikes), then naming
     /// each set from its Vision content tags (prettified by apfel if available).
-    /// No deletion — this is for browsing/curation.
+    /// The macOS app browses sets; a session without an enrichment port flags
+    /// their members so a shell can review them (`deleteReviewed(in:)`).
     private func scanSimilarSets() async {
         progress = .fetching
         defer { isScanning = false; progress = .idle; progressFraction = nil }
@@ -1042,8 +1063,12 @@ public final class PhotoLibrarySession {
         if enrichmentPort == nil {
             let resourcePhotos = await prepareAssetMetadata(pending.map(\.photos))
             if bailIfCancelled() { return }
-            pending = resourcePhotos.map { PendingSet(photos: $0, rep: $0.first.map(\.uuid)) }
+            let flagged = await flagSetMembers(resourcePhotos)
+            if bailIfCancelled() { return }
+            pending = flagged.map { PendingSet(photos: $0, rep: $0.first.map(\.uuid)) }
         }
+        // Naming follows the member flag pass when one ran.
+        let namingBase = enrichmentPort == nil ? 0.75 : 0.65
         var names = [String?](repeating: nil, count: pending.count)
         let total = pending.count
         let provider = imageProvider
@@ -1068,7 +1093,7 @@ public final class PhotoLibrarySession {
                 done += 1
                 if done % 5 == 0 {
                     progress = .naming(done, total)
-                    progressFraction = 0.65 + 0.35 * Double(done) / Double(max(total, 1))
+                    progressFraction = namingBase + (1 - namingBase) * Double(done) / Double(max(total, 1))
                 }
                 add()
             }
@@ -1086,6 +1111,24 @@ public final class PhotoLibrarySession {
         // Unguarded variant: this pipeline's own defer hasn't cleared
         // `isScanning` yet, and `groups` is complete here by construction.
         saveSnapshotIgnoringScanState()
+    }
+
+    /// Set members get the same per-member flag pass as group members (edited
+    /// fallback when the sidecar is untrusted, document check with degraded
+    /// marking, sharpness), so a set photo's protection is determined like any
+    /// group photo's instead of staying unverifiable.
+    ///
+    /// Only for a session without an enrichment port: that configuration (the
+    /// iOS app) reviews and removes from sets, and it is the same predicate that
+    /// already reads set members' resource metadata above. The macOS app always
+    /// supplies its port, browses sets without removing from them, and keeps its
+    /// set scan's cost and results unchanged.
+    func flagSetMembers(_ sets: [[Photo]]) async -> [[Photo]] {
+        guard enrichmentPort == nil else { return sets }
+        return await enrichFlags(sets) { done, total in
+            self.progress = .verifying(done, total)
+            if total > 0 { self.progressFraction = 0.65 + 0.1 * Double(done) / Double(total) }
+        }
     }
 
     /// Name a set from the Vision tags of its representative frame, prettified by
@@ -1506,26 +1549,33 @@ public final class PhotoLibrarySession {
     /// enforces the same rule again at the last moment, because the sheet can
     /// sit open for a long time.
     public func withdrawnGroupIDs() async -> [ReviewGroup.ID: GroupWithdrawal] {
+        await withdrawnGroupIDs { self.groups }
+    }
+
+    /// The same check over review groups the shell holds itself (for example
+    /// similar sets reviewed as groups), for `deleteReviewed(in:)`.
+    public func withdrawnGroupIDs(for reviewGroups: [ReviewGroup]) async -> [ReviewGroup.ID: GroupWithdrawal] {
+        await withdrawnGroupIDs { reviewGroups }
+    }
+
+    /// `current` is read before and after the live fetch, as the session's
+    /// own groups may change while it runs.
+    private func withdrawnGroupIDs(
+        _ current: () -> [ReviewGroup]
+    ) async -> [ReviewGroup.ID: GroupWithdrawal] {
         // EVERY survivor, not just the nominated keeper: the gate asks whether
         // ANYTHING this group promises to leave behind still exists, and an id
         // that was never fetched is indistinguishable from one that is gone.
         var survivorsByGroup: [ReviewGroup.ID: [Photo]] = [:]
-        for g in groups where !g.deletionIDs.isEmpty {
+        for g in current() where !g.deletionIDs.isEmpty {
             survivorsByGroup[g.id] = survivors(photos: g.photos, rejected: g.rejected,
                                                includeProtected: g.includeProtected)
         }
         let ids = Array(Set(survivorsByGroup.values.flatMap { $0.map(\.uuid) }))
         guard !ids.isEmpty else { return [:] }
-        let opts = PHFetchOptions()
-        opts.includeAllBurstAssets = true
-        let found: Set<String> = await Task.detached(priority: .userInitiated) {
-            var live: Set<String> = []
-            PHAsset.fetchAssets(withLocalIdentifiers: ids, options: opts)
-                .enumerateObjects { a, _, _ in live.insert(a.localIdentifier) }
-            return live
-        }.value
+        let found = await effects.liveIDs(ids)
         var out: [ReviewGroup.ID: GroupWithdrawal] = [:]
-        for g in groups where survivorsByGroup[g.id] != nil {
+        for g in current() where survivorsByGroup[g.id] != nil {
             if let reason = groupWithdrawalReason(photos: g.photos, keeperID: g.keeperID,
                                                   rejected: g.rejected,
                                                   includeProtected: g.includeProtected,
@@ -1721,7 +1771,7 @@ public final class PhotoLibrarySession {
         if let flags = await enrichmentPort?.editedFlags(for: targets) { return flags }
         var out: [String: Bool] = [:]
         for target in targets {
-            if let flag = await PhotoKitFlags.editedFallback(target.asset) { out[target.uuid] = flag }
+            if let flag = await effects.editedFallback(target.asset) { out[target.uuid] = flag }
         }
         return out
     }
@@ -1965,32 +2015,122 @@ public final class PhotoLibrarySession {
         onKeeperMissing: ((Int) -> Void)? = nil,
         onNoSurvivorLeft: ((Int) -> Void)? = nil
     ) async throws -> Int {
+        try await commitThroughSession(groups, callbacks: CommitCallbacks(
+            staleWarning: staleWarning,
+            onProtectedDropped: onProtectedDropped,
+            onBurstSkipped: onBurstSkipped,
+            onUndeterminedSkipped: onUndeterminedSkipped,
+            onKeeperMissing: onKeeperMissing,
+            onNoSurvivorLeft: onNoSurvivorLeft,
+            onGroupsChanged: { self.groups = $0 }))
+    }
+
+    /// Remove the photos marked in review groups the shell holds itself — for
+    /// example similar sets reviewed as groups, where every photo starts kept
+    /// and `keeperID` only nominates a survivor — through the same commit path
+    /// as `deleteReviewed`: busy gating, live re-checks (including this
+    /// session's edited re-check), journal, audit, History, the same outcome
+    /// callbacks, change-token handling and snapshot save.
+    ///
+    /// `onGroupsChanged` receives the given groups when the commit-time sweep
+    /// unmarks newly protected or undetermined photos, before the outcome
+    /// callbacks, even if removal then fails. The session also records those
+    /// flags on its similar sets. After a removal, removed photos leave the
+    /// session's groups and similar sets (a set left with fewer than two photos
+    /// leaves), and the snapshot is saved, so a restore never brings them back.
+    @discardableResult
+    public func deleteReviewed(
+        in reviewGroups: [ReviewGroup],
+        staleWarning: ((Int, Int) async -> Bool)? = nil,
+        onProtectedDropped: ((Int) -> Void)? = nil,
+        onBurstSkipped: ((Int) -> Void)? = nil,
+        onUndeterminedSkipped: ((Int) -> Void)? = nil,
+        onKeeperMissing: ((Int) -> Void)? = nil,
+        onNoSurvivorLeft: ((Int) -> Void)? = nil,
+        onGroupsChanged: (([ReviewGroup]) -> Void)? = nil
+    ) async throws -> ReviewGroupCommitResult {
+        var latest = reviewGroups
+        var deletedIDs: [String] = []
+        _ = try await commitThroughSession(reviewGroups, callbacks: CommitCallbacks(
+            staleWarning: staleWarning,
+            onProtectedDropped: onProtectedDropped,
+            onBurstSkipped: onBurstSkipped,
+            onUndeterminedSkipped: onUndeterminedSkipped,
+            onKeeperMissing: onKeeperMissing,
+            onNoSurvivorLeft: onNoSurvivorLeft,
+            onGroupsChanged: { swept in
+                latest = swept
+                self.recordSweptFlagsInCategories(swept)
+                onGroupsChanged?(swept)
+            }), onDeleted: { deletedIDs = $0 })
+        let removed = Set(deletedIDs)
+        let groups = removed.isEmpty ? latest
+            : latest.compactMap { Self.carriedForward($0, removed: removed) }
+        return ReviewGroupCommitResult(groups: groups, deletedIDs: deletedIDs)
+    }
+
+    /// The one commit path behind both entries. `callbacks` carries the
+    /// caller's outcome handlers and its `onGroupsChanged`; the session owns
+    /// the rest.
+    private func commitThroughSession(
+        _ reviewGroups: [ReviewGroup], callbacks: CommitCallbacks,
+        onDeleted: (([String]) -> Void)? = nil
+    ) async throws -> Int {
         var tokenWasCurrent = false
-        let ports = PhotoKitCommitPorts.make(storage: storage, editedNow: { targets in
+        let ports = effects.commitPorts(storage, { targets in
             // Optional platform facts, followed by the shared wedge-proof fallback.
             await self.currentEditedFlags(for: targets.map { (uuid: $0.uuid, asset: $0.item) })
         })
+        var callbacks = callbacks
+        callbacks.onCommittingChanged = { self.isDeleting = $0 }
+        callbacks.saveSnapshot = { self.saveSnapshotNow() }
+        callbacks.beforeDelete = {
+            tokenWasCurrent = PhotoLibraryChangeToken.isCurrent(self.scanChangeToken)
+        }
+        callbacks.onCommitted = { result in
+            self.lastDeleteAuditFailed = result.auditFailed
+            onDeleted?(result.deletedIDs)
+            self.finishDeletion(removed: Set(result.deletedIDs), tokenWasCurrent: tokenWasCurrent)
+        }
         return try await commitOrchestrator.commit(
-            groups: groups,
+            groups: reviewGroups,
             isBusy: isScanning || refiningFaces || isDeleting || isWritingAlbums,
             ports: ports,
-            callbacks: CommitCallbacks(
-                staleWarning: staleWarning,
-                onProtectedDropped: onProtectedDropped,
-                onBurstSkipped: onBurstSkipped,
-                onUndeterminedSkipped: onUndeterminedSkipped,
-                onKeeperMissing: onKeeperMissing,
-                onNoSurvivorLeft: onNoSurvivorLeft,
-                onGroupsChanged: { self.groups = $0 },
-                onCommittingChanged: { self.isDeleting = $0 },
-                saveSnapshot: { self.saveSnapshotNow() },
-                beforeDelete: {
-                    tokenWasCurrent = PhotoLibraryChangeToken.isCurrent(self.scanChangeToken)
-                },
-                onCommitted: { result in
-                    self.lastDeleteAuditFailed = result.auditFailed
-                    self.finishDeletion(removed: Set(result.deletedIDs), tokenWasCurrent: tokenWasCurrent)
-                }))
+            callbacks: callbacks)
+    }
+
+    /// A shell-held group after a removal: same id, removed photos and their
+    /// marks dropped, keeper re-picked if it was removed, protected consent
+    /// reset as in `finishDeletion`; nil when fewer than two photos remain.
+    private static func carriedForward(_ g: ReviewGroup, removed: Set<String>) -> ReviewGroup? {
+        guard let r = regroupAfterDeletion(photos: g.photos, keeperID: g.keeperID,
+                                           removed: removed) else { return nil }
+        var ng = g
+        ng.photos = r.photos
+        ng.keeperID = r.keeperID
+        ng.rejected = g.rejected.filter { id in r.photos.contains { $0.uuid == id } }
+        ng.autoSeeded = g.autoSeeded.intersection(ng.rejected)
+        ng.includeProtected = false
+        return ng
+    }
+
+    /// Protection learned by a commit sweep over shell-held groups also holds
+    /// for the same photos in the session's similar sets (and their snapshot).
+    /// Flags are only ever added here, never cleared.
+    private func recordSweptFlagsInCategories(_ swept: [ReviewGroup]) {
+        guard !categories.isEmpty else { return }
+        var byID: [String: Photo] = [:]
+        for g in swept { for p in g.photos { byID[p.uuid] = p } }
+        func merged(_ p: Photo) -> Photo {
+            guard let s = byID[p.uuid] else { return p }
+            return p.with(favorite: p.favorite || s.favorite, edited: p.edited || s.edited,
+                          editedUndetermined: p.editedUndetermined || s.editedUndetermined)
+        }
+        let updated = categories.map { c -> CategoryBucket in
+            let photos = c.photos.map(merged)
+            return photos == c.photos ? c : CategoryBucket(id: c.id, label: c.label, photos: photos)
+        }
+        if updated.map(\.photos) != categories.map(\.photos) { categories = updated }
     }
 
     private func finishDeletion(removed: Set<String>, tokenWasCurrent: Bool) {
@@ -2022,6 +2162,16 @@ public final class PhotoLibrarySession {
             return ng
         }
         exactDupeGroupIDs = survivingExactIDs
+        // Similar sets follow the library too: removed photos leave, and a set
+        // left with fewer than two photos leaves the list (ids are kept).
+        if !categories.isEmpty {
+            categories = categories.compactMap { c -> CategoryBucket? in
+                let remaining = c.photos.filter { !removed.contains($0.uuid) }
+                guard remaining.count >= 2 else { return nil }
+                return remaining.count == c.photos.count ? c
+                    : CategoryBucket(id: c.id, label: c.label, photos: remaining)
+            }
+        }
 
         // FIX #5 — refresh the Photos snapshot after a successful delete.
         //
@@ -2036,15 +2186,10 @@ public final class PhotoLibrarySession {
         // dropped from the group (the group may then resolve to <2 frames and be
         // removed on the next user-facing rescan — we don't compact further here
         // to avoid introducing a second silent mutation).
-        let survivingIDs = Set(groups.flatMap { $0.photos.map(\.uuid) })
+        let survivingIDs = Set(groups.flatMap { $0.photos.map(\.uuid) }
+            + categories.flatMap { $0.photos.map(\.uuid) })
         if !survivingIDs.isEmpty {
-            let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(survivingIDs), options: nil)
-            var freshMap: [String: PHAsset] = [:]
-            freshMap.reserveCapacity(fetched.count)
-            fetched.enumerateObjects { asset, _, _ in
-                freshMap[asset.localIdentifier] = asset
-            }
-            photoKitImages = makeImageProvider(assetsByID: freshMap)
+            photoKitImages = makeImageProvider(assetsByID: effects.fetchAssets(Array(survivingIDs)))
         } else {
             photoKitImages = makeImageProvider(assetsByID: [:])
         }
@@ -2057,5 +2202,46 @@ public final class PhotoLibrarySession {
         // Keep the cross-launch snapshot in lockstep — a relaunch must never
         // resurrect frames that were just deleted.
         saveSnapshotNow()
+    }
+}
+
+/// PhotoKit-backed effects a `PhotoLibrarySession` delegates to. Internal so the
+/// tests can drive the session's commit and flag paths without a Photos library.
+@MainActor
+struct LibraryEffects {
+    typealias EditedNow = @MainActor ([(uuid: String, item: PHAsset)]) async -> [String: Bool]
+    /// Commit ports over the session's storage and edited re-check.
+    var commitPorts: @MainActor (PhotoLibraryStorage, @escaping EditedNow)
+        -> CommitPorts<PHAsset, DeletionSession>
+    /// Identifiers that still resolve in the live library (withdrawal check).
+    var liveIDs: @Sendable ([String]) async -> Set<String>
+    /// Assets for the provider refresh after a commit.
+    var fetchAssets: @MainActor ([String]) -> [String: PHAsset]
+    /// Wedge-proof per-asset edited lookup; nil = could not determine.
+    var editedFallback: @Sendable (PHAsset) async -> Bool?
+
+    static var photoKit: LibraryEffects {
+        LibraryEffects(
+            commitPorts: { storage, editedNow in
+                PhotoKitCommitPorts.make(storage: storage, editedNow: editedNow)
+            },
+            liveIDs: { ids in
+                await Task.detached(priority: .userInitiated) {
+                    let opts = PHFetchOptions()
+                    opts.includeAllBurstAssets = true
+                    var live: Set<String> = []
+                    PHAsset.fetchAssets(withLocalIdentifiers: ids, options: opts)
+                        .enumerateObjects { a, _, _ in live.insert(a.localIdentifier) }
+                    return live
+                }.value
+            },
+            fetchAssets: { ids in
+                let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+                var map: [String: PHAsset] = [:]
+                map.reserveCapacity(fetched.count)
+                fetched.enumerateObjects { asset, _, _ in map[asset.localIdentifier] = asset }
+                return map
+            },
+            editedFallback: { await PhotoKitFlags.editedFallback($0) })
     }
 }
