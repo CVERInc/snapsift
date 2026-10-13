@@ -107,18 +107,39 @@ public func contrastRatio(_ fg: RGB, alpha: Double = 1, over bg: RGB) -> Double 
 }
 
 public enum PaneDim {
-    /// Opacity of an UNSELECTED sidebar row while the content pane is active.
-    /// Was 0.35, which put the caption at 1.89:1. 0.85 keeps the caption (the
-    /// dimmer of the two texts) at ≥ 4.5:1 on the sidebar colour — the test
-    /// suite recomputes that from the colour tokens. The pane-focus signal no
-    /// longer rests on this number: the selected row turns from filled to
-    /// outlined.
-    public static let unselectedRowOpacity = 0.85
+    /// PROPOSAL — the owner has not ruled on it.
+    ///
+    /// The ratified spec (SPEC-ui-redesign-2026-09-16 §2) says: unselected
+    /// sidebar rows dim to 0.35, and pane focus is shown WITHOUT a colour
+    /// line. 0.35 puts the row caption at 1.89:1, so this build proposes the
+    /// two values below instead and the owner judges them on screen. Until he
+    /// does, the spec stands as written and these are the only two places the
+    /// proposal lives. The test suite pins the FLOOR (dimmed text ≥ 4.5:1 on
+    /// the sidebar colour) and "Increase Contrast ⇒ no dimming" — not these
+    /// numbers.
+    public static let proposal = (unselectedRowOpacity: 0.85, selectedRowOutlineWidth: 2.0)
 
     /// Increase Contrast ⇒ nothing dims, ever. The selected row never dims.
     public static func sidebarRowOpacity(contentActive: Bool, selected: Bool,
                                          increaseContrast: Bool) -> Double {
         guard contentActive, !selected, !increaseContrast else { return 1 }
-        return unselectedRowOpacity
+        return proposal.unselectedRowOpacity
     }
+}
+
+// MARK: - Card controls and the double-click
+
+/// May a card's control buttons take a click right now?
+///
+/// A click FOCUSES a card, and focusing is what makes its buttons appear —
+/// possibly under the pointer or the finger. The second click of a double-
+/// click (meant: "open the preview") would then land on a button that was not
+/// there when she aimed, and "cross out" marks on one click. So buttons that
+/// appeared because of a focus stay inert until the double-click interval has
+/// passed; during it, clicks fall through to the card, which is what the
+/// second click was aimed at. Buttons shown by HOVER on a card that is not
+/// focused were visible before any click, so they are live at once.
+public func cardControlsHittable(isFocused: Bool, focusAge: TimeInterval,
+                                 doubleClickInterval: TimeInterval) -> Bool {
+    !isFocused || focusAge >= doubleClickInterval
 }

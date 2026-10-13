@@ -257,18 +257,10 @@ final class LibraryModel: ObservableObject {
     /// to convert wrongly (review P3-D).
     typealias ScanKind = AlbumScanKind
 
-    /// What the scan behind the CURRENT results looked at. nil = unknown (no
-    /// scan finished in this session — e.g. the results were restored from
-    /// disk), which Core treats as a narrow scan.
-    struct ScanCoverage {
-        let wholeLibrary: Bool
-        let includedVideo: Bool
-        let includedAllBurstAssets: Bool
-    }
-    private var scanCoverage: ScanCoverage?
-    /// Coverage of the scan in flight; becomes `scanCoverage` only when that
-    /// scan completes (a cancelled scan covered nothing we can vouch for).
-    private var pendingScanCoverage: ScanCoverage?
+    /// What snapsift itself has filed into its albums, and which albums they
+    /// are (Core `AlbumLedger`). Persisted in the scan snapshot; survives a
+    /// rescan (a new scan replaces the groups, not the record of past sorts).
+    private var albumLedger = AlbumLedger()
     /// The current results came from a snapshot whose library has changed
     /// since: exact verdicts were dropped, not overturned. Drives the album
     /// banner's wording (Core `albumMoveReason`). Cleared by the next scan.
@@ -318,8 +310,6 @@ final class LibraryModel: ObservableObject {
         // no longer applies.
         staleRestoreClearedCount = nil
         resultsRestoredStale = false
-        scanCoverage = nil
-        pendingScanCoverage = nil
         lastScanKind = kind
         abortFlag = AbortFlag()
         scanTask = Task { [weak self] in
@@ -617,9 +607,6 @@ final class LibraryModel: ObservableObject {
             scanNotice = t.progAlbumGone()
             return
         }
-        pendingScanCoverage = ScanCoverage(wholeLibrary: scanSource.isWholeLibrary,
-                                           includedVideo: includeVideo,
-                                           includedAllBurstAssets: opts.includeAllBurstAssets)
 
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
         groups = []
@@ -745,7 +732,6 @@ final class LibraryModel: ObservableObject {
 
         progressFraction = 1.0
         hasScanned = true
-        scanCoverage = pendingScanCoverage
         // Verdicts were just proven against the CURRENT library — anchor the
         // staleness reference here (see `scanChangeToken`).
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
@@ -1062,9 +1048,6 @@ final class LibraryModel: ObservableObject {
             scanNotice = t.progAlbumGone()
             return
         }
-        pendingScanCoverage = ScanCoverage(wholeLibrary: scanSource.isWholeLibrary,
-                                           includedVideo: includeVideo,
-                                           includedAllBurstAssets: opts.includeAllBurstAssets)
 
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
         groups = []
@@ -1128,7 +1111,6 @@ final class LibraryModel: ObservableObject {
 
         progressFraction = 1.0
         hasScanned = true
-        scanCoverage = pendingScanCoverage
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
         var doneNotice = groups.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(groups.count)
         if pairedVideoUndetermined.count > 0 {
@@ -1163,9 +1145,6 @@ final class LibraryModel: ObservableObject {
             scanNotice = t.progAlbumGone()
             return
         }
-        pendingScanCoverage = ScanCoverage(wholeLibrary: scanSource.isWholeLibrary,
-                                           includedVideo: includeVideo,
-                                           includedAllBurstAssets: opts.includeAllBurstAssets)
 
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
         groups = []
@@ -1257,7 +1236,6 @@ final class LibraryModel: ObservableObject {
 
         progressFraction = 1.0
         hasScanned = true
-        scanCoverage = pendingScanCoverage
         scanChangeToken = ScanSnapshotStore.currentChangeTokenData()
         var catNotice = categories.isEmpty ? t.scanDoneNothing() : t.scanDoneBanner(categories.count)
         if pairedVideoUndetermined.count > 0 {
@@ -1989,7 +1967,8 @@ final class LibraryModel: ObservableObject {
                                    confidentDupe: g.confidentDupe,
                                    exact: exactDupeGroupIDs.contains(g.id))
             },
-            categories: categories.map { ScanSnapshot.Category(label: $0.label, photos: $0.photos) }
+            categories: categories.map { ScanSnapshot.Category(label: $0.label, photos: $0.photos) },
+            albumLedger: albumLedger
         )
     }
 
@@ -2172,7 +2151,7 @@ final class LibraryModel: ObservableObject {
         // actor: a whole-library snapshot is multi-MB JSON and
         // fetchAssets(withLocalIdentifiers:) over tens of thousands of IDs blocks
         // for seconds — on .onAppear that beachballed every launch.
-        enum RestoreLoad { case none, unreadable, ok(ScanSnapshot, [String: PHAsset]) }
+        enum RestoreLoad { case none, unreadable, ledgerOnly(AlbumLedger?), ok(ScanSnapshot, [String: PHAsset]) }
         let loaded: RestoreLoad = await Task.detached(priority: .userInitiated) {
             switch ScanSnapshotStore.loadOutcome() {
             case .none: return .none
@@ -2180,7 +2159,9 @@ final class LibraryModel: ObservableObject {
             case .ok(let snap):
                 let allIDs = Set(snap.groups.flatMap { $0.photos.map(\.uuid) }
                     + snap.categories.flatMap { $0.photos.map(\.uuid) })
-                guard !allIDs.isEmpty else { return .none }
+                // No groups to restore — but the record of what we filed into
+                // albums still matters to the next sort.
+                guard !allIDs.isEmpty else { return .ledgerOnly(snap.albumLedger) }
                 // Must match the scan fetch: without includeAllBurstAssets the burst
                 // sub-frames don't resolve and their groups silently dissolve on
                 // restore (live-observed: 2755 → 2632 groups).
@@ -2200,7 +2181,13 @@ final class LibraryModel: ObservableObject {
             snapshotUnreadableNotice = true
             return false
         }
+        if case .ledgerOnly(let saved) = loaded {
+            if let saved, albumLedger == AlbumLedger() { albumLedger = saved }
+            return false
+        }
         guard case .ok(let snap, let map) = loaded else { return false }
+        // Adopt the saved ledger unless a sort in THIS session already wrote one.
+        if let saved = snap.albumLedger, albumLedger == AlbumLedger() { albumLedger = saved }
         // RE-CHECK the entry guards after the await gap: a scan (or another
         // restore) started meanwhile must win over this now-stale snapshot rather
         // than be clobbered by it.
@@ -2307,9 +2294,8 @@ final class LibraryModel: ObservableObject {
         // Rehydrate the scan kind so a later makeSnapshot round-trips it and the
         // stale-restore bar's Rescan re-runs the same kind of scan.
         if let kind = ScanKind(rawValue: snap.kind) { lastScanKind = kind }
-        // A restored session did not record what its scan covered ⇒ unknown ⇒
-        // the narrow album rule. And a stale one is "no longer confirmed".
-        scanCoverage = nil
+        // A stale session's exact verdicts were dropped, not overturned: the
+        // next sort says "no longer confirmed" (Core `albumMoveReason`).
         resultsRestoredStale = !tokenCurrent
         // Standing notice: a stale token silently stripped every app-seeded
         // suggestion above — surface how many so the user isn't left wondering
@@ -2373,23 +2359,22 @@ final class LibraryModel: ObservableObject {
         defer { isWritingAlbums = false; progress = "" }
 
         let wasCurrent = ScanSnapshotStore.changeTokenIsCurrent(scanChangeToken)
-        let coverage = scanCoverage
+        // The ledger is read to plan and advanced as each album step
+        // completes; a local copy, written back even if the write throws
+        // half-way, so the record matches what was actually done.
+        let filedBefore = albumLedger.allFiledIDs
+        var ledger = albumLedger
+        defer { albumLedger = ledger }
         let result = try await AlbumWriter.write(
             groups: groups,
             exactGroups: exactDupeGroupIDs,
             assetsByID: assetsByID,
             extraNeedsLookAssets: pairedVideoUndeterminedAssets,
             scanKind: lastScanKind,
-            // Review P2-A: a scan of the WHOLE library, whose results are still
-            // current, looked at every asset — so a filed copy that is in no
-            // group any more (its twin was deleted in Photos) leaves "Exact
-            // Duplicates". Core decides; we only supply the ids, fetched the
-            // way that scan fetched them.
-            scanScope: albumScanScope(coveredWholeLibrary: coverage?.wholeLibrary,
-                                      resultsCurrent: wasCurrent),
-            libraryIDs: { Self.libraryAssetIDs(coverage) },
+            ledger: &ledger,
             t: t
         )
+        albumLedger = ledger
         // A membership-only album write mutates no verdict-relevant state, but it
         // DOES advance the library change token. Move the reference forward (and
         // persist) so this recommended review step doesn't silently strand every
@@ -2398,6 +2383,9 @@ final class LibraryModel: ObservableObject {
         // too, so they must count as OUR write for the same reason.
         let ourIDs = Set(groups.flatMap { $0.photos.map(\.uuid) })
             .union(pairedVideoUndeterminedAssets.map(\.localIdentifier))
+            // A filed photo that is in no group any more can be taken out of
+            // an album by this sort too — that membership change is ours.
+            .union(filedBefore)
         restampTokenAfterOwnWrite(wasCurrent: wasCurrent, ourIDs: ourIDs)
         saveSnapshotNow()
         return t.albumsWritten(bursts: result.bursts, blurry: result.blurry,
@@ -2405,22 +2393,6 @@ final class LibraryModel: ObservableObject {
                                needsLook: result.needsLook, moved: result.moved,
                                movedReason: albumMoveReason(moved: result.moved,
                                                             resultsRestoredStale: resultsRestoredStale))
-    }
-
-    /// Every asset id a whole-library scan with this coverage fetched — the
-    /// same options the scan built (images only unless it included video;
-    /// burst members only if it asked for them), so an asset that scan never
-    /// fetched is not claimed as looked-at. Read-only.
-    private nonisolated static func libraryAssetIDs(_ coverage: ScanCoverage?) -> Set<String> {
-        guard let coverage, coverage.wholeLibrary else { return [] }
-        let opts = PHFetchOptions()
-        opts.includeAllBurstAssets = coverage.includedAllBurstAssets
-        if !coverage.includedVideo {
-            opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        }
-        var ids = Set<String>()
-        PHAsset.fetchAssets(with: opts).enumerateObjects { a, _, _ in ids.insert(a.localIdentifier) }
-        return ids
     }
 
     /// Delete every reviewed non-keeper, non-favorite frame via PhotoKit. macOS

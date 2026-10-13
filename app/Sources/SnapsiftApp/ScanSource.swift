@@ -107,13 +107,3 @@ func fetchAssets(source: ScanSource, options: PHFetchOptions) -> PHFetchResult<P
         return PHAsset.fetchAssets(in: collection, options: options)
     }
 }
-
-extension ScanSource {
-    /// Did a scan of this source look at every asset the library holds?
-    var isWholeLibrary: Bool {
-        switch self {
-        case .wholeLibrary: return true
-        case .album:        return false
-        }
-    }
-}

@@ -1172,9 +1172,13 @@ struct ContentView: View {
     // most need to read it. The signal is now the SELECTED row's shape:
     //   sidebar active  ⇒ filled teal (the usual "this is where the keys go")
     //   content active  ⇒ teal OUTLINE, text back in the normal row colours
-    // and unselected rows dim only to Core `PaneDim.unselectedRowOpacity`,
-    // which keeps title and caption ≥ 4.5:1 on the sidebar colour (the test
-    // suite recomputes it from the tokens). Increase Contrast ⇒ no dimming.
+    // and unselected rows dim only to Core `PaneDim.proposal`'s opacity, which
+    // keeps title and caption ≥ 4.5:1 on the sidebar colour. Increase
+    // Contrast ⇒ no dimming.
+    //
+    // A PROPOSAL, not a ruling: the ratified spec says 0.35 and "no colour
+    // line", and the outline is a colour line. The owner judges it on screen;
+    // both numbers live in `PaneDim.proposal` and nowhere else.
 
     private func selectedRowIsFilled(_ sel: Bool) -> Bool { sel && !contentActive }
     private func rowTitleColor(_ sel: Bool) -> Color {
@@ -1193,7 +1197,7 @@ struct ContentView: View {
             shape.fill(selectedRowIsFilled(sel) ? Color.reefTeal
                        : hovering ? Color.reefMint.opacity(0.08) : Color.clear)
             if sel && contentActive {
-                shape.strokeBorder(Color.reefTeal, lineWidth: 2)
+                shape.strokeBorder(Color.reefTeal, lineWidth: PaneDim.proposal.selectedRowOutlineWidth)
             }
         }
         .padding(.vertical, 1)
@@ -2022,6 +2026,20 @@ struct GroupReview: View {
     // FIX C: confirmation alert state for including protected frames in deletion.
     @State private var showDeleteProtectedAlert = false
 
+    /// The focused card whose control buttons have been on screen for longer
+    /// than a double-click takes. Until then they are drawn but inert (Core
+    /// `cardControlsHittable`): the click that focused the card is what made
+    /// them appear, and the second click of a double-click must reach the
+    /// card (preview), not a "cross out" button that slid in under it.
+    @State private var armedFrame: String?
+    private static var doubleClickInterval: TimeInterval {
+        #if os(macOS)
+        return NSEvent.doubleClickInterval
+        #else
+        return 0.35   // UIKit's double-tap window; there is no public constant
+        #endif
+    }
+
     /// Horizontal gap between frames in a row (and vertical gap between rows).
     /// Static: the keyboard handler needs the identical spacing to re-pack rows.
     static let gallerySpacing: CGFloat = 8
@@ -2131,6 +2149,14 @@ struct GroupReview: View {
         }
         .background(Color.reefGround)
         .navigationTitle(sectionTitle)
+        // Arm the focused card's controls one double-click interval after the
+        // focus landed there; any focus change restarts the wait.
+        .task(id: focusedFrame) {
+            armedFrame = nil
+            guard let f = focusedFrame else { return }
+            try? await Task.sleep(nanoseconds: UInt64(Self.doubleClickInterval * 1_000_000_000))
+            if !Task.isCancelled { armedFrame = f }
+        }
         // FIX C: confirmation alert before protected frames enter the deletion set.
         // The model is only updated when the user explicitly confirms — Cancel is a
         // full no-op so accidentally tapping "Include protected" is reversible.
@@ -2313,7 +2339,14 @@ struct GroupReview: View {
         // only way in (there is none on iOS).
         .overlay(alignment: .bottomTrailing) {
             if focused || hovering {
+                let live = cardControlsHittable(
+                    isFocused: focused,
+                    focusAge: armedFrame == p.uuid ? Self.doubleClickInterval : 0,
+                    doubleClickInterval: Self.doubleClickInterval)
                 cardControls(showKeep: !keep, rejectVerb: rejectVerb, send: send)
+                    // Inert ⇒ the click passes through to the card beneath.
+                    .allowsHitTesting(live)
+                    .opacity(live ? 1 : 0.55)
             }
         }
         .overlay(alignment: .bottom) {

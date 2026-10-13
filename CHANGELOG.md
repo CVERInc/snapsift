@@ -27,6 +27,25 @@ reserved for the first signed and notarized build.
     the exact-duplicate pass had already marked, and that stays marked, keeps
     its "Same photo" attribution.
 
+### Changed
+- **Snapsift's albums: it only takes out what it put in.** Snapsift now keeps a
+  record of which photos it filed into each of its albums, and of the album
+  itself (not just its name). A sort removes a photo from an album only if that
+  record says Snapsift added it there. An album of your own that happens to
+  share a name with one of Snapsift's, and any photo you dragged into a Snapsift
+  album yourself, are left alone. Renaming a Snapsift album in Photos no longer
+  makes Snapsift create a second one.
+  - If you delete a kept photo in Photos, the copy Snapsift had filed under
+    "Identical" as its duplicate leaves that album on the next sort — it is the
+    only copy now. Nothing is deleted; it only leaves the album.
+  - **Photos filed by earlier versions are not in the record, so they are never
+    taken out automatically.** They stay in the album until you remove them
+    yourself. The same goes for photos that were already in an album when
+    Snapsift first found it.
+- **A click on a photo no longer changes anything.** It moves the focus there.
+  To keep or cross out with the mouse, use the two round buttons that appear on
+  the focused photo, or right-click. Double-click opens the preview.
+
 ### Fixed
 - **Snapsift's albums now follow what the latest scan concluded about the photos
   it looked at.** Sorting used to only add: if you changed which copy to keep and

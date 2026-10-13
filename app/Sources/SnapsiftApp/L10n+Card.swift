@@ -74,9 +74,9 @@ extension L10n {
     }
     func a11yWillDelete(_ why: String) -> String {
         switch language {
-        case .en:   return "Will be moved to Recently Deleted: \(why)"
-        case .ja:   return "「最近削除した項目」に移動します：\(why)"
-        case .zhTW: return "會移到「最近刪除」：\(why)"
+        case .en:   return "Will be moved to Recently Deleted, recoverable for 30 days: \(why)"
+        case .ja:   return "「最近削除した項目」に移動します（30日間は復元できます）：\(why)"
+        case .zhTW: return "會移到「最近刪除」，30 天內可復原：\(why)"
         }
     }
     func a11yProtected(_ reasons: String) -> String {
@@ -173,9 +173,11 @@ extension L10n {
 
     private func annCount(_ del: Int, of total: Int) -> String {
         switch language {
-        case .en:   return "\(del) of \(total) in this set will be removed"
-        case .ja:   return "このグループ\(total)枚のうち\(del)枚が削除対象です"
-        case .zhTW: return "這組 \(total) 張裡有 \(del) 張會被刪"
+        // Glossary: the act is "move to Recently Deleted", never "remove"; and a
+        // sentence that mentions deletion carries where it goes and for how long.
+        case .en:   return "\(del) of \(total) in this group will be moved to Recently Deleted, recoverable for 30 days"
+        case .ja:   return "このグループ\(total)枚のうち\(del)枚が「最近削除した項目」に移動されます（30日間は復元できます）"
+        case .zhTW: return "這組 \(total) 張裡有 \(del) 張會移到「最近刪除」，30 天內可復原"
         }
     }
     func annCrossedOut(_ del: Int, of total: Int) -> String {
@@ -211,12 +213,15 @@ extension L10n {
 
     // MARK: pre-commit sheet
 
-    /// Spoken label of the one destructive button: how many, and where they go.
+    /// Spoken label of the one destructive button. It STARTS with the visible
+    /// title, word for word, so Voice Control ("click Move to Recently
+    /// Deleted") and a sighted helper name the same button; the count and the
+    /// 30 days follow.
     func preCommitConfirmSpoken(_ n: Int) -> String {
         switch language {
-        case .en:   return "Move \(n) photo\(n == 1 ? "" : "s") to Recently Deleted"
-        case .ja:   return "\(n)枚を「最近削除した項目」へ移動"
-        case .zhTW: return "將 \(n) 張照片移到「最近刪除」"
+        case .en:   return "\(preCommitConfirm()), \(n) photo\(n == 1 ? "" : "s"), recoverable for 30 days"
+        case .ja:   return "\(preCommitConfirm())、\(n)枚、30日間は復元できます"
+        case .zhTW: return "\(preCommitConfirm())，\(n) 張，30 天內可復原"
         }
     }
 }

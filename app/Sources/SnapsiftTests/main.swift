@@ -2046,7 +2046,19 @@ do {
     typealias Albums = [AlbumBucket: Set<String>]
     func sort(_ groups: [AlbumSortGroup], kind: AlbumScanKind?, extras: [String] = [],
               _ albums: Albums) -> (albums: Albums, moved: Int) {
+        // These cases are about the WORKING SET, so the ledger here claims
+        // every current member as filed by snapsift in a recorded album — the
+        // most removal the ledger can ever allow. What the ledger itself
+        // withholds is tested in "the filed ledger" below.
+        var ledger = AlbumLedger()
+        for b in AlbumBucket.allCases {
+            var filed: [String: AlbumLedger.Filed] = [:]
+            for id in albums[b] ?? [] { filed[id] = AlbumLedger.Filed() }
+            ledger.albums[b.ledgerKey] = AlbumLedger.Album(collectionID: "col-\(b.ledgerKey)", filed: filed)
+        }
         let steps = albumSortPlan(groups: groups, scanKind: kind, extraNeedsLookIDs: extras,
+                                  ledger: ledger,
+                                  resolution: { .recorded("col-\($0.ledgerKey)") },
                                   currentMembers: { albums[$0] ?? [] })
         var out = albums
         var moved = 0
@@ -2607,74 +2619,219 @@ do {
 }
 
 
-print("checks-b (a): a whole-library scan re-evaluates every asset for Exact Duplicates (P2-A)")
+print("checks-b (a): the filed ledger — only what snapsift filed, only in the album it recorded")
 do {
     typealias Albums = [AlbumBucket: Set<String>]
-    var libraryAsked = 0
-    func sort(_ groups: [AlbumSortGroup], kind: AlbumScanKind?, scope: AlbumScanScope,
-              library: Set<String>, _ albums: Albums) -> (albums: Albums, moved: Int) {
-        let steps = albumSortPlan(groups: groups, scanKind: kind, scanScope: scope,
-                                  libraryIDs: { libraryAsked += 1; return library },
-                                  currentMembers: { albums[$0] ?? [] })
-        var out = albums
-        var moved = 0
-        for step in steps {
-            out[step.bucket] = (out[step.bucket] ?? []).subtracting(step.remove).union(step.add)
-            moved += step.remove.count
+    /// A double for AlbumWriter + PhotoKit, as thin as the writer is: albums
+    /// are id sets keyed by collection id; a sort resolves each album the way
+    /// the writer does, runs the SAME `albumSortPlan`, performs the steps, and
+    /// advances the ledger with the SAME `albumLedger(_:applying:…)`.
+    struct World {
+        var collections: [String: Set<String>] = [:]     // collection id → members
+        var titled: [AlbumBucket: String] = [:]          // what a title lookup finds
+        var library: Set<String> = []                    // asset ids that exist
+        var ledger = AlbumLedger()
+        var created = 0
+        mutating func sort(_ groups: [AlbumSortGroup], kind: AlbumScanKind?) -> Int {
+            var resolved: [AlbumBucket: AlbumResolution] = [:]
+            var album: [AlbumBucket: String] = [:]
+            for b in AlbumBucket.allCases {
+                let r = albumResolution(recordedID: ledger.album(b).collectionID) { collections[$0] != nil }
+                resolved[b] = r
+                if case .recorded(let id) = r { album[b] = id } else if let t = titled[b] { album[b] = t }
+            }
+            let query = albumLivenessQuery(groups: groups, ledger: ledger)
+            let steps = albumSortPlan(groups: groups, scanKind: kind, ledger: ledger,
+                                      resolution: { resolved[$0] ?? .byTitle },
+                                      missingIDs: query.subtracting(library),
+                                      currentMembers: { album[$0].flatMap { collections[$0] } ?? [] })
+            var moved = 0
+            for step in steps {
+                var id = album[step.bucket]
+                let before = id.flatMap { collections[$0] } ?? []
+                if let cid = id { collections[cid] = before.subtracting(step.remove) }
+                moved += before.intersection(step.remove).count
+                if !step.add.isEmpty {
+                    if id == nil { created += 1; id = "new-\(created)"; collections[id!] = [] }
+                    collections[id!]!.formUnion(step.add)
+                }
+                ledger = albumLedger(ledger, applying: step, collectionID: id, currentMembers: before)
+            }
+            return moved
         }
-        return (out, moved)
+        func exact() -> Set<String> { ledger.album(.exact).collectionID.flatMap { collections[$0] } ?? [] }
+        /// What a relaunch does to the ledger: through the snapshot, to JSON, and back.
+        mutating func relaunch() -> Bool {
+            let snap = ScanSnapshot(schema: ScanSnapshot.currentSchema, kind: "burst", sourceID: nil,
+                                    timestamp: Date(timeIntervalSince1970: 0), changeToken: nil,
+                                    groups: [], categories: [], albumLedger: ledger)
+            guard let data = try? JSONEncoder().encode(snap),
+                  let back = try? JSONDecoder().decode(ScanSnapshot.self, from: data),
+                  let saved = back.albumLedger else { return false }
+            let same = saved == ledger
+            ledger = saved
+            return same
+        }
     }
-    func exact(_ a: Albums) -> Set<String> { a[.exact] ?? [] }
+    func grp(_ photos: [Photo], keeper: String, exact: Bool = true) -> AlbumSortGroup {
+        AlbumSortGroup(photos: photos, keeperID: keeper, rejected: [], includeProtected: false, isExact: exact)
+    }
     let pair = [ph(1, 0), ph(2, 1)]
-    let lib: Set<String> = ["U1", "U2", "U7", "U8"]
-    let first = sort([AlbumSortGroup(photos: pair, keeperID: "U1", rejected: [],
-                                     includeProtected: false, isExact: true)],
-                     kind: .burst, scope: .wholeLibrary, library: lib, [:])
-    check(exact(first.albums) == ["U2"], "pair {U1 keeper, U2} sorted ⇒ U2 is filed")
 
-    // U1 is deleted in Photos. U2 is alone now: no group holds it.
-    let after: Set<String> = ["U2", "U7", "U8"]
-    let whole = sort([], kind: .burst, scope: .wholeLibrary, library: after, first.albums)
-    check(exact(whole.albums).isEmpty && whole.moved == 1,
-          "U1 deleted outside; WHOLE-library rescan + sort ⇒ U2 leaves Exact Duplicates")
-    libraryAsked = 0
-    let narrow = sort([], kind: .burst, scope: .narrow, library: after, first.albums)
-    check(exact(narrow.albums) == ["U2"] && narrow.moved == 0,
-          "same, but a NARROW scan ⇒ U2 stays (that scan never looked at it)")
-    check(libraryAsked == 0, "…and a narrow sort never even asks for the library's ids")
+    // 1. A user album that merely has our title, full of her own photos.
+    var w = World()
+    w.collections["hers"] = ["H1", "H2", "U1", "U2"]     // even holds the very photos we scan
+    w.titled[.exact] = "hers"
+    w.library = ["U1", "U2", "H1", "H2"]
+    var moved = w.sort([grp(pair, keeper: "U2")], kind: .burst)
+    check(moved == 0 && w.collections["hers"] == ["H1", "H2", "U1", "U2"],
+          "same-titled user album + sort ⇒ zero removals from it (not even the frames this scan judged)")
+    check(w.ledger.album(.exact).collectionID == "hers" && w.ledger.album(.exact).filed.isEmpty,
+          "…it is adopted for ADDING; U1 was already hers there, so it is NOT recorded as filed by us")
+    moved = w.sort([grp(pair, keeper: "U1")], kind: .burst)
+    check(w.collections["hers"] == ["H1", "H2", "U1", "U2"] && moved == 0
+            && w.ledger.album(.exact).filed.isEmpty,
+          "next sort, keeper flipped: still zero removals — nothing in her album was ever ours")
+    w.collections["hers"]!.remove("U2")
+    w.library = ["U1", "U2", "H1", "H2"]
+    _ = w.sort([grp(pair, keeper: "U1")], kind: .burst)       // now WE add U2
+    moved = w.sort([grp(pair, keeper: "U2")], kind: .burst)
+    check(moved == 1 && w.collections["hers"] == ["H1", "H2", "U1"]
+            && w.ledger.album(.exact).filed.isEmpty,
+          "an id snapsift itself ADDED there is the only one it later takes out (U2); U1, hers, stays and stays unrecorded")
+    // …and an id in the working set that snapsift did not file is never removed.
+    var w1 = World()
+    w1.collections["ours"] = ["U2", "U3"]                // U3: dragged in by hand; in a group, not a candidate
+    w1.ledger.albums["exact"] = AlbumLedger.Album(collectionID: "ours", filed: ["U2": AlbumLedger.Filed(twin: "U1")])
+    w1.library = ["U1", "U2", "U3"]
+    moved = w1.sort([grp([ph(1, 0), ph(2, 1), ph(3, 2, fav: true)], keeper: "U2")], kind: .burst)
+    check(w1.collections["ours"] == ["U1", "U3"] && moved == 1,
+          "in our own album: the filed id leaves, the hand-added one stays though the scan judged it")
 
-    // The widening is Exact Duplicates only, and only for a kind that feeds it.
-    let filed: Albums = [.exact: ["U2"], .bursts: ["U7"], .blurry: ["U8"],
-                         .documents: ["U7"], .needsLook: ["U8"]]
-    let others = sort([], kind: .lookAlikes, scope: .wholeLibrary, library: after, filed)
-    check(others.albums[.bursts] == ["U7"] && others.albums[.blurry] == ["U8"]
-            && others.albums[.documents] == ["U7"] && others.albums[.needsLook] == ["U8"]
-            && exact(others.albums).isEmpty,
-          "whole-library widens ONLY Exact Duplicates; the four review albums keep the narrow rule")
+    // 2. Keeper flip is still fixed (F1), through the ledger.
+    var w2 = World()
+    w2.library = ["U1", "U2"]
+    _ = w2.sort([grp(pair, keeper: "U1")], kind: .burst)
+    check(w2.exact() == ["U2"] && w2.ledger.album(.exact).filed["U2"]?.twin == "U1",
+          "first sort creates the album, files U2, and records it as a duplicate OF U1")
+    moved = w2.sort([grp(pair, keeper: "U2")], kind: .burst)
+    check(w2.exact() == ["U1"] && moved == 1 && w2.ledger.album(.exact).filed["U1"]?.twin == "U2",
+          "keeper flipped, sorted again ⇒ album = {old keeper}, twin re-recorded")
+
+    // 3. {U1 keeper, U2 filed}; U1 deleted in Photos. Any scan kind, restart or not.
+    for restart in [false, true] {
+        for kind in [AlbumScanKind.burst, .lookAlikes, .similarSets, nil] {
+            var x = World()
+            x.library = ["U1", "U2", "U9"]
+            _ = x.sort([grp(pair, keeper: "U1")], kind: .burst)
+            x.library.remove("U1")
+            let roundTrips = restart ? x.relaunch() : true
+            let n = x.sort([], kind: kind)            // U2 is alone: no group holds it
+            check(roundTrips && x.exact().isEmpty && n == 1,
+                  "twin deleted outside, \(kind.map { $0.rawValue } ?? "unknown") scan, restart=\(restart) ⇒ U2 leaves Exact Duplicates")
+            check(x.ledger.album(.exact).filed.isEmpty, "…and the ledger forgets it")
+        }
+    }
+    // The stale in-memory group still naming the deleted keeper files nothing.
+    var w3 = World()
+    w3.library = ["U1", "U2"]
+    _ = w3.sort([grp(pair, keeper: "U1")], kind: .burst)
+    w3.library.remove("U1")
+    moved = w3.sort([grp(pair, keeper: "U1")], kind: .burst)
+    check(w3.exact().isEmpty && moved == 1,
+          "no rescan, group still says U1 keeps: U1 is gone ⇒ U2 is not a candidate and comes out")
+
+    // 4. A scan kind with no exact pass removes nothing while the twins exist.
+    var w4 = World()
+    w4.library = ["U1", "U2"]
+    _ = w4.sort([grp(pair, keeper: "U1")], kind: .burst)
     for kind in [AlbumScanKind.similarSets, nil] {
-        let none = sort([], kind: kind, scope: .wholeLibrary, library: after, first.albums)
-        check(exact(none.albums) == ["U2"] && none.moved == 0,
-              "kind \(kind.map { $0.rawValue } ?? "unknown") has no exact pass ⇒ whole-library removes nothing")
+        moved = w4.sort([], kind: kind)
+        check(moved == 0 && w4.exact() == ["U2"],
+              "\(kind.map { $0.rawValue } ?? "unknown") scan + sort, twin alive ⇒ nothing leaves")
     }
-    // A candidate of THIS sort is never removed by the widening.
-    let again = sort([AlbumSortGroup(photos: pair, keeperID: "U1", rejected: [],
-                                     includeProtected: false, isExact: true)],
-                     kind: .burst, scope: .wholeLibrary, library: lib, first.albums)
-    check(exact(again.albums) == ["U2"] && again.moved == 0,
-          "whole-library, pair intact ⇒ the filed copy stays filed")
-    // An album member that is not in the library set (and in no group) is untouched.
-    let ghost = sort([], kind: .burst, scope: .wholeLibrary, library: after, [.exact: ["U2", "ELSEWHERE"]])
-    check(exact(ghost.albums) == ["ELSEWHERE"], "an id the app did not vouch for is left alone")
+    // 5. Narrow scan: filed ids it did not look at stay.
+    var w5 = World()
+    w5.library = ["U1", "U2", "U5", "U6"]
+    _ = w5.sort([grp(pair, keeper: "U1"), grp([ph(5, 9), ph(6, 10)], keeper: "U5")], kind: .burst)
+    moved = w5.sort([grp(pair, keeper: "U2")], kind: .burst)       // only the first pair rescanned
+    check(w5.exact() == ["U1", "U6"] && moved == 1,
+          "narrow scan: the rescanned pair is corrected; the out-of-scope filed id (U6) stays")
 
-    let scopeTable: [(Bool?, Bool, AlbumScanScope)] = [
-        (true, true, .wholeLibrary), (true, false, .narrow),
-        (false, true, .narrow), (false, false, .narrow),
-        (nil, true, .narrow), (nil, false, .narrow),
-    ]
-    for (covered, current, want) in scopeTable {
-        check(albumScanScope(coveredWholeLibrary: covered, resultsCurrent: current) == want,
-              "covered=\(covered.map { "\($0)" } ?? "unknown") current=\(current) ⇒ \(want)")
-    }
+    // 6. The recorded album is gone (user deleted it): its record is void.
+    var w6 = World()
+    w6.library = ["U1", "U2"]
+    _ = w6.sort([grp(pair, keeper: "U1")], kind: .burst)
+    w6.collections = ["hers": ["U2", "H1"]]
+    w6.titled[.exact] = "hers"
+    moved = w6.sort([grp(pair, keeper: "U2")], kind: .burst)
+    check(moved == 0 && w6.collections["hers"] == ["U1", "U2", "H1"],
+          "recorded album deleted, namesake found by title ⇒ add only; U2 stays even though the old record lists it")
+    check(Set(w6.ledger.album(.exact).filed.keys) == ["U1"] && w6.ledger.album(.exact).collectionID == "hers",
+          "…and the void record is replaced, not carried over")
+
+    // 7. Ids filed before the ledger existed are not in it and never leave.
+    var w7 = World()
+    w7.collections["old"] = ["U1", "E1", "E2"]
+    w7.ledger.albums["exact"] = AlbumLedger.Album(collectionID: "old", filed: [:])
+    w7.library = ["U1", "U2"]
+    moved = w7.sort([grp(pair, keeper: "U1")], kind: .burst)
+    check(moved == 0 && w7.collections["old"] == ["U1", "U2", "E1", "E2"],
+          "pre-ledger members (even this scan's new keeper U1) are never removed; only U2 is filed")
+
+    // Rule tables.
+    check(albumResolution(recordedID: nil, resolves: { _ in true }) == .byTitle
+            && albumResolution(recordedID: "c", resolves: { _ in false }) == .byTitle
+            && albumResolution(recordedID: "c", resolves: { $0 == "c" }) == .recorded("c"),
+          "an album is the recorded one only when a record exists AND still resolves")
+    let led = AlbumLedger(albums: ["exact": AlbumLedger.Album(collectionID: "c", filed: ["A": AlbumLedger.Filed()])])
+    check(ledgerFiledIDs(led, .exact, .recorded("c")) == ["A"]
+            && ledgerFiledIDs(led, .exact, .byTitle).isEmpty
+            && ledgerFiledIDs(led, .exact, .recorded("other")).isEmpty
+            && ledgerFiledIDs(led, .bursts, .recorded("c")).isEmpty,
+          "filed ids count only for the recorded album of that bucket")
+    check(AlbumBucket.allCases.map(\.ledgerKey) == ["bursts", "blurry", "documents", "exact", "needsLook"],
+          "ledger keys are on disk — pinned")
+    check(albumLivenessQuery(groups: [grp(pair, keeper: "U1"), grp([ph(5, 9), ph(6, 10)], keeper: "U5", exact: false)],
+                             ledger: AlbumLedger(albums: ["exact": AlbumLedger.Album(collectionID: "c",
+                                 filed: ["B": AlbumLedger.Filed(twin: "T"), "C": AlbumLedger.Filed()])])) == ["U1", "T"],
+          "liveness is asked about exact keepers and recorded twins only — never the library")
+}
+
+print("checks-b: a v1 snapshot written before the ledger still loads, decisions intact")
+do {
+    // Hand-written, not produced by the encoder: schema 1, no `albumLedger` key.
+    let v1 = """
+    {"schema":1,"kind":"lookAlikes","sourceID":"ALBUM-7","timestamp":716000000,"changeToken":"AQID",
+     "groups":[{"photos":[
+        {"uuid":"A","filename":"IMG_1.heic","takenAt":100,"width":4032,"height":3024,"size":2000000,"uti":"public.heic","favorite":true},
+        {"uuid":"B","filename":"IMG_2.heic","takenAt":101,"width":4032,"height":3024,"size":2000000,"uti":"public.heic"},
+        {"uuid":"C","filename":"IMG_3.heic","takenAt":102,"width":4032,"height":3024,"size":2000000,"uti":"public.heic","edited":true}],
+       "keeperID":"A","rejected":["B","C"],"autoSeeded":["B"],"confidentDupe":true,"exact":true}],
+     "categories":[{"label":"beach","photos":[
+        {"uuid":"D","filename":"IMG_4.heic","takenAt":5,"width":10,"height":10,"size":1,"uti":"public.jpeg"}]}]}
+    """
+    let snap = try? JSONDecoder().decode(ScanSnapshot.self, from: Data(v1.utf8))
+    check(snap != nil, "decodes")
+    check(snap?.schema == ScanSnapshot.currentSchema && ScanSnapshot.currentSchema == 1,
+          "schema is still 1 — the ledger did not bump it, so old files are not discarded")
+    check(snap?.albumLedger == nil, "no ledger in the file ⇒ nil (⇒ nothing is removable on its account)")
+    let g = snap?.groups.first
+    check(g?.keeperID == "A" && g?.rejected == ["B", "C"] && g?.autoSeeded == ["B"]
+            && g?.confidentDupe == true && g?.exact == true && g?.photos.map(\.uuid) == ["A", "B", "C"],
+          "every review decision survives: keeper, both marks, the seeded one, exact, confident")
+    check(g?.photos.first?.favorite == true && g?.photos.last?.edited == true,
+          "…and the protection flags the decisions rest on")
+    check(snap?.kind == "lookAlikes" && snap?.sourceID == "ALBUM-7" && snap?.changeToken == Data([1, 2, 3])
+            && snap?.categories.first?.label == "beach" && snap?.categories.first?.photos.count == 1,
+          "…and kind, source, change token, categories")
+    // A file WITH a ledger round-trips it.
+    let led = AlbumLedger(albums: ["exact": AlbumLedger.Album(collectionID: "c", filed: ["B": AlbumLedger.Filed(twin: "A")])])
+    let with = ScanSnapshot(schema: 1, kind: "burst", sourceID: nil, timestamp: Date(timeIntervalSince1970: 0),
+                            changeToken: nil, groups: snap?.groups ?? [], categories: [], albumLedger: led)
+    let back = (try? JSONEncoder().encode(with)).flatMap { try? JSONDecoder().decode(ScanSnapshot.self, from: $0) }
+    check(back?.albumLedger == led && back?.groups.first?.rejected == ["B", "C"],
+          "a snapshot with a ledger round-trips ledger and decisions")
 }
 
 print("checks-b (b): one scan-kind type, three pinned raw values (P3-D)")
@@ -2762,7 +2919,9 @@ do {
     let reefText = RGB(hex: 0xe6f4f3)       // caption = reefTextDim = this at 0.62
     let reefMint = RGB(hex: 0xaceace)       // row title
     let textDimAlpha = 0.62
-    let dim = PaneDim.unselectedRowOpacity
+    // The value is a PROPOSAL (see `PaneDim.proposal`); what is pinned here is
+    // the floor any value must clear, and the Increase Contrast rule.
+    let dim = PaneDim.sidebarRowOpacity(contentActive: true, selected: false, increaseContrast: false)
     let caption = contrastRatio(reefText, alpha: textDimAlpha * dim, over: reefDeep)
     let title = contrastRatio(reefMint, alpha: dim, over: reefDeep)
     print(String(format: "    caption %.2f:1, title %.2f:1 at row opacity %.2f", caption, title, dim))
@@ -2779,10 +2938,27 @@ do {
         check(PaneDim.sidebarRowOpacity(contentActive: active, selected: sel, increaseContrast: true) == 1,
               "Increase Contrast: no dimming (active=\(active) selected=\(sel))")
     } }
-    check(PaneDim.sidebarRowOpacity(contentActive: true, selected: false, increaseContrast: false) == dim
-            && PaneDim.sidebarRowOpacity(contentActive: true, selected: true, increaseContrast: false) == 1
+    check(PaneDim.sidebarRowOpacity(contentActive: true, selected: true, increaseContrast: false) == 1
             && PaneDim.sidebarRowOpacity(contentActive: false, selected: false, increaseContrast: false) == 1,
-          "only unselected rows dim, only while the content pane is active")
+          "a selected row, and any row while the sidebar is active, never dims")
+}
+
+print("checks-b (d2): a double-click never lands on a button the first click summoned")
+do {
+    let table: [(Bool, Double, Double, Bool)] = [
+        // focused, age since focus, double-click interval ⇒ hittable
+        (true,  0.0,  0.5, false),
+        (true,  0.49, 0.5, false),
+        (true,  0.5,  0.5, true),
+        (true,  2.0,  0.5, true),
+        (false, 0.0,  0.5, true),     // shown by hover: it was visible before the click
+        (true,  0.3,  0.35, false),   // the iOS window
+        (true,  0.35, 0.35, true),
+    ]
+    for (focused, age, interval, want) in table {
+        check(cardControlsHittable(isFocused: focused, focusAge: age, doubleClickInterval: interval) == want,
+              "focused=\(focused) age=\(age) interval=\(interval) ⇒ \(want ? "live" : "inert")")
+    }
 }
 
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")

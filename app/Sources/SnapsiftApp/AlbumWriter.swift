@@ -141,8 +141,9 @@ enum AlbumWriter {
     /// `extraNeedsLookAssets` — assets that never became a `Photo` at all (Live
     ///                 Photo paired-video undetermined) but are just as
     ///                 unclassifiable; folded into the same needs-look album.
-    /// `scanScope` / `libraryIDs` — did that scan cover the whole library, and
-    ///                 if so the ids it looked at (Core `albumWorkingSet`).
+    /// `ledger`      — what snapsift itself filed, and in which album (Core
+    ///                 `AlbumLedger`). Read to decide, updated step by step as
+    ///                 the steps are performed; the caller persists it.
     /// `scanKind`    — the kind of scan that produced `groups`; decides which
     ///                 albums this sort may take anything OUT of (Core
     ///                 `scanKindFeeds`). nil ⇒ add only.
@@ -154,55 +155,83 @@ enum AlbumWriter {
         assetsByID: [String: PHAsset],
         extraNeedsLookAssets: [PHAsset] = [],
         scanKind: AlbumScanKind?,
-        scanScope: AlbumScanScope = .narrow,
-        libraryIDs: () -> Set<String> = { [] },
+        ledger: inout AlbumLedger,
         t: L10n
     ) async throws -> AlbumWriteResult {
         var result = AlbumWriteResult()
 
         // Core `albumSortPlan` IS the sort: which frames belong in each album,
         // and which current members come out. Nothing below decides anything —
-        // it resolves ids to assets and performs the steps, in order.
-        //
-        // Removals are scoped to what THIS scan re-evaluated (review P1-1):
-        // a member the scan never looked at — another scan kind's results, a
-        // photo outside a narrow scan — stays where it is.
+        // it finds the albums, answers Core's questions about the library, and
+        // performs the steps in order.
         let extraIDs = extraNeedsLookAssets.map(\.localIdentifier)
         var extraByID: [String: PHAsset] = [:]
         for a in extraNeedsLookAssets { extraByID[a.localIdentifier] = a }
+        let sortGroups = groups.map {
+            AlbumSortGroup(photos: $0.photos, keeperID: $0.keeperID,
+                           rejected: $0.rejected, includeProtected: $0.includeProtected,
+                           isExact: exactGroups.contains($0.id))
+        }
+
+        // 1. Find each album. The ledger's recorded collection id first; only
+        //    when there is none (or that album is gone) do we look by title —
+        //    and Core then allows this sort to ADD to what we find, never to
+        //    take anything out of it (`AlbumResolution.byTitle`).
+        var albums: [AlbumBucket: PHAssetCollection] = [:]
+        var resolutions: [AlbumBucket: AlbumResolution] = [:]
+        var members: [AlbumBucket: Set<String>] = [:]
+        for bucket in AlbumBucket.allCases {
+            var recorded: PHAssetCollection?
+            resolutions[bucket] = albumResolution(recordedID: ledger.album(bucket).collectionID) { id in
+                recorded = regularAlbum(withID: id)
+                return recorded != nil
+            }
+            let album = recorded ?? albumByTitle(titles(for: bucket), preferring: name(for: bucket, t))
+            albums[bucket] = album
+            members[bucket] = album.map(memberIDs(of:)) ?? []
+        }
+
+        // 2. Which of the ids Core asks about still exist (exact keepers and
+        //    the recorded twins of filed duplicates — never the whole library).
+        let query = albumLivenessQuery(groups: sortGroups, ledger: ledger)
+        let missing = query.subtracting(existingAssetIDs(among: query))
 
         let steps = albumSortPlan(
-            groups: groups.map {
-                AlbumSortGroup(photos: $0.photos, keeperID: $0.keeperID,
-                               rejected: $0.rejected, includeProtected: $0.includeProtected,
-                               isExact: exactGroups.contains($0.id))
-            },
+            groups: sortGroups,
             scanKind: scanKind,
-            // Whole-library scan ⇒ Exact Duplicates is reconciled against every
-            // asset that scan looked at (review P2-A); Core asks for the ids
-            // only then.
-            scanScope: scanScope,
             extraNeedsLookIDs: extraIDs,
-            libraryIDs: libraryIDs,
-            currentMembers: { currentMemberIDs(inAlbumTitles: titles(for: $0)) })
+            ledger: ledger,
+            resolution: { resolutions[$0] ?? .byTitle },
+            missingIDs: missing,
+            currentMembers: { members[$0] ?? [] })
 
-        // One step per album; each performChanges block is atomic per album.
-        // Take out first, then add, so the final membership is the plan's.
+        // 3. One step per album; each performChanges block is atomic per album.
+        //    Take out first, then add, so the final membership is the plan's.
+        //    The ledger advances after each step that completed, so a failure
+        //    half-way leaves a record of exactly what was done.
         for step in steps {
-            result.moved += try await removeAssets(ids: step.remove,
-                                                   fromAlbumTitles: titles(for: step.bucket))
-            let assets = step.add.compactMap { assetsByID[$0] ?? extraByID[$0] }
-            guard !assets.isEmpty else { continue }
-            let added = try await addAssets(assets,
-                                            toAlbumNamed: name(for: step.bucket, t),
-                                            candidateTitles: titles(for: step.bucket))
-            switch step.bucket {
-            case .bursts:    result.bursts = added
-            case .blurry:    result.blurry = added
-            case .documents: result.documents = added
-            case .exact:     result.exactDupes = added
-            case .needsLook: result.needsLook = added
+            let album = albums[step.bucket]
+            let before = members[step.bucket] ?? []
+            if let album, !step.remove.isEmpty {
+                result.moved += try await removeAssets(ids: step.remove, from: album)
             }
+            var collectionID = album?.localIdentifier
+            let assets = step.add.compactMap { assetsByID[$0] ?? extraByID[$0] }
+            if !assets.isEmpty {
+                let outcome = try await addAssets(assets, to: album,
+                                                  creatingNamed: name(for: step.bucket, t),
+                                                  alreadyIn: before)
+                collectionID = outcome.collectionID
+                switch step.bucket {
+                case .bursts:    result.bursts = outcome.added
+                case .blurry:    result.blurry = outcome.added
+                case .documents: result.documents = outcome.added
+                case .exact:     result.exactDupes = outcome.added
+                case .needsLook: result.needsLook = outcome.added
+                }
+            }
+            ledger = albumLedger(ledger, applying: step, collectionID: collectionID,
+                                 currentMembers: before)
         }
         return result
     }
@@ -228,111 +257,37 @@ enum AlbumWriter {
         }
     }
 
-    // MARK: - PhotoKit helpers (idempotent add / bucket reconciliation)
+    // MARK: - PhotoKit helpers (finding albums; read-only)
 
-    /// The ids currently in snapsift's OWN album(s) for one bucket — the
-    /// `currentMembers` that Core `albumMembershipRemovals` reconciles against.
+    /// The regular user-library album with this `localIdentifier`, if it still
+    /// exists. This is how a snapsift album is recognised: by the id recorded
+    /// when snapsift created or adopted it — not by its name, so renaming it
+    /// in Photos does not orphan it and a namesake is not mistaken for it.
+    private static func regularAlbum(withID id: String) -> PHAssetCollection? {
+        guard let col = PHAssetCollection.fetchAssetCollections(
+                withLocalIdentifiers: [id], options: nil).firstObject,
+              col.assetCollectionType == .album,
+              col.assetCollectionSubtype == .albumRegular else { return nil }
+        return col
+    }
+
+    /// FALLBACK only, for an album the ledger has no record of: a regular
+    /// album carrying one of snapsift's titles (any language, retired names
+    /// too), current language preferred.
     ///
-    /// Resolved exactly as `removeAssets` and `addAssets` resolve it: regular
-    /// albums whose title is one of snapsift's own (`candidateTitles`, every
-    /// language plus retired names). That title match is the whole guard — a
-    /// user album is never read here, so it can never be reconciled; a snapsift
-    /// album the user renamed is not found and is left alone. Read-only.
-    private static func currentMemberIDs(inAlbumTitles candidateTitles: [String]) -> Set<String> {
+    /// A title proves nothing about who made the album or what is in it — the
+    /// user may have an album of her own with the same name, and this WILL
+    /// find it and read its members. That is why Core lets a title-found album
+    /// be added to and never taken from, and why only ids the ledger recorded
+    /// are ever removable. (This comment used to claim "a user album is never
+    /// read here". It was false.)
+    private static func albumByTitle(_ candidateTitles: [String],
+                                     preferring name: String) -> PHAssetCollection? {
         let o = PHFetchOptions()
         o.predicate = NSPredicate(format: "localizedTitle IN %@", candidateTitles)
-        let albums = PHAssetCollection.fetchAssetCollections(
+        let existing = PHAssetCollection.fetchAssetCollections(
             with: .album, subtype: .albumRegular, options: o)
-        var ids = Set<String>()
-        albums.enumerateObjects { album, _, _ in
-            PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { a, _, _ in
-                ids.insert(a.localIdentifier)
-            }
-        }
-        return ids
-    }
-
-    /// Remove `ids` from a snapsift-owned album, if that album exists and any of
-    /// them are actually in it. Returns how many memberships were removed.
-    ///
-    /// SAFETY, stated because this is the only removal in the app that is not a
-    /// deletion: `PHAssetCollectionChangeRequest.removeAssets` removes
-    /// MEMBERSHIP. The photo stays in the library, in every other album, in
-    /// every smart album, and in iCloud; nothing goes to Recently Deleted. The
-    /// album is resolved ONLY by snapsift's own titles in every language
-    /// (`candidateTitles`), exactly as `addAssets` resolves it — so a user album
-    /// is never touched, and a snapsift album the user RENAMED is simply not
-    /// found and nothing happens (the same degradation `addAssets` already has).
-    /// If the album does not exist yet, this is a no-op: we never create an
-    /// album in order to remove from it.
-    @discardableResult
-    private static func removeAssets(ids: Set<String>,
-                                     fromAlbumTitles candidateTitles: [String]) async throws -> Int {
-        guard !ids.isEmpty else { return 0 }
-        let existing = PHAssetCollection.fetchAssetCollections(
-            with: .album, subtype: .albumRegular,
-            options: {
-                let o = PHFetchOptions()
-                o.predicate = NSPredicate(format: "localizedTitle IN %@", candidateTitles)
-                return o
-            }()
-        )
-        var removed = 0
-        var albums: [PHAssetCollection] = []
-        existing.enumerateObjects { col, _, _ in albums.append(col) }
-        // Every matching album, not just the current language's: a user who
-        // flipped languages can hold two, and leaving the stale one populated
-        // would leave the contradiction this exists to end.
-        for album in albums {
-            var members: [PHAsset] = []
-            PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { a, _, _ in
-                if ids.contains(a.localIdentifier) { members.append(a) }
-            }
-            guard !members.isEmpty else { continue }
-            let cid = album.localIdentifier
-            let doomed = members
-            try await PHPhotoLibrary.shared().performChanges {
-                guard let col = PHAssetCollection.fetchAssetCollections(
-                        withLocalIdentifiers: [cid], options: nil).firstObject,
-                      let req = PHAssetCollectionChangeRequest(for: col) else { return }
-                req.removeAssets(doomed as NSArray)
-            }
-            removed += members.count
-        }
-        return removed
-    }
-
-    // MARK: - PhotoKit helpers (idempotent add)
-
-    /// Resolve or create a user album by title, then add only assets NOT already
-    /// present. Returns the number of assets actually added (0 on re-run).
-    ///
-    /// Idempotency: we fetch the album's current members, diff against the
-    /// incoming set, and only add the newcomers. This means re-running the scan
-    /// and clicking "Sort into albums" again is always safe — no duplicate
-    /// membership, no error.
-    ///
-    /// `name`            — the album title to CREATE under if none exists (active language).
-    /// `candidateTitles` — every language's title for this bucket; resolution
-    ///                     matches any of them so a language flip doesn't duplicate.
-    @discardableResult
-    private static func addAssets(_ assets: [PHAsset],
-                                  toAlbumNamed name: String,
-                                  candidateTitles: [String]) async throws -> Int {
-        // Step 1: resolve (or create) the album — read-only fetch first to
-        // avoid an unnecessary write transaction. Match ANY language's title.
-        let existing = PHAssetCollection.fetchAssetCollections(
-            with: .album, subtype: .albumRegular,
-            options: {
-                let o = PHFetchOptions()
-                o.predicate = NSPredicate(format: "localizedTitle IN %@", candidateTitles)
-                return o
-            }()
-        )
-
-        // If the user accumulated several albums from earlier language flips,
-        // prefer the current-language one; otherwise take the first match.
-        var resolved: PHAssetCollection? = nil
+        var resolved: PHAssetCollection?
         existing.enumerateObjects { col, _, stop in
             if col.localizedTitle == name {
                 resolved = col
@@ -341,44 +296,93 @@ enum AlbumWriter {
                 resolved = col
             }
         }
+        return resolved
+    }
 
-        // Step 2: diff against current members so we never double-add.
-        // Compute the set of ids we want to add before entering performChanges.
-        var toAdd: [PHAsset] = []
-        var collectionLocalID: String? = nil
-
-        if let album = resolved {
-            collectionLocalID = album.localIdentifier
-            let memberResult = PHAsset.fetchAssets(in: album, options: nil)
-            var memberIDs = Set<String>()
-            memberResult.enumerateObjects { a, _, _ in memberIDs.insert(a.localIdentifier) }
-            toAdd = assets.filter { !memberIDs.contains($0.localIdentifier) }
-        } else {
-            // Album doesn't exist yet — will be created in the change block.
-            toAdd = assets
+    private static func memberIDs(of album: PHAssetCollection) -> Set<String> {
+        var ids = Set<String>()
+        PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { a, _, _ in
+            ids.insert(a.localIdentifier)
         }
+        return ids
+    }
 
-        guard !toAdd.isEmpty else { return 0 }
+    /// Which of `ids` still exist in the library. Burst members and hidden
+    /// photos DO exist (they would otherwise read as "the other copy is gone");
+    /// photos in Recently Deleted do not come back from a default fetch.
+    private static func existingAssetIDs(among ids: Set<String>) -> Set<String> {
+        guard !ids.isEmpty else { return [] }
+        let o = PHFetchOptions()
+        o.includeAllBurstAssets = true
+        o.includeHiddenAssets = true
+        var found = Set<String>()
+        PHAsset.fetchAssets(withLocalIdentifiers: Array(ids), options: o).enumerateObjects { a, _, _ in
+            found.insert(a.localIdentifier)
+        }
+        return found
+    }
 
-        // Step 3: perform the write (create if needed, then add members).
-        // `collectionLocalID` is captured to look up the created collection
-        // inside the change block when we need to create a new album.
-        var newCollectionID: String? = nil
+    // MARK: - PhotoKit helpers (the two writes)
+
+    /// Remove `ids` from ONE album — the one the ledger recorded. Returns how
+    /// many memberships were removed.
+    ///
+    /// SAFETY, stated because this is the only removal in the app that is not a
+    /// deletion: `PHAssetCollectionChangeRequest.removeAssets` removes
+    /// MEMBERSHIP. The photo stays in the library, in every other album, in
+    /// every smart album, and in iCloud; nothing goes to Recently Deleted.
+    /// `ids` come from Core `albumSortPlan`, which only ever returns ids the
+    /// ledger says snapsift filed in this album.
+    @discardableResult
+    private static func removeAssets(ids: Set<String>,
+                                     from album: PHAssetCollection) async throws -> Int {
+        var members: [PHAsset] = []
+        PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { a, _, _ in
+            if ids.contains(a.localIdentifier) { members.append(a) }
+        }
+        guard !members.isEmpty else { return 0 }
+        let cid = album.localIdentifier
+        let doomed = members
+        try await PHPhotoLibrary.shared().performChanges {
+            guard let col = PHAssetCollection.fetchAssetCollections(
+                    withLocalIdentifiers: [cid], options: nil).firstObject,
+                  let req = PHAssetCollectionChangeRequest(for: col) else { return }
+            req.removeAssets(doomed as NSArray)
+        }
+        return members.count
+    }
+
+    /// Add `assets` to `album`, or to a new album called `name` when there is
+    /// none. Skips ids in `alreadyIn`. Returns how many were added and the
+    /// `localIdentifier` of the album used (nil only if there was no album and
+    /// nothing to add, so none was created).
+    private static func addAssets(_ assets: [PHAsset],
+                                  to album: PHAssetCollection?,
+                                  creatingNamed name: String,
+                                  alreadyIn: Set<String>) async throws
+        -> (added: Int, collectionID: String?) {
+        let toAdd = assets.filter { !alreadyIn.contains($0.localIdentifier) }
+        let existingID = album?.localIdentifier
+        guard !toAdd.isEmpty else { return (0, existingID) }
+        // A class box: the change block is @Sendable and runs later; a captured
+        // `var` could not be written from it.
+        final class Box: @unchecked Sendable { var id: String? }
+        let created = Box()
         try await PHPhotoLibrary.shared().performChanges {
             let collection: PHAssetCollectionChangeRequest
-            if let cid = collectionLocalID,
+            if let cid = existingID,
                let col = PHAssetCollection.fetchAssetCollections(
-                   withLocalIdentifiers: [cid], options: nil).firstObject {
-                collection = PHAssetCollectionChangeRequest(for: col)!
+                   withLocalIdentifiers: [cid], options: nil).firstObject,
+               let req = PHAssetCollectionChangeRequest(for: col) {
+                collection = req
             } else {
                 let req = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(
                     withTitle: name)
-                newCollectionID = req.placeholderForCreatedAssetCollection.localIdentifier
+                created.id = req.placeholderForCreatedAssetCollection.localIdentifier
                 collection = req
             }
             collection.addAssets(toAdd as NSArray)
         }
-        _ = newCollectionID  // used implicitly via the change block capture
-        return toAdd.count
+        return (toAdd.count, created.id ?? existingID)
     }
 }

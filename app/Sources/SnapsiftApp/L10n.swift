@@ -1297,9 +1297,11 @@ struct L10n: Sendable {
     /// exactly as it was before the first press.
     func keepOnlyUndone() -> String {
         switch language {
-        case .en:   return "Put back as it was before ⇧K"
-        case .ja:   return "⇧K の前の状態に戻しました"
-        case .zhTW: return "已還原成按 ⇧K 之前的樣子"
+        // No key name: the same banner answers the context-menu "Keep only
+        // this one" chosen with a mouse.
+        case .en:   return "Put back as it was"
+        case .ja:   return "元の状態に戻しました"
+        case .zhTW: return "已還原成原本的樣子"
         }
     }
     private func albumsWrittenBursts(_ n: Int) -> String {

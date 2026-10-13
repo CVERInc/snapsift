@@ -847,29 +847,13 @@ public enum AlbumBucket: CaseIterable, Equatable {
 /// side and that returned nil, which `scanKindFeeds` reads as "this scan feeds
 /// no album": every sort quietly became add-only (review P3-D).
 ///
-/// The raw values are ALSO the snapshot's `kind` field on disk. Renaming one
-/// makes every saved session restore as the default kind; the test suite pins
-/// the three strings for that reason.
+/// The raw values are ALSO the snapshot's `kind` field on disk. A string that
+/// matches no case leaves the restored session on whatever kind the model
+/// already held (its initial `.burst`; `restoreSnapshot` uses `if let`), so a
+/// rename would silently relabel saved sessions. The test suite pins the
+/// three strings for that reason.
 public enum AlbumScanKind: String, CaseIterable {
     case burst, lookAlikes, similarSets
-}
-
-/// How much of the library the scan that produced these results looked at.
-public enum AlbumScanScope: Equatable {
-    /// Every asset the library holds went through the scan.
-    case wholeLibrary
-    /// One album — or coverage we cannot vouch for. The cautious default.
-    case narrow
-}
-
-/// May this sort treat the WHOLE library as re-evaluated?
-///
-/// Only when the scan really covered it (`coveredWholeLibrary == true`; nil =
-/// nobody recorded what it covered, e.g. a session restored from disk) AND the
-/// library has not changed under the results since (`resultsCurrent`). Either
-/// one missing ⇒ `.narrow`, the rule that removes less.
-public func albumScanScope(coveredWholeLibrary: Bool?, resultsCurrent: Bool) -> AlbumScanScope {
-    (coveredWholeLibrary == true && resultsCurrent) ? .wholeLibrary : .narrow
 }
 
 /// Does a scan of this kind PRODUCE verdicts for this album?
@@ -950,8 +934,9 @@ public func albumCandidates(_ bucket: AlbumBucket,
     }
 }
 
-/// The asset ids this scan re-evaluated FOR THIS ALBUM — the only members a
-/// sort may take out of it.
+/// The asset ids a sort may take a verdict on FOR THIS ALBUM — the only
+/// members it may take out (and then only those in the ledger; see
+/// `albumSortPlan`).
 ///
 /// No scan kind keeps a record of every asset it examined: the full-library
 /// map is trimmed to group members the moment a scan ends
@@ -959,77 +944,109 @@ public func albumCandidates(_ bucket: AlbumBucket,
 /// actually reached about, is the frames of the current review groups — so
 /// that is the working set, for the kinds that feed the album
 /// (`scanKindFeeds`), and EMPTY for a kind that does not. The asset-only
-/// needs-look extras belong to that album's working set too (they are always
-/// candidates, so this never removes one; it only keeps the set truthful).
+/// needs-look extras belong to that album's working set too.
 ///
-/// ONE widening (review P2-A), for "Exact Duplicates" only: when the scan
-/// covered the WHOLE library (`scanScope == .wholeLibrary`), it did look at
-/// every asset — and an asset it put in no group is one it found no duplicate
-/// of. So the working set is every asset the library holds (`libraryIDs`,
-/// supplied by the app; asked for only in this case). Without it: {A, B}
-/// sorted, B filed; the user deletes A in Photos; B now has no group, so no
-/// scan would ever take it out, and the album labelled "safe to remove" holds
-/// the only copy left. A narrow scan keeps the narrow rule — it truly did not
-/// look. The other four albums are review-only and keep it too.
+/// Plus what the LEDGER can prove without any scan at all, whatever the kind:
+///   • a filed id that no longer exists (`missingIDs`) — formally in the set;
+///     it cannot be a member, so this removes nothing, it only stays truthful;
+///   • Exact Duplicates only: a filed id whose recorded twin — the keeper it
+///     was a duplicate of — no longer exists. {A keeper, B filed}; the user
+///     deletes A in Photos; B has no group now, so no scan would ever revisit
+///     it, and the album labelled "safe to delete" would hold the last copy.
+///     The record says B was a copy of A, A is gone, so B comes out.
+/// This replaced a whole-library widening (PR #8 as first written) that both
+/// materialised every asset id and rested on a premise that is false: a photo
+/// in no group was never hashed, so "no group" never meant "no duplicate".
 public func albumWorkingSet(_ bucket: AlbumBucket,
                             scanKind: AlbumScanKind?,
-                            scanScope: AlbumScanScope = .narrow,
                             groups: [AlbumSortGroup],
                             extraNeedsLookIDs: [String] = [],
-                            libraryIDs: () -> Set<String> = { [] }) -> Set<String> {
-    guard scanKindFeeds(scanKind, bucket) else { return [] }
-    var ids = Set(groups.flatMap { $0.photos.map(\.uuid) })
-    if bucket == .needsLook { ids.formUnion(extraNeedsLookIDs) }
-    if bucket == .exact && scanScope == .wholeLibrary { ids.formUnion(libraryIDs()) }
+                            ledger: AlbumLedger = AlbumLedger(),
+                            missingIDs: Set<String> = []) -> Set<String> {
+    var ids = Set<String>()
+    if scanKindFeeds(scanKind, bucket) {
+        ids = Set(groups.flatMap { $0.photos.map(\.uuid) })
+        if bucket == .needsLook { ids.formUnion(extraNeedsLookIDs) }
+    }
+    for (id, filed) in ledger.album(bucket).filed {
+        if missingIDs.contains(id) { ids.insert(id) }
+        if bucket == .exact, let twin = filed.twin, missingIDs.contains(twin) { ids.insert(id) }
+    }
     return ids
 }
 
 /// What to do to ONE album: take `remove` out first, then add `add`.
 public struct AlbumStep: Equatable {
     public let bucket: AlbumBucket
+    /// Which album this step is about. `.byTitle` steps never remove.
+    public let resolution: AlbumResolution
     public let remove: Set<String>
     /// Every frame that belongs there after this sort (the writer skips the
     /// ones already present).
     public let add: [String]
+    /// Exact Duplicates: filed id → the keeper it is a duplicate of.
+    public let twins: [String: String]
 }
 
 /// THE album sort: one step per album, in write order. `AlbumWriter.write`
 /// executes exactly this list and decides nothing itself, so every removal the
 /// app can perform is one this function returned.
 ///
-/// `currentMembers(bucket)` = ids now in snapsift's OWN album(s) for that
-/// bucket. If exact and needs-look ever both claim a frame (they must not),
+///   remove = (current members ∩ ids the LEDGER says snapsift filed in THIS
+///             album ∩ working set) − this sort's candidates
+///
+/// The middle term is what makes a title harmless: an id snapsift never filed
+/// is never removed, whatever the album is called and whoever made it.
+///
+/// `resolution(bucket)` — how the app found the album (`albumResolution`).
+/// `currentMembers(bucket)` — ids now in that album.
+/// `missingIDs` — which of `albumLivenessQuery`'s ids no longer exist.
+/// An exact group whose keeper is missing yields NO candidates: with the
+/// keeper gone, its other frames are the copies that are left.
+/// If exact and needs-look ever both claim a frame (they must not),
 /// needs-a-look wins: a frame we could not classify never wears "safe to
 /// remove".
 public func albumSortPlan(groups: [AlbumSortGroup],
                           scanKind: AlbumScanKind?,
-                          scanScope: AlbumScanScope = .narrow,
                           extraNeedsLookIDs: [String] = [],
-                          libraryIDs: () -> Set<String> = { [] },
+                          ledger: AlbumLedger,
+                          resolution: (AlbumBucket) -> AlbumResolution,
+                          missingIDs: Set<String> = [],
                           currentMembers: (AlbumBucket) -> Set<String>) -> [AlbumStep] {
     func working(_ b: AlbumBucket) -> Set<String> {
-        albumWorkingSet(b, scanKind: scanKind, scanScope: scanScope, groups: groups,
-                        extraNeedsLookIDs: extraNeedsLookIDs, libraryIDs: libraryIDs)
+        albumWorkingSet(b, scanKind: scanKind, groups: groups, extraNeedsLookIDs: extraNeedsLookIDs,
+                        ledger: ledger, missingIDs: missingIDs)
+    }
+    /// Current members snapsift itself filed in this very album.
+    func removable(_ b: AlbumBucket) -> Set<String> {
+        currentMembers(b).intersection(ledgerFiledIDs(ledger, b, resolution(b)))
     }
     func plain(_ b: AlbumBucket) -> AlbumStep {
         let candidates = albumCandidates(b, groups: groups)
-        return AlbumStep(bucket: b,
-                         remove: albumMembershipRemovals(currentMembers: currentMembers(b),
+        return AlbumStep(bucket: b, resolution: resolution(b),
+                         remove: albumMembershipRemovals(currentMembers: removable(b),
                                                          workingSet: working(b),
                                                          candidates: candidates),
-                         add: candidates)
+                         add: candidates, twins: [:])
+    }
+    let provable = groups.filter { !($0.isExact && missingIDs.contains($0.keeperID)) }
+    var twins: [String: String] = [:]
+    for g in provable where g.isExact {
+        for id in exactAlbumCandidates(photos: g.photos, keeperID: g.keeperID) { twins[id] = g.keeperID }
     }
     let pair = albumBucketPlan(
-        exactCandidates: albumCandidates(.exact, groups: groups),
+        exactCandidates: albumCandidates(.exact, groups: provable),
         needsLookCandidates: albumCandidates(.needsLook, groups: groups,
                                              extraNeedsLookIDs: extraNeedsLookIDs),
-        currentExact: currentMembers(.exact),
-        currentNeedsLook: currentMembers(.needsLook),
+        currentExact: removable(.exact),
+        currentNeedsLook: removable(.needsLook),
         exactWorkingSet: working(.exact),
         needsLookWorkingSet: working(.needsLook))
     return [plain(.bursts), plain(.blurry), plain(.documents),
-            AlbumStep(bucket: .exact, remove: pair.exactRemove, add: pair.exactAdd),
-            AlbumStep(bucket: .needsLook, remove: pair.needsLookRemove, add: pair.needsLookAdd)]
+            AlbumStep(bucket: .exact, resolution: resolution(.exact),
+                      remove: pair.exactRemove, add: pair.exactAdd, twins: twins),
+            AlbumStep(bucket: .needsLook, resolution: resolution(.needsLook),
+                      remove: pair.needsLookRemove, add: pair.needsLookAdd, twins: [:])]
 }
 
 /// Why the banner says frames left an album.
