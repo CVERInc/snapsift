@@ -55,35 +55,66 @@ spoofed feed/download can't push a tampered build.
 
 ## Maintainer release steps
 
-Producing a shippable update is four steps across two repos — this one and
-the family's `cver-tools` signing pipeline:
+One command runs the chain (`scripts/release.sh`); each stage is also usable
+alone. Two repos are involved: this one and the family's private `cver-tools`
+signing pipeline (`mac-release/release.sh`), which is not part of this repo —
+point `SNAPSIFT_MAC_RELEASE` at it and the script fails with a clear message if
+it is absent.
 
-1. **Build** — `app/scripts/build-app.sh release` with
-   `SNAPSIFT_SU_PUBLIC_ED_KEY` (the EdDSA **public** key — see "One-time key
-   setup" below) set; `SNAPSIFT_FEED_URL` defaults to the production appcast,
-   so it is usually left unset. **Setting the public key is what turns
-   updating on**: with it, the script writes both `SUPublicEDKey` and
-   `SUFeedURL`; without it, neither. This produces an `.app` with
-   `Sparkle.framework` embedded, the update-check `Info.plist` keys filled in,
-   and an **ad-hoc** signature on the executable and the bundle (the script
-   verifies it with `codesign --verify --deep --strict` and refuses to finish
-   otherwise — an unsigned-after-`install_name_tool` binary is SIGKILLed at
-   launch on Apple Silicon). Ad-hoc is not distribution signing; step 2
-   replaces it.
-2. **Sign, notarize, package** — `cver-tools`' `mac-release/release.sh`
-   (family pipeline; not part of this repo) turns that `.app` into a signed,
-   notarized, stapled `.dmg`, using
-   `app/Resources/snapsift.entitlements` as its `--entitlements` argument.
-   `app/scripts/build-app.sh` prints that entitlements path at the end of
-   its own run so it's never typed from memory.
-3. **Appcast** — `scripts/make-appcast.sh <dir-of-release-dmgs>` wraps
-   Sparkle's own `generate_appcast` to (re)write `appcast.xml` from every
-   release archive in that directory, signing each entry with the EdDSA
-   private key (see below).
-4. **Upload** — publish the new `.dmg` and the regenerated `appcast.xml` to
-   wherever `SUFeedURL` points (default: `https://oss.cver.net/snapsift/`).
-   Existing installations pick up the update on their next check —
-   nothing needs to be pushed to them.
+```bash
+export SNAPSIFT_MAC_RELEASE=<path to cver-tools>/mac-release/release.sh
+export SNAPSIFT_SU_PUBLIC_ED_KEY=<EdDSA PUBLIC key, see "One-time key setup">
+export SNAPSIFT_IDENTITY="Developer ID Application: … (TEAMID)"
+scripts/release.sh            # build → preflight → sign+notarize+staple+dmg → appcast
+SNAPSIFT_PUBLISH_DIR=<checkout of the host> scripts/release.sh publish
+```
+
+1. **Build** (`app/scripts/build-app.sh release`, run by `release.sh` into
+   `dist/stage/`, never into `~/Applications`) — with
+   `SNAPSIFT_SU_PUBLIC_ED_KEY` set the script writes both `SUPublicEDKey` and
+   `SUFeedURL`; without it, neither (updates off). The result has
+   `Sparkle.framework` embedded and an **ad-hoc** signature (verified with
+   `codesign --verify --deep --strict`); ad-hoc is not distribution signing,
+   step 2 replaces it. Bump `CFBundleVersion` in `app/Info.plist` for every
+   release: Sparkle compares it, and `release.sh` refuses a number that is not
+   greater than the newest already in `appcast.xml`.
+2. **Sign, notarize, package** — `mac-release/release.sh`, with
+   `app/Resources/snapsift.entitlements` (the photos-library entitlement is
+   required under the hardened runtime; without it the Photos prompt never
+   appears). It signs inside-out — every nested Sparkle item, then the app —
+   notarizes, staples, then builds the `.dmg`. The archive is therefore made
+   after stapling; do not rebuild or edit it afterwards.
+3. **Appcast** — `scripts/make-appcast.sh dist/releases` (Sparkle's
+   `generate_appcast`) writes `appcast.xml` from every archive in that
+   directory, signing each entry with the EdDSA private key (see below). Keep
+   all past release archives in that directory: the feed is regenerated from
+   what is there.
+4. **Publish** — see "Hosting" below.
+
+### Hosting
+
+One variable decides where updates live: `SNAPSIFT_BASE_URL` (default
+`https://oss.cver.net/snapsift/`, a directory URL with a trailing slash). It
+is baked into `SUFeedURL` (`<base>appcast.xml`) and used as the appcast
+download prefix (`<base><archive>`), so the host MUST serve both
+`appcast.xml` and every release archive under that URL, over HTTPS, before the
+first official build is shipped. Verify with `curl -I`: both must answer 200
+(a redirect to the real file is fine).
+
+As of 2026-10-13 the default base answers 404: `oss.cver.net` is the
+organization's GitHub Pages site, which serves a project repo at
+`oss.cver.net/<repo>/` only when Pages is enabled on that repo, and it is not
+enabled on `CVERInc/snapsift`. Enabling it (Settings ▸ Pages ▸ branch `main`,
+folder `/ (root)`) would also publish `index.html`, the landing page. If the
+archives should not live in git (they grow the repo and Pages has a size
+limit), host them elsewhere and set `SNAPSIFT_BASE_URL` /
+`SNAPSIFT_DOWNLOAD_URL_PREFIX` accordingly. Any base URL works as long as it
+is used consistently for the build and the appcast.
+
+`scripts/release.sh publish` copies `appcast.xml`, the `.dmg` and its
+`.sha256` into `SNAPSIFT_PUBLISH_DIR` (a local checkout of whatever serves the
+base URL) and prints the verification commands. It never commits or pushes;
+that, and the Pages setting, are the maintainer's.
 
 ### One-time key setup (human, not scripted)
 

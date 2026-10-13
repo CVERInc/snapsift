@@ -66,7 +66,9 @@ if [ ! -d "$RELEASES_DIR" ]; then
 fi
 shift
 
-DOWNLOAD_URL_PREFIX="${SNAPSIFT_DOWNLOAD_URL_PREFIX:-https://oss.cver.net/snapsift/}"
+BASE_URL="${SNAPSIFT_BASE_URL:-https://oss.cver.net/snapsift/}"
+case "$BASE_URL" in */) ;; *) BASE_URL="$BASE_URL/" ;; esac
+DOWNLOAD_URL_PREFIX="${SNAPSIFT_DOWNLOAD_URL_PREFIX:-$BASE_URL}"
 
 SCRATCH=".build/sparkle-tools/$SPARKLE_TAG"
 BIN_DIR="$SCRATCH/bin"

@@ -22,8 +22,12 @@
 #                                Sparkle has no feed to fetch and a plain source
 #                                build makes no network request at all — which
 #                                is what docs/UPDATES.md promises.
+#   SNAPSIFT_BASE_URL           The ONE hosting variable (directory URL serving
+#                                appcast.xml + the archives; scripts/release.sh and
+#                                make-appcast.sh read the same one).
+#                                Default https://oss.cver.net/snapsift/
 #   SNAPSIFT_FEED_URL           SUFeedURL, written ONLY alongside a public key.
-#                                Default: the production appcast.
+#                                Default: ${SNAPSIFT_BASE_URL}appcast.xml
 #
 # Note: if this repo lives under an iCloud-synced folder, iCloud can touch a
 # source file mid-build ("input file was modified during the build"). Just rerun,
@@ -34,7 +38,9 @@ APP_ROOT="$(pwd)"
 
 CONFIG="${1:-release}"
 DEST="${2:-$HOME/Applications/snapsift.app}"
-FEED_URL="${SNAPSIFT_FEED_URL:-https://oss.cver.net/snapsift/appcast.xml}"
+BASE_URL="${SNAPSIFT_BASE_URL:-https://oss.cver.net/snapsift/}"
+case "$BASE_URL" in */) ;; *) BASE_URL="$BASE_URL/" ;; esac
+FEED_URL="${SNAPSIFT_FEED_URL:-${BASE_URL}appcast.xml}"
 PUBLIC_ED_KEY="${SNAPSIFT_SU_PUBLIC_ED_KEY:-}"
 
 echo "▸ swift build -c $CONFIG --product SnapsiftApp"
@@ -55,6 +61,19 @@ cp "$BIN" "$DEST/Contents/MacOS/SnapsiftApp"
 cp Info.plist "$DEST/Contents/Info.plist"
 # App icon (regenerate with `swift run SnapsiftIcon` when the artwork changes).
 cp Assets/AppIcon.icns "$DEST/Contents/Resources/AppIcon.icns"
+
+# Licence texts that must travel with the binary: snapsift's own MIT licence,
+# Sparkle's licence (its terms require it be reproduced with binary
+# distributions), and the consolidated THIRD_PARTY_NOTICES. Sparkle's file is
+# taken from the resolved package checkout so it is always the pinned version's.
+SPARKLE_LICENSE=".build/checkouts/Sparkle/LICENSE"
+if [ ! -f "$SPARKLE_LICENSE" ]; then
+  echo "✗ $SPARKLE_LICENSE not found — run \`swift package resolve\` (the build above should have)." >&2
+  exit 1
+fi
+cp ../LICENSE "$DEST/Contents/Resources/LICENSE.txt"
+cp "$SPARKLE_LICENSE" "$DEST/Contents/Resources/Sparkle-LICENSE.txt"
+cp ../THIRD_PARTY_NOTICES "$DEST/Contents/Resources/THIRD_PARTY_NOTICES.txt"
 
 # Sparkle.framework: embed the whole versioned bundle (its internal symlinks —
 # Versions/Current, the top-level Sparkle/Resources/etc. aliases — must
@@ -160,8 +179,8 @@ xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
 # This is NOT distribution signing and changes nothing about Gatekeeper — an
 # ad-hoc signature has no identity, so the app is still "unsigned" to anyone who
 # downloads it, and the release pipeline (cver-tools mac-release/release.sh)
-# re-signs the same layout `--force --deep` with the real Developer ID before
-# notarization, replacing this entirely. What it buys is a dev build that is
+# re-signs it inside-out (every nested item, then the app) with the real
+# Developer ID before notarization, replacing this entirely. What it buys is a dev build that is
 # consistent with itself, launches on Apple Silicon, and can be verified here.
 echo "▸ ad-hoc signing the bundle (dev build; the release pipeline re-signs)"
 codesign --force --deep -s - "$DEST"
