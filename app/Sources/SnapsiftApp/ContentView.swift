@@ -412,8 +412,8 @@ struct ContentView: View {
             if let msg = albumErrorMessage { Text(msg) }
         }
         // ⇧X force-reject confirmation: same dialog path as mouse "include protected".
-        .alert(t.deleteProtectedAlertTitle(), isPresented: $showForceRejectAlert) {
-            Button(t.deleteProtectedAlertConfirm(), role: .destructive) {
+        .alert(t.forceRejectAlertTitle(), isPresented: $showForceRejectAlert) {
+            Button(t.forceRejectAlertConfirm(), role: .destructive) {
                 if let target = forceRejectTarget {
                     model.forceReject(group: target.groupID, frameID: target.frameID)
                 }
