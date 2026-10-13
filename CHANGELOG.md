@@ -13,7 +13,9 @@ reserved for the first signed and notarized build.
   the stronger one. Works in the grid and in the preview, and appears in the `?`
   cheat sheet in English, Japanese and Traditional Chinese.
   - It **marks only**: nothing leaves the library until the pre-commit sheet is
-    confirmed, and `K` or `A` afterwards undo it the ordinary way.
+    confirmed. Pressing `⇧K` again on the same photo, before touching anything
+    else in the group, puts the group back exactly as it was. (`A` keeps the
+    whole group; plain `K` only un-marks the one photo it nominates.)
   - Protected photos (favorite / edited / document) and anything snapsift could
     not classify are **never** crossed out by ⇧K — only the per-photo ⇧X path,
     which asks first, can cross out a known protection. The set it marks is the
@@ -21,8 +23,26 @@ reserved for the first signed and notarized build.
     use; there is no second definition of "deletable".
   - It does not undo your decisions either: a protected photo you had already
     force-crossed-out yourself with ⇧X **stays** crossed out.
-  - Marks made this way are attributed as "marked by you" in the audit log,
-    never as an app suggestion.
+  - Marks ⇧K adds are attributed as "marked by you" in the audit log. A copy
+    the exact-duplicate pass had already marked, and that stays marked, keeps
+    its "Same photo" attribution.
+
+### Fixed
+- **Snapsift's albums now hold exactly what the latest sort concluded.** Sorting
+  used to only add: if you changed which copy to keep and sorted again, the old
+  candidate stayed in "Exact Duplicates" next to the new one — the photo and its
+  only other copy, in the album described as safe to remove. Each sort now takes
+  out of Snapsift's own albums whatever it no longer puts there, and the banner
+  says how many. Membership only: nothing is deleted, and albums you made
+  yourself are never touched.
+- An interrupted delete is no longer booked into the history while Photos access
+  is missing or limited — "cannot see the photo" was being read as "the photo is
+  gone". The check now waits for a launch with full access.
+- ⌘ / ⌃ / ⌥ combined with a letter, a digit or ⌫ can no longer trigger the plain
+  key's action (⌘⌫ with nothing marked used to cross out the focused photo).
+- `K` and `1–9` ignore a photo that is not in the group.
+- `D` no longer leaves the "include protected" override switched on with no
+  protected photo marked.
 
 ## [0.10.0] — 2026-09-18
 

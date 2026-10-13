@@ -170,6 +170,10 @@ final class LibraryModel: ObservableObject {
     @Published var uniqueMetadataIDs: Set<String> = []
     /// Deletions recovered from an interrupted commit's journal at launch.
     @Published var journalRecoveredCount: Int?
+    /// What the last ⇧K did to each group, so ⇧K again can put it back exactly
+    /// (Core `keepOnlyUndoTarget`). In memory only — never in the snapshot: an
+    /// undo across a relaunch would restore marks nobody remembers making.
+    private var keepOnlyUndo: [ReviewGroup.ID: KeepOnlyUndo] = [:]
     /// Marks lost on restore because the photo itself is gone from the library.
     @Published var vanishedMarkCount: Int?
     /// Where the next scan reads its working set from. Default = whole library.
@@ -1244,6 +1248,11 @@ final class LibraryModel: ObservableObject {
     /// ⏎ action in grid and loupe.
     func promote(group groupID: ReviewGroup.ID, to photoID: String) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        // A keeper has to be one of the group's own frames (Core
+        // `isGroupMember`, the same guard `keepOnly` passes). A stale focus
+        // used to write a foreign uuid into `keeperID` here: no frame wore the
+        // keep badge and the next `D` fell back to `photos[0]`.
+        guard isGroupMember(photoID, of: groups[i].photos) else { return }
         // Core `promoteState` is the rule: keeper := photoID, and the ONLY
         // change to `rejected` is removing that frame. Shared with ⇧K's undo
         // path so the test suite and the app run the same transition.
@@ -1276,8 +1285,15 @@ final class LibraryModel: ObservableObject {
     /// keeper is nominated and excluded in the SAME transition.
     ///
     /// MARKING ONLY. Nothing is deleted here; the pre-commit sheet is still the
-    /// only door to `performChanges`, and K (re-nominate) or A (keep all) undo
-    /// it the ordinary way.
+    /// only door to `performChanges`.
+    ///
+    /// UNDO: ⇧K again on the same frame, with nothing else touched in between,
+    /// puts the group back EXACTLY as it was — keeper, marks, provenance and
+    /// override (Core `keepOnlyUndoTarget`; returns true when that happened).
+    /// The earlier wording here said "K or A undo it the ordinary way", which
+    /// was not true: K un-marks one frame and leaves the other N-2 marked, and
+    /// A clears everything including ⇧X marks ⇧K had deliberately kept. A is
+    /// still the "keep them all" exit; it is not a way back.
     ///
     /// The marked set comes from Core `keepOnlyState` → `bulkRejectCandidates`,
     /// the same composition rule `d` and the exact-duplicate auto-seed use, so
@@ -1292,21 +1308,45 @@ final class LibraryModel: ObservableObject {
     /// force-marked protected frame (including one ⇧K just carried over) keeps
     /// it, correctly: that frame still needs the confirmation it was given.
     ///
-    /// The marks are the USER's, not the app's suggestion: `autoSeeded` is
-    /// cleared so the audit log attributes them as "marked by you"
-    /// (`DeleteMarkReason.userRejected`) and never as `.exactDuplicate`.
-    func keepOnly(group groupID: ReviewGroup.ID, frame frameID: String) {
-        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
-        guard groups[i].photos.contains(where: { $0.uuid == frameID }) else { return }
+    /// PROVENANCE: a mark the exact-duplicate pass seeded and ⇧K left standing
+    /// stays `autoSeeded` — it is still a byte-verified copy, and the history
+    /// should keep saying so ("Same photo") rather than flatten it to "You
+    /// marked it". Marks ⇧K ADDS are the user's (`.userRejected`). `promote`
+    /// keeps provenance the same way. It only ever shrinks `autoSeeded`.
+    @discardableResult
+    func keepOnly(group groupID: ReviewGroup.ID, frame frameID: String) -> Bool {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return false }
+        guard isGroupMember(frameID, of: groups[i].photos) else { return false }
+        let current = GroupMarkSnapshot(keeperID: groups[i].keeperID,
+                                        rejected: groups[i].rejected,
+                                        autoSeeded: groups[i].autoSeeded,
+                                        includeProtected: groups[i].includeProtected)
+        if let back = keepOnlyUndoTarget(current: current, undo: keepOnlyUndo[groupID],
+                                         frameID: frameID, photos: groups[i].photos) {
+            groups[i].keeperID = back.keeperID
+            groups[i].rejected = back.rejected
+            groups[i].autoSeeded = back.autoSeeded
+            groups[i].includeProtected = back.includeProtected
+            keepOnlyUndo[groupID] = nil
+            scheduleSnapshotSave()
+            return true
+        }
         let next = keepOnlyState(photos: groups[i].photos, keeperID: frameID,
                                  rejected: groups[i].rejected)
         groups[i].keeperID = next.keeperID
         groups[i].rejected = next.rejected
-        groups[i].autoSeeded = []   // user decision — never an app suggestion
+        groups[i].autoSeeded.formIntersection(next.rejected)
         if groups[i].protectedDeletionCount == 0 {
             groups[i].includeProtected = false
         }
+        keepOnlyUndo[groupID] = KeepOnlyUndo(
+            before: current,
+            after: GroupMarkSnapshot(keeperID: groups[i].keeperID,
+                                     rejected: groups[i].rejected,
+                                     autoSeeded: groups[i].autoSeeded,
+                                     includeProtected: groups[i].includeProtected))
         scheduleSnapshotSave()
+        return false
     }
 
     /// Keep the entire group — clear all rejections. `a` key.
@@ -1353,6 +1393,10 @@ final class LibraryModel: ObservableObject {
         let keep = photos.first { $0.uuid == groups[i].keeperID } ?? photos[0]
         groups[i].rejected = bulkRejectCandidates(photos: photos, keeperID: keep.uuid)
         groups[i].autoSeeded = []   // user overrode — rejections are theirs now
+        // The override must not outlive its last protected mark (the rule
+        // `promote` and `keepOnly` apply): `d` just rewrote `rejected` without
+        // any protected frame in it. Can only turn the override OFF.
+        if groups[i].protectedDeletionCount == 0 { groups[i].includeProtected = false }
         scheduleSnapshotSave()
         return bulkRejectWithheld(photos: photos, keeperID: keep.uuid).count
     }
@@ -1865,23 +1909,37 @@ final class LibraryModel: ObservableObject {
     /// history the user had no reason to trust.
     func reconcileDeletionJournal() {
         guard let intent = DeletionAuditLog.pendingIntent() else { return }
+        // "Cannot see" is not "gone": without FULL read-write authorization
+        // the fetch below returns nothing, and every journalled photo would be
+        // booked as deleted and the journal cleared. Core `journalReconcile`
+        // owns that decision; here we only refuse to even ask the library a
+        // question it cannot answer. The journal stays for the next launch.
+        let authorized = PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized
         let ids = intent.records.map(\.assetIdentifier)
         var stillExisting: Set<String> = []
-        if !ids.isEmpty {
+        if authorized, !ids.isEmpty {
             let opts = PHFetchOptions()
             opts.includeAllBurstAssets = true
             PHAsset.fetchAssets(withLocalIdentifiers: ids, options: opts)
                 .enumerateObjects { a, _, _ in stillExisting.insert(a.localIdentifier) }
         }
         let logged = DeletionAuditLog.loggedAssetIdentifiers(from: DeletionAuditLog.loadSessions())
-        let records = DeletionAuditLog.recoverableRecords(from: intent,
-                                                          stillExisting: stillExisting,
-                                                          alreadyLogged: logged)
-        if !records.isEmpty {
-            let recovered = DeletionSession(timestamp: intent.timestamp, records: records)
-            if DeletionAuditLog.append(recovered) { journalRecoveredCount = records.count }
+        switch DeletionAuditLog.journalReconcile(intent: intent,
+                                                 libraryFullyAuthorized: authorized,
+                                                 stillExisting: stillExisting,
+                                                 alreadyLogged: logged) {
+        case .deferUntilReadable:
+            return   // journal left in place
+        case .book(let records):
+            if !records.isEmpty {
+                let recovered = DeletionSession(timestamp: intent.timestamp, records: records)
+                // The history write failed ⇒ the journal is still the only
+                // record of these deletions. Keep it; try again next launch.
+                guard DeletionAuditLog.append(recovered) else { return }
+                journalRecoveredCount = records.count
+            }
+            DeletionAuditLog.clearIntent()
         }
-        DeletionAuditLog.clearIntent()
     }
 
     // MARK: - Scan snapshot (cross-launch persistence)

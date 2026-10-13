@@ -15,9 +15,11 @@ struct AlbumWriteResult {
     /// Live Photo pairing was undetermined. Never a delete bucket — the human
     /// decides in Photos.app (ruling, chodaict, 2026-09-16).
     var needsLook: Int = 0
-    /// Frames REMOVED from the snapsift album they no longer belong to, because
-    /// this scan classified them into the other one. Membership-only; no photo
-    /// is ever deleted (see `removeAssets`).
+    /// Album memberships REMOVED from snapsift's own albums because this sort
+    /// no longer puts the frame there (it became the keeper, was starred or
+    /// edited, its group stopped being an exact duplicate, it moved to the
+    /// other bucket, or it is outside this scan). One per album it left.
+    /// Membership-only; no photo is ever deleted (see `removeAssets`).
     var moved: Int = 0
 }
 
@@ -36,6 +38,9 @@ struct AlbumWriteResult {
 ///   its existing location. Nothing is moved or removed.
 /// - Idempotent: each call resolves the album by title (creating if absent),
 ///   fetches current members, and only adds assets NOT already present.
+/// - Authoritative per sort: a snapsift-owned album ends up holding exactly
+///   what THIS sort concluded — current members that are not this sort's
+///   candidates are taken out (Core `albumMembershipRemovals`).
 ///
 /// The ONLY bucket where a delete suggestion is ever shown in the UI is
 /// `exactDupes` — see Part B in LibraryModel. All other buckets are for
@@ -159,8 +164,8 @@ enum AlbumWriter {
         let blurryAssets  = blurryIDs.compactMap  { assetsByID[$0] }
         let docsAssets    = docsIDs.compactMap    { assetsByID[$0] }
         // Exclusivity across scans (red-team r2 P2-3). Within one write the two
-        // buckets cannot overlap, but the album write is membership-only and
-        // never recomputes what a PREVIOUS run put there: a frame filed under
+        // buckets cannot overlap, but the album write used to be add-only and
+        // never recomputed what a PREVIOUS run put there: a frame filed under
         // "Exact Duplicates" while Full Disk Access was granted reappears under
         // "Needs a look" on a run without it, and Photos.app — the surface this
         // tool deliberately hands the decision to — then shows one photo wearing
@@ -179,34 +184,63 @@ enum AlbumWriter {
             seenNeedsLook.insert(a.localIdentifier)
         }
 
+        // Every snapsift-owned album is AUTHORITATIVE PER SORT (check
+        // 2026-10-11, F1): what is in it now and is not one of this sort's
+        // candidates comes out, BEFORE anything is added, so the final
+        // membership is what this sort believes. Candidates are compared by id,
+        // not by resolved asset — an id we could not resolve is still a
+        // candidate and is left where it is.
+        //
+        // The removals run even when a bucket has no candidates at all: "this
+        // sort found no exact duplicates" has to EMPTY the album labelled safe
+        // to remove, not leave last week's contents under that label.
+        let burstsTitles = allTitles { $0.albumNameBursts() }
+        let blurryTitles = allTitles { $0.albumNameBlurry() }
+        let docsTitles   = allTitles { $0.albumNameDocs() }
+        let exactTitles  = allTitles { $0.albumNameExact() }
+
+        result.moved += try await removeAssets(
+            ids: albumMembershipRemovals(currentMembers: currentMemberIDs(inAlbumTitles: burstsTitles),
+                                         candidates: burstsIDs),
+            fromAlbumTitles: burstsTitles)
+        result.moved += try await removeAssets(
+            ids: albumMembershipRemovals(currentMembers: currentMemberIDs(inAlbumTitles: blurryTitles),
+                                         candidates: blurryIDs),
+            fromAlbumTitles: blurryTitles)
+        result.moved += try await removeAssets(
+            ids: albumMembershipRemovals(currentMembers: currentMemberIDs(inAlbumTitles: docsTitles),
+                                         candidates: docsIDs),
+            fromAlbumTitles: docsTitles)
+
         // Each performChanges block is atomic per album — one block per album
         // keeps the operations small and lets PhotoKit interleave UI updates.
         if !burstsAssets.isEmpty {
             result.bursts = try await addAssets(burstsAssets,
                                                 toAlbumNamed: albumBursts(t),
-                                                candidateTitles: allTitles { $0.albumNameBursts() })
+                                                candidateTitles: burstsTitles)
         }
         if !blurryAssets.isEmpty {
             result.blurry = try await addAssets(blurryAssets,
                                                 toAlbumNamed: albumBlurry(t),
-                                                candidateTitles: allTitles { $0.albumNameBlurry() })
+                                                candidateTitles: blurryTitles)
         }
         if !docsAssets.isEmpty {
             result.documents = try await addAssets(docsAssets,
                                                    toAlbumNamed: albumDocs(t),
-                                                   candidateTitles: allTitles { $0.albumNameDocs() })
+                                                   candidateTitles: docsTitles)
         }
-        // Reconcile FIRST, so the final membership is what this scan believes.
         // `albumBucketPlan` also resolves an (impossible-by-construction)
         // overlap in the protective direction: needs-a-look wins, because a
         // frame we could not classify must never be the one wearing the "safe
         // to remove" label.
         let plan = albumBucketPlan(
-            exactCandidates: exactAssets.map(\.localIdentifier),
-            needsLookCandidates: needsLookAssets.map(\.localIdentifier))
-        result.moved = try await removeAssets(
+            exactCandidates: exactIDs,
+            needsLookCandidates: needsLookIDs + needsLookAssets.map(\.localIdentifier),
+            currentExact: currentMemberIDs(inAlbumTitles: exactTitles),
+            currentNeedsLook: currentMemberIDs(inAlbumTitles: allNeedsLookTitles))
+        result.moved += try await removeAssets(
             ids: plan.exactRemove,
-            fromAlbumTitles: allTitles { $0.albumNameExact() })
+            fromAlbumTitles: exactTitles)
         result.moved += try await removeAssets(
             ids: plan.needsLookRemove,
             fromAlbumTitles: allNeedsLookTitles)
@@ -216,7 +250,7 @@ enum AlbumWriter {
         if !exactAddAssets.isEmpty {
             result.exactDupes = try await addAssets(exactAddAssets,
                                                     toAlbumNamed: albumExact(t),
-                                                    candidateTitles: allTitles { $0.albumNameExact() })
+                                                    candidateTitles: exactTitles)
         }
         if !needsLookAssets.isEmpty {
             result.needsLook = try await addAssets(needsLookAssets,
@@ -292,13 +326,12 @@ enum AlbumWriter {
         groups: [ReviewGroup],
         exactGroups: Set<ReviewGroup.ID>
     ) -> [String] {
+        // Core `exactAlbumCandidates` is the rule (and what the test suite
+        // runs): not the keeper, deletable, and NOTHING from a group whose
+        // keeper is not one of its own frames.
         groups
             .filter { exactGroups.contains($0.id) }
-            .flatMap { g in
-                g.photos
-                    .filter { $0.uuid != g.keeperID && $0.isDeletable }
-                    .map(\.uuid)
-            }
+            .flatMap { exactAlbumCandidates(photos: $0.photos, keeperID: $0.keeperID) }
     }
 
     /// Every frame whose protection could not be determined AT ALL —
@@ -320,6 +353,28 @@ enum AlbumWriter {
     }
 
     // MARK: - PhotoKit helpers (idempotent add / bucket reconciliation)
+
+    /// The ids currently in snapsift's OWN album(s) for one bucket — the
+    /// `currentMembers` that Core `albumMembershipRemovals` reconciles against.
+    ///
+    /// Resolved exactly as `removeAssets` and `addAssets` resolve it: regular
+    /// albums whose title is one of snapsift's own (`candidateTitles`, every
+    /// language plus retired names). That title match is the whole guard — a
+    /// user album is never read here, so it can never be reconciled; a snapsift
+    /// album the user renamed is not found and is left alone. Read-only.
+    private static func currentMemberIDs(inAlbumTitles candidateTitles: [String]) -> Set<String> {
+        let o = PHFetchOptions()
+        o.predicate = NSPredicate(format: "localizedTitle IN %@", candidateTitles)
+        let albums = PHAssetCollection.fetchAssetCollections(
+            with: .album, subtype: .albumRegular, options: o)
+        var ids = Set<String>()
+        albums.enumerateObjects { album, _, _ in
+            PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { a, _, _ in
+                ids.insert(a.localIdentifier)
+            }
+        }
+        return ids
+    }
 
     /// Remove `ids` from a snapsift-owned album, if that album exists and any of
     /// them are actually in it. Returns how many memberships were removed.

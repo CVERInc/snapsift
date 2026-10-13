@@ -199,6 +199,35 @@ public struct DeletionAuditLog: Sendable {
         }
     }
 
+    /// What to do with a journal found at launch.
+    public enum JournalReconcile {
+        /// The library cannot be read in full right now. Book nothing and
+        /// LEAVE THE JOURNAL where it is, for a launch that can see.
+        case deferUntilReadable
+        /// The library was read: book these (possibly none), then clear.
+        case book([DeletionRecord])
+    }
+
+    /// "Cannot see" is not "gone" (check 2026-10-11, F2).
+    ///
+    /// `recoverableRecords` books every journalled asset the live fetch did not
+    /// return. That is only evidence of a deletion if the fetch COULD have
+    /// returned it: without full read-write authorization (not determined,
+    /// denied, restricted, or LIMITED — a limited library hides everything
+    /// outside the user's selection) PhotoKit answers with nothing, and the
+    /// history would record a whole session of photos as deleted that are all
+    /// still there, then clear the only evidence. So: no full authorization ⇒
+    /// defer, and the fetch result is not even consulted.
+    public static func journalReconcile(intent: DeletionSession,
+                                        libraryFullyAuthorized: Bool,
+                                        stillExisting: Set<String>,
+                                        alreadyLogged: Set<String>) -> JournalReconcile {
+        guard libraryFullyAuthorized else { return .deferUntilReadable }
+        return .book(recoverableRecords(from: intent,
+                                        stillExisting: stillExisting,
+                                        alreadyLogged: alreadyLogged))
+    }
+
     /// Asset ids already present in the log — the dedupe key for reconciliation.
     public static func loggedAssetIdentifiers(from sessions: [DeletionSession]) -> Set<String> {
         Set(sessions.flatMap { $0.records.map(\.assetIdentifier) })
