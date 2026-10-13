@@ -1234,7 +1234,8 @@ struct L10n: Sendable {
         }
     }
     func albumsWritten(bursts: Int, blurry: Int, docs: Int, exact: Int, needsLook: Int,
-                       moved: Int = 0, movedReason: AlbumMoveReason? = nil) -> String {
+                       moved: Int = 0, movedReason: AlbumMoveReason? = nil,
+                       adoptedExisting: Int = 0) -> String {
         // Compact summary: "Sorted into albums · 12 bursts, 3 blurry, 1 exact dup"
         var parts: [String] = []
         if bursts > 0 { parts.append(albumsWrittenBursts(bursts)) }
@@ -1255,7 +1256,12 @@ struct L10n: Sendable {
         case .en:         sep = ", "
         case .ja, .zhTW:  sep = "、"
         }
-        let summary = parts.isEmpty ? albumsNothingNew() : parts.joined(separator: sep)
+        var summary = parts.isEmpty ? albumsNothingNew() : parts.joined(separator: sep)
+        // The adoption sentence is NOT appended here: this summary is a banner
+        // that disappears after about three seconds, and that sentence is an
+        // instruction. It is shown in the persistent notice bar instead (see
+        // `albumsAdoptedExisting` and ContentView.runWriteAlbums).
+        _ = adoptedExisting
         switch language {
         case .en:   return "Sorted into albums · \(summary)"
         case .ja:   return "アルバムに仕分け完了 · \(summary)"
@@ -1290,6 +1296,20 @@ struct L10n: Sendable {
         case .en:   return "\(n) taken out of a Snapsift album: no longer confirmed since your library changed. Scan again to re-check (the photo\(n == 1 ? " stays" : "s stay") in your library)"
         case .ja:   return "\(n)枚を Snapsift アルバムから外しました。ライブラリが変わったため、確認が取れていません。もう一度スキャンすると判定し直します（写真はライブラリに残ります）"
         case .zhTW: return "有 \(n) 張從 Snapsift 相簿移出：圖庫變動後還沒重新確認，再掃描一次就會重新判定（照片仍在圖庫裡）"
+        }
+    }
+
+    /// The sort found a Snapsift-titled album it has no record of, with photos
+    /// already in it. They were filed by an earlier version (or by the user);
+    /// nothing proves which, so they are never taken out automatically — and
+    /// the user is told so, with the one way to get an album that is kept up.
+    /// Shown once, in the persistent notice bar, on the sort that adopts an
+    /// existing non-empty Snapsift album (Core `albumWasAdoptedNonEmpty`).
+    func albumsAdoptedExisting(_ n: Int) -> String {
+        switch language {
+        case .en:   return "The \(n) photo\(n == 1 ? "" : "s") already in your Snapsift albums \(n == 1 ? "was" : "were") filed earlier and will not be taken out automatically. For albums that follow later changes, delete the album (not the photos) and sort again."
+        case .ja:   return "Snapsift アルバムに以前からある\(n)枚は、自動では外されません。今後の変更に合わせたいときは、アルバムを削除して（写真は削除せずに）もう一度仕分けてください。"
+        case .zhTW: return "Snapsift 相簿裡原有的 \(n) 張是之前放的，不會自動移出。想讓相簿跟著之後的變動更新，請刪除相簿（不是照片）再整理一次。"
         }
     }
 

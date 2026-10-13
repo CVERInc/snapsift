@@ -112,6 +112,9 @@ struct CategoryBucket: Identifiable {
 /// thumbnail vending, and native (recoverable) deletion.
 @MainActor
 final class LibraryModel: ObservableObject {
+    /// Set by `writeAlbums` on the one sort that adopts an existing non-empty
+    /// Snapsift album; the view moves it into its persistent notice bar.
+    var lastAlbumAdoptionNotice: String?
     @Published var auth = PHPhotoLibrary.authorizationStatus(for: .readWrite) {
         // A journal deferred at launch for lack of access must not have to
         // wait for a relaunch (review P2-1): whenever the answer changes, ask
@@ -2388,11 +2391,14 @@ final class LibraryModel: ObservableObject {
             .union(filedBefore)
         restampTokenAfterOwnWrite(wasCurrent: wasCurrent, ourIDs: ourIDs)
         saveSnapshotNow()
+        lastAlbumAdoptionNotice = result.adoptedExisting > 0
+            ? t.albumsAdoptedExisting(result.adoptedExisting) : nil
         return t.albumsWritten(bursts: result.bursts, blurry: result.blurry,
                                docs: result.documents, exact: result.exactDupes,
                                needsLook: result.needsLook, moved: result.moved,
                                movedReason: albumMoveReason(moved: result.moved,
-                                                            resultsRestoredStale: resultsRestoredStale))
+                                                            resultsRestoredStale: resultsRestoredStale),
+                               adoptedExisting: result.adoptedExisting)
     }
 
     /// Delete every reviewed non-keeper, non-favorite frame via PhotoKit. macOS

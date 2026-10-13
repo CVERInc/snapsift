@@ -21,6 +21,10 @@ struct AlbumWriteResult {
     /// other bucket). Never a frame the scan did not look at. One per album.
     /// Membership-only; no photo is ever deleted (see `removeAssets`).
     var moved: Int = 0
+    /// Photos that were ALREADY in a Snapsift-titled album this sort adopted
+    /// by title (Core `albumWasAdoptedNonEmpty`): not in the ledger, so never
+    /// taken out automatically. Non-zero on the adopting sort only.
+    var adoptedExisting: Int = 0
 }
 
 // MARK: - AlbumWriter
@@ -188,7 +192,12 @@ enum AlbumWriter {
             }
             let album = recorded ?? albumByTitle(titles(for: bucket), preferring: name(for: bucket, t))
             albums[bucket] = album
-            members[bucket] = album.map(memberIDs(of:)) ?? []
+            let current = album.map(memberIDs(of:)) ?? []
+            members[bucket] = current
+            if albumWasAdoptedNonEmpty(resolution: resolutions[bucket] ?? .byTitle,
+                                       albumExists: album != nil, memberCount: current.count) {
+                result.adoptedExisting += current.count
+            }
         }
 
         // 2. Which of the ids Core asks about still exist (exact keepers and
@@ -230,7 +239,9 @@ enum AlbumWriter {
                 case .needsLook: result.needsLook = outcome.added
                 }
             }
-            ledger = albumLedger(ledger, applying: step, collectionID: collectionID,
+            ledger = albumLedger(ledger, applying: step,
+                                 added: Set(assets.map(\.localIdentifier)),
+                                 collectionID: collectionID,
                                  currentMembers: before)
         }
         return result

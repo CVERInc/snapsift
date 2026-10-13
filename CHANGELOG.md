@@ -41,7 +41,11 @@ reserved for the first signed and notarized build.
   - **Photos filed by earlier versions are not in the record, so they are never
     taken out automatically.** They stay in the album until you remove them
     yourself. The same goes for photos that were already in an album when
-    Snapsift first found it.
+    Snapsift first found it. The first sort that meets such an album says so
+    once, with the way out: delete the album (not the photos) and sort again.
+  - If you open the library with an older build of Snapsift and it saves, the
+    record is dropped: albums go back to add-only until the next sort files
+    photos again.
 - **A click on a photo no longer changes anything.** It moves the focus there.
   To keep or cross out with the mouse, use the two round buttons that appear on
   the focused photo, or right-click. Double-click opens the preview.

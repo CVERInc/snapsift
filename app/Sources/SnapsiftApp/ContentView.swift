@@ -1823,6 +1823,11 @@ struct ContentView: View {
         do {
             let msg = try await model.writeAlbums(t)
             showBanner(msg)
+            // An instruction must not vanish with the banner: persistent bar.
+            if let notice = model.lastAlbumAdoptionNotice {
+                commitNotice = notice
+                model.lastAlbumAdoptionNotice = nil
+            }
         } catch {
             albumErrorMessage = error.localizedDescription
         }

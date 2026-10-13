@@ -104,7 +104,12 @@ public func albumLivenessQuery(groups: [AlbumSortGroup], ledger: AlbumLedger) ->
 /// performed on (nil if none exists and none was created). `currentMembers` =
 /// that album's members BEFORE the step: a filed id the user has since taken
 /// out by hand is forgotten, so putting it back by hand makes it hers.
+/// `added` = the ids the writer could actually resolve to a photo and hand to
+/// PhotoKit. NOT `step.add`: the plan may name an id that no longer resolves
+/// (deleted since the scan), and recording that as "filed by us" would let a
+/// later sort take out a photo the user put there herself (review P3-9).
 public func albumLedger(_ ledger: AlbumLedger, applying step: AlbumStep,
+                        added: Set<String>,
                         collectionID: String?, currentMembers: Set<String>) -> AlbumLedger {
     var album: AlbumLedger.Album
     switch step.resolution {
@@ -119,13 +124,26 @@ public func albumLedger(_ ledger: AlbumLedger, applying step: AlbumStep,
     // in an adopted namesake album that is every photo the user put there.
     // And nothing is recorded as filed in an album we cannot name.
     if album.collectionID != nil {
-        for id in step.add where album.filed[id] != nil || !currentMembers.contains(id) {
+        for id in step.add where album.filed[id] != nil
+            || (added.contains(id) && !currentMembers.contains(id)) {
             album.filed[id] = AlbumLedger.Filed(twin: step.twins[id])
         }
     }
     var out = ledger
     out.albums[step.bucket.ledgerKey] = album
     return out
+}
+
+/// Did this sort just ADOPT, by title, an album that already had photos in it?
+///
+/// Those photos are not in the ledger (an earlier version filed them, or the
+/// user did), so snapsift will never take them out — and the album may be the
+/// one labelled "safe to delete". That has to be said, once: the sort that
+/// adopts records the album, every later sort resolves it as `.recorded`, and
+/// this is false from then on.
+public func albumWasAdoptedNonEmpty(resolution: AlbumResolution, albumExists: Bool,
+                                    memberCount: Int) -> Bool {
+    resolution == .byTitle && albumExists && memberCount > 0
 }
 
 // MARK: - Scan snapshot (the on-disk shape)

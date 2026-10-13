@@ -2630,6 +2630,7 @@ do {
         var collections: [String: Set<String>] = [:]     // collection id → members
         var titled: [AlbumBucket: String] = [:]          // what a title lookup finds
         var library: Set<String> = []                    // asset ids that exist
+        var unresolvable: Set<String> = []               // ids the writer cannot turn into a photo
         var ledger = AlbumLedger()
         var created = 0
         mutating func sort(_ groups: [AlbumSortGroup], kind: AlbumScanKind?) -> Int {
@@ -2651,11 +2652,13 @@ do {
                 let before = id.flatMap { collections[$0] } ?? []
                 if let cid = id { collections[cid] = before.subtracting(step.remove) }
                 moved += before.intersection(step.remove).count
-                if !step.add.isEmpty {
+                let added = Set(step.add).subtracting(unresolvable)      // what the writer resolves
+                if !added.isEmpty {
                     if id == nil { created += 1; id = "new-\(created)"; collections[id!] = [] }
-                    collections[id!]!.formUnion(step.add)
+                    collections[id!]!.formUnion(added)
                 }
-                ledger = albumLedger(ledger, applying: step, collectionID: id, currentMembers: before)
+                ledger = albumLedger(ledger, applying: step, added: added,
+                                     collectionID: id, currentMembers: before)
             }
             return moved
         }
@@ -2778,6 +2781,43 @@ do {
     moved = w7.sort([grp(pair, keeper: "U1")], kind: .burst)
     check(moved == 0 && w7.collections["old"] == ["U1", "U2", "E1", "E2"],
           "pre-ledger members (even this scan's new keeper U1) are never removed; only U2 is filed")
+
+    // 8. The plan asks to add {U2, U3}; only U2 resolves to a photo (P3-9).
+    var w8 = World()
+    w8.library = ["U1", "U2", "U3"]
+    w8.unresolvable = ["U3"]
+    _ = w8.sort([grp([ph(1, 0), ph(2, 1), ph(3, 2)], keeper: "U1")], kind: .burst)
+    check(w8.exact() == ["U2"] && Set(w8.ledger.album(.exact).filed.keys) == ["U2"],
+          "plan adds {U2, U3}, only U2 resolves ⇒ the ledger records {U2}, not what was asked for")
+    w8.collections[w8.ledger.album(.exact).collectionID!]!.insert("U3")      // she puts U3 there herself
+    moved = w8.sort([grp([ph(1, 0), ph(2, 1), ph(3, 2, fav: true)], keeper: "U1")], kind: .burst)
+    check(moved == 0 && w8.exact() == ["U2", "U3"],
+          "…so the U3 she added by hand is hers: judged, not a candidate, and still not taken out")
+
+    // 9. When to tell the user an adopted album's old contents are not maintained.
+    let adoptTable: [(AlbumResolution, Bool, Int, Bool)] = [
+        (.byTitle, true, 3, true),            // found by title, photos already in it
+        (.byTitle, true, 0, false),           // found, empty: nothing to warn about
+        (.byTitle, false, 0, false),          // none exists: it will be created
+        (.byTitle, false, 3, false),          // (count without an album is meaningless)
+        (.recorded("c"), true, 3, false),     // ours by record — every later sort
+        (.recorded("c"), true, 0, false),
+    ]
+    for (res, exists, n, want) in adoptTable {
+        check(albumWasAdoptedNonEmpty(resolution: res, albumExists: exists, memberCount: n) == want,
+              "\(res) exists=\(exists) members=\(n) ⇒ \(want ? "say it" : "say nothing")")
+    }
+    // …and it is once: the adopting sort records the album, so the next resolves as recorded.
+    var w9 = World()
+    w9.collections["old"] = ["E1", "E2"]
+    w9.titled[.exact] = "old"
+    w9.library = ["U1", "U2"]
+    let firstRes = albumResolution(recordedID: w9.ledger.album(.exact).collectionID) { w9.collections[$0] != nil }
+    _ = w9.sort([], kind: .similarSets)                       // even a sort that adds nothing adopts
+    let secondRes = albumResolution(recordedID: w9.ledger.album(.exact).collectionID) { w9.collections[$0] != nil }
+    check(albumWasAdoptedNonEmpty(resolution: firstRes, albumExists: true, memberCount: 2)
+            && !albumWasAdoptedNonEmpty(resolution: secondRes, albumExists: true, memberCount: 2),
+          "the notice fires on the adopting sort and never again for that album")
 
     // Rule tables.
     check(albumResolution(recordedID: nil, resolves: { _ in true }) == .byTitle
