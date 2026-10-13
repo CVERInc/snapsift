@@ -7,6 +7,10 @@ import SnapsiftCore
 // Exits non-zero on any failure so it can gate CI. Mirrors the Python pytest
 // suite case-for-case (tests/test_cluster.py, test_pick.py, test_hash.py).
 
+// Line-buffered: CI pipes stdout, and a block buffer would hide every check
+// after the last flush when a test hangs.
+setvbuf(stdout, nil, _IOLBF, 0)
+
 var failures = 0
 func check(_ condition: Bool, _ label: String) {
     print(condition ? "  ✓ \(label)" : "  ✗ \(label)")
