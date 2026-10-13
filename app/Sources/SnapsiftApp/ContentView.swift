@@ -686,14 +686,12 @@ struct ContentView: View {
     /// old j/k/l/h vim aliases are gone for exactly that reason.
     private func handleListKey(_ kp: KeyPress, _ proxy: ScrollViewProxy) -> KeyPress.Result {
         guard !deleting else { return .handled }   // input locked mid-delete
-        // ⌘ / ⌃ / ⌥ never reach a verb (Core `isPlainVerbKey`). The menu
+        // ⌘ / ⌃ / ⌥ never reach a verb (Core `VerbKeyPress`). The menu
         // Commands (⌘⌫, ⌘⏎, ⌘1…, ⇧⌘R) are registered key equivalents and do
         // not come through here; but a DISABLED one is not consumed, and its
         // key press used to land on the plain verb below — ⌘⌫ with nothing
         // marked crossed out the focused photo. Shift stays (⇧X ⇧K ⇧R).
-        guard isPlainVerbKey(command: kp.modifiers.contains(.command),
-                             control: kp.modifiers.contains(.control),
-                             option: kp.modifiers.contains(.option)) else { return .ignored }
+        guard verbPress(kp) != nil else { return .ignored }
         if kp.characters == "?" { toggleHelp(); return .handled }
         switch kp.key {
         case .upArrow:    moveSelection(-1, proxy); return .handled
@@ -720,6 +718,17 @@ struct ContentView: View {
         }
     }
 
+    /// The ONLY way a key press becomes a verb: nil when it carries ⌘ ⌃ or ⌥.
+    /// The verb helpers below take the `VerbKeyPress` this returns, not raw
+    /// modifiers, so they cannot be reached around it.
+    private func verbPress(_ kp: KeyPress) -> VerbKeyPress? {
+        VerbKeyPress(command: kp.modifiers.contains(.command),
+                     control: kp.modifiers.contains(.control),
+                     option: kp.modifiers.contains(.option),
+                     shift: kp.modifiers.contains(.shift),
+                     isRepeat: kp.phase == .repeat)
+    }
+
     private func pickNth(_ i: Int) {
         guard let g = selectedGroup, i >= 0, i < g.photos.count else { return }
         model.promote(group: g.id, to: g.photos[i].uuid)
@@ -737,14 +746,12 @@ struct ContentView: View {
 
     private func handleGridKey(_ kp: KeyPress) -> KeyPress.Result {
         guard !deleting else { return .handled }   // input locked mid-delete
-        // ⌘ / ⌃ / ⌥ never reach a verb (Core `isPlainVerbKey`). The menu
+        // ⌘ / ⌃ / ⌥ never reach a verb (Core `VerbKeyPress`). The menu
         // Commands (⌘⌫, ⌘⏎, ⌘1…, ⇧⌘R) are registered key equivalents and do
         // not come through here; but a DISABLED one is not consumed, and its
         // key press used to land on the plain verb below — ⌘⌫ with nothing
         // marked crossed out the focused photo. Shift stays (⇧X ⇧K ⇧R).
-        guard isPlainVerbKey(command: kp.modifiers.contains(.command),
-                             control: kp.modifiers.contains(.control),
-                             option: kp.modifiers.contains(.option)) else { return .ignored }
+        guard let press = verbPress(kp) else { return .ignored }
         if kp.characters == "?" { toggleHelp(); return .handled }
         guard let g = selectedGroup else { return .ignored }
 
@@ -773,7 +780,7 @@ struct ContentView: View {
             if let f = focusedFrame { previewID = f; loupeOpen = true }
             return .handled
         case .delete:
-            handleRejectKey(g, modifiers: kp.modifiers); return .handled
+            handleRejectKey(g, press); return .handled
         default: break
         }
         switch kp.characters {
@@ -786,14 +793,14 @@ struct ContentView: View {
             if withheld > 0 { showBanner(t.bulkRejectWithheld(withheld)) }
             return .handled
         case "k", "K":
-            handleKeepKey(g, modifiers: kp.modifiers, isRepeat: kp.phase == .repeat); return .handled
+            handleKeepKey(g, press); return .handled
         case "x", "X":
-            handleRejectKey(g, modifiers: kp.modifiers); return .handled
+            handleRejectKey(g, press); return .handled
         // FIX 3: display-only rotate. R = clockwise, ⇧R = counter-clockwise.
         // ⇧⌘R (save the turn) is the save button's own `.keyboardShortcut`,
         // not a case here: ⌘-modified presses never reach this switch.
         case "r", "R":
-            handleRotateKey(modifiers: kp.modifiers); return .handled
+            handleRotateKey(press); return .handled
         // 1–9 crown the nth frame — the same number the card badges advertise.
         case let c where c.count == 1 && c.first!.isNumber:
             if let n = Int(c), n >= 1, n <= g.photos.count {
@@ -809,9 +816,7 @@ struct ContentView: View {
     private func handleLoupeKey(_ kp: KeyPress, _ g: ReviewGroup) -> KeyPress.Result {
         // Reached through `handleGridKey`, which already checked — repeated so
         // this handler is safe on its own if it is ever bound directly.
-        guard isPlainVerbKey(command: kp.modifiers.contains(.command),
-                             control: kp.modifiers.contains(.control),
-                             option: kp.modifiers.contains(.option)) else { return .ignored }
+        guard let press = verbPress(kp) else { return .ignored }
         // Full nav parity with the grid: ↑/↓ work here too, so muscle memory
         // doesn't break the moment the loupe opens. (One photo at a time means
         // there are no ROWS to walk here — all four arrows are prev/next.)
@@ -826,19 +831,19 @@ struct ContentView: View {
             // key that opened this overlay doesn't beep inside it.
             return .handled
         case .delete:
-            handleRejectKey(g, modifiers: kp.modifiers); return .handled
+            handleRejectKey(g, press); return .handled
         default: break
         }
         switch kp.characters {
         case " ":
             loupeOpen = false; previewID = nil; return .handled
         case "k", "K":
-            handleKeepKey(g, modifiers: kp.modifiers, isRepeat: kp.phase == .repeat); return .handled
+            handleKeepKey(g, press); return .handled
         case "x", "X":
-            handleRejectKey(g, modifiers: kp.modifiers); return .handled
+            handleRejectKey(g, press); return .handled
         // FIX 3: display-only rotate works in the loupe too (⇧⌘R: see the grid).
         case "r", "R":
-            handleRotateKey(modifiers: kp.modifiers); return .handled
+            handleRotateKey(press); return .handled
         // 1–9 crown the nth frame (the loupe follows focusedFrame to it).
         case let c where c.count == 1 && c.first!.isNumber:
             if let n = Int(c), n >= 1, n <= g.photos.count {
@@ -854,9 +859,9 @@ struct ContentView: View {
     /// R = 90° clockwise, ⇧R = 90° counter-clockwise. Session-only (never written
     /// back to Photos — that is the Pass 2b hook). Works in grid and loupe; the
     /// justified layout reflows because the rotated aspect is recomputed.
-    private func handleRotateKey(modifiers: EventModifiers) {
+    private func handleRotateKey(_ press: VerbKeyPress) {
         guard let f = focusedFrame else { return }
-        model.rotate(frameID: f, clockwise: !modifiers.contains(.shift))
+        model.rotate(frameID: f, clockwise: !press.shift)
     }
 
     /// SPEC §2 verb: K nominates the FOCUSED frame as the one this group keeps
@@ -903,13 +908,13 @@ struct ContentView: View {
     /// with Core `bulkRejectCandidates`, so there is nothing to consent to. And
     /// like plain K it is not blocked on the focused frame's own protection —
     /// keeping a favorite is the outcome protection exists to produce.
-    private func handleKeepKey(_ g: ReviewGroup, modifiers: EventModifiers, isRepeat: Bool) {
+    private func handleKeepKey(_ g: ReviewGroup, _ press: VerbKeyPress) {
         guard let f = focusedFrame else { return }
-        if modifiers.contains(.shift) {
-            guard !isRepeat else { return }
-            if model.keepOnly(group: g.id, frame: f) { showBanner(t.keepOnlyUndone()) }
-        } else {
-            model.promote(group: g.id, to: f)
+        // Core decides which K this is (and swallows a held ⇧K).
+        switch press.keepVerb {
+        case .nominate: model.promote(group: g.id, to: f)
+        case .keepOnly: if model.keepOnly(group: g.id, frame: f) { showBanner(t.keepOnlyUndone()) }
+        case .swallow:  break
         }
     }
 
@@ -919,10 +924,10 @@ struct ContentView: View {
     /// An UNVERIFIABLE frame has no ⇧X override (there is no fact to consent
     /// to overriding — `Photo.isUnverifiable`), so ⇧X on one falls through to
     /// the same blocked-toggle branch plain X uses, and shows the same hint.
-    private func handleRejectKey(_ g: ReviewGroup, modifiers: EventModifiers) {
+    private func handleRejectKey(_ g: ReviewGroup, _ press: VerbKeyPress) {
         guard let f = focusedFrame else { return }
         guard let p = g.photos.first(where: { $0.uuid == f }) else { return }
-        let isShift = modifiers.contains(.shift)
+        let isShift = press.shift
         if isShift && p.isProtected {
             // ⇧X path: force-reject a protected frame.
             // Already force-rejected → ⇧X toggles it back out. Un-marking

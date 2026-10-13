@@ -2005,10 +2005,12 @@ do {
     // ACROSS scans: the album write only ever added, so a frame filed under
     // "Exact Duplicates" on a run with Full Disk Access stayed there when the
     // next run classified it as unreadable and put it in "Needs a look".
+    let all: Set<String> = ["A", "B", "C", "D", "X"]
     let plan = albumBucketPlan(exactCandidates: ["A", "B"],
                                needsLookCandidates: ["C", "D"],
                                currentExact: ["A", "C", "D"],
-                               currentNeedsLook: ["A", "B", "D"])
+                               currentNeedsLook: ["A", "B", "D"],
+                               exactWorkingSet: all, needsLookWorkingSet: all)
     check(plan.exactAdd == ["A", "B"] && plan.needsLookAdd == ["C", "D"],
           "each frame is added to the bucket this scan puts it in")
     check(plan.exactRemove == ["C", "D"],
@@ -2019,92 +2021,160 @@ do {
     // Overlap must be impossible upstream; if it ever happens, the frame we
     // could not classify must not be the one wearing "safe to remove".
     let bad = albumBucketPlan(exactCandidates: ["A", "X"], needsLookCandidates: ["X"],
-                              currentExact: ["A", "X"], currentNeedsLook: ["X"])
+                              currentExact: ["A", "X"], currentNeedsLook: ["X"],
+                              exactWorkingSet: all, needsLookWorkingSet: all)
     check(bad.exactAdd == ["A"],
           "an overlapping frame is dropped from the exact-duplicate bucket")
     check(bad.exactRemove.contains("X") && !bad.needsLookRemove.contains("X"),
           "…and removed from it: unknown ⇒ protected wins the tie")
     check(bad.needsLookAdd == ["X"], "…while Needs a look keeps it")
 
-    // Nothing in the albums yet — nothing to take out.
     let fresh = albumBucketPlan(exactCandidates: ["A"], needsLookCandidates: [],
-                                currentExact: [], currentNeedsLook: [])
+                                currentExact: [], currentNeedsLook: [],
+                                exactWorkingSet: all, needsLookWorkingSet: all)
     check(fresh.exactRemove.isEmpty && fresh.needsLookRemove.isEmpty,
           "empty albums ⇒ no removals")
     // NEGATIVE CONTROL: return `exactCandidates` unfiltered from albumBucketPlan
     // and "an overlapping frame is dropped…" fails with ["A","X"].
 }
 
-print("Snapsift albums are authoritative per sort (check 2026-10-11 F1)")
+print("Snapsift albums: authoritative over what the scan looked at (F1, review P1-1)")
 do {
-    // A model of what AlbumWriter does with a plan, so the INVARIANT is
-    // checked on the album's resulting contents and not on the plan's shape:
-    // take out `exactRemove`, then add `exactAdd`.
-    struct G { var photos: [Photo]; var keeperID: String; var exact: Bool }
-    func sort(_ groups: [G], album: Set<String>) -> (album: Set<String>, moved: Int) {
-        let candidates = groups.filter(\.exact)
-            .flatMap { exactAlbumCandidates(photos: $0.photos, keeperID: $0.keeperID) }
-        let plan = albumBucketPlan(exactCandidates: candidates, needsLookCandidates: [],
-                                   currentExact: album, currentNeedsLook: [])
-        return (album.subtracting(plan.exactRemove).union(plan.exactAdd), plan.exactRemove.count)
+    // The double for AlbumWriter is as thin as AlbumWriter now is: it executes
+    // the steps `albumSortPlan` returns — the SAME function, selectors and all,
+    // that the app executes — on all five albums, for any scan kind.
+    typealias Albums = [AlbumBucket: Set<String>]
+    func sort(_ groups: [AlbumSortGroup], kind: AlbumScanKind?, extras: [String] = [],
+              _ albums: Albums) -> (albums: Albums, moved: Int) {
+        let steps = albumSortPlan(groups: groups, scanKind: kind, extraNeedsLookIDs: extras,
+                                  currentMembers: { albums[$0] ?? [] })
+        var out = albums
+        var moved = 0
+        for step in steps {
+            out[step.bucket] = (out[step.bucket] ?? []).subtracting(step.remove).union(step.add)
+            moved += step.remove.count
+        }
+        return (out, moved)
     }
-    /// The two things the album labelled "safe to remove" must never be.
-    func invariantHolds(_ groups: [G], _ album: Set<String>) -> Bool {
-        groups.allSatisfy { g in
-            !album.contains(g.keeperID)
-                && !g.photos.allSatisfy { album.contains($0.uuid) }
+    func grp(_ photos: [Photo], keeper: String, exact: Bool) -> AlbumSortGroup {
+        AlbumSortGroup(photos: photos, keeperID: keeper, rejected: [],
+                       includeProtected: false, isExact: exact)
+    }
+    /// The two things the album labelled "safe to remove" must never be, for
+    /// every group the scan looked at.
+    func invariantHolds(_ groups: [AlbumSortGroup], _ albums: Albums) -> Bool {
+        let exact = albums[.exact] ?? []
+        return groups.allSatisfy { g in
+            !exact.contains(g.keeperID) && !g.photos.allSatisfy { exact.contains($0.uuid) }
         }
     }
+    func exact(_ a: Albums) -> Set<String> { a[.exact] ?? [] }
 
-    // THE scenario: {A keeper, B} sorted; the owner picks B instead; sorted again.
-    var g = G(photos: [ph(1, 0), ph(2, 1)], keeperID: "U1", exact: true)
-    var state = sort([g], album: [])
-    check(state.album == ["U2"] && state.moved == 0, "first sort: the non-keeper copy is filed")
-    g.keeperID = "U2"
-    state = sort([g], album: state.album)
-    check(state.album == ["U1"],
+    // 1. THE scenario: {U1 keeper, U2} sorted; the owner picks U2; sorted again.
+    let pair = [ph(1, 0), ph(2, 1)]
+    var state = sort([grp(pair, keeper: "U1", exact: true)], kind: .burst, [:])
+    check(exact(state.albums) == ["U2"] && state.moved == 0, "first sort: the non-keeper copy is filed")
+    let flipped = [grp(pair, keeper: "U2", exact: true)]
+    state = sort(flipped, kind: .burst, state.albums)
+    check(exact(state.albums) == ["U1"],
           "keeper flipped, sorted again ⇒ album = {old keeper}; the new keeper LEFT it")
-    check(state.moved == 1, "…and that one removal is counted, for the banner")
-    check(invariantHolds([g], state.album),
+    check(state.moved == 1, "…and that one removal is what the banner counts")
+    check(invariantHolds(flipped, state.albums),
           "the album never holds a group's keeper, nor every frame of a group")
+    let afterFlip = state.albums
 
-    // Every other way a member stops being a candidate between two sorts.
+    // 2. A scan kind with NO exact pass, then sort: nothing leaves any album.
+    let filed: Albums = [.exact: ["U1", "E9"], .bursts: ["B9"], .blurry: ["L9"],
+                         .documents: ["D9"], .needsLook: ["N9"]]
+    let sets = sort([], kind: .similarSets, extras: ["V1"], filed)
+    check(sets.moved == 0, "similar-sets scan + sort ⇒ 0 removals")
+    check(exact(sets.albums) == ["U1", "E9"], "…Exact Duplicates is exactly as it was")
+    check(sets.albums[.needsLook] == ["N9", "V1"],
+          "…and it still ADDS what it owes (the unpaired Live Photo video)")
+    // Even if such a scan somehow carried groups, it reached no verdict on them.
+    for kind in [AlbumScanKind.similarSets, nil] {
+        let hostile = sort([grp(pair, keeper: "U1", exact: false)], kind: kind, afterFlip)
+        check(exact(hostile.albums).contains("U1") && hostile.moved == 0,
+              "kind \(kind.map { $0.rawValue } ?? "unknown") removes nothing, groups or not")
+    }
+    for bucket in AlbumBucket.allCases {
+        check(scanKindFeeds(.burst, bucket) && scanKindFeeds(.lookAlikes, bucket)
+                && !scanKindFeeds(.similarSets, bucket) && !scanKindFeeds(nil, bucket),
+              "\(bucket): fed by burst and look-alike scans only")
+    }
+
+    // 3. A scan that DID look at the group and no longer calls it exact: the
+    //    frame leaves "safe to remove" and is filed for review instead.
+    let demoted = sort([grp(pair, keeper: "U2", exact: false)], kind: .lookAlikes, afterFlip)
+    check(exact(demoted.albums).isEmpty && demoted.albums[.bursts] == ["U1"] && demoted.moved == 1,
+          "group no longer exact ⇒ out of Exact Duplicates, into the review album")
+
+    // 4. Narrow scope: members the scan never looked at stay, in every album.
+    let wide: Albums = [.exact: ["U2", "OUT1", "OUT2"], .bursts: ["OUT3"],
+                        .documents: ["OUT4"], .needsLook: ["OUT5"], .blurry: ["OUT6"]]
+    let narrow = sort(flipped, kind: .burst, wide)
+    check(exact(narrow.albums) == ["U1", "OUT1", "OUT2"],
+          "narrow scan: the re-evaluated frame is corrected, out-of-scope members stay")
+    check(narrow.albums[.bursts] == ["OUT3"] && narrow.albums[.documents] == ["OUT4"]
+            && narrow.albums[.needsLook] == ["OUT5"] && narrow.albums[.blurry] == ["OUT6"],
+          "…in all five albums")
+    check(narrow.moved == 1, "…and the banner counts only what this scan re-evaluated")
+    check(invariantHolds(flipped, narrow.albums), "…invariant holds for every group in the working set")
+
+    // 5. Every other way a member stops being a candidate between two sorts,
+    //    with out-of-scope members present throughout.
     let three = [ph(1, 0), ph(2, 1), ph(3, 2)]
-    let before = sort([G(photos: three, keeperID: "U1", exact: true)], album: [])
-    check(before.album == ["U2", "U3"], "three copies: the two non-keepers are filed")
-    let cases: [(String, G, Set<String>)] = [
+    let before = sort([grp(three, keeper: "U1", exact: true)], kind: .burst, [.exact: ["OUT1"]])
+    check(exact(before.albums) == ["U2", "U3", "OUT1"], "three copies: the two non-keepers are filed")
+    let cases: [(String, AlbumSortGroup, Set<String>)] = [
         ("a filed copy was starred since",
-         G(photos: [ph(1, 0), ph(2, 1, fav: true), ph(3, 2)], keeperID: "U1", exact: true), ["U3"]),
+         grp([ph(1, 0), ph(2, 1, fav: true), ph(3, 2)], keeper: "U1", exact: true), ["U3"]),
         ("a filed copy was edited since",
-         G(photos: [ph(1, 0), ph(2, 1), ph(3, 2, edited: true)], keeperID: "U1", exact: true), ["U2"]),
+         grp([ph(1, 0), ph(2, 1), ph(3, 2, edited: true)], keeper: "U1", exact: true), ["U2"]),
         ("a filed copy can no longer be read",
-         G(photos: [ph(1, 0), ph(2, 1, editedUnknown: true), ph(3, 2)], keeperID: "U1", exact: true), ["U3"]),
-        ("the group is no longer an exact duplicate",
-         G(photos: three, keeperID: "U1", exact: false), []),
-        ("the keeper names no frame of the group",
-         G(photos: three, keeperID: "GONE", exact: true), []),
-        ("the keeper moved to a filed copy",
-         G(photos: three, keeperID: "U3", exact: true), ["U1", "U2"]),
+         grp([ph(1, 0), ph(2, 1, editedUnknown: true), ph(3, 2)], keeper: "U1", exact: true), ["U3"]),
+        ("the group is no longer an exact duplicate", grp(three, keeper: "U1", exact: false), []),
+        ("the keeper names no frame of the group", grp(three, keeper: "GONE", exact: true), []),
+        ("the keeper moved to a filed copy", grp(three, keeper: "U3", exact: true), ["U1", "U2"]),
     ]
     for (label, group, expected) in cases {
-        let after = sort([group], album: before.album)
-        check(after.album == expected, "\(label) ⇒ album = \(expected.sorted())")
-        check(invariantHolds([group], after.album) || group.keeperID == "GONE",
-              "\(label) ⇒ invariant holds")
+        let after = sort([group], kind: .burst, before.albums)
+        check(exact(after.albums) == expected.union(["OUT1"]),
+              "\(label) ⇒ album = \(expected.sorted()) + the out-of-scope member")
+        check(invariantHolds([group], after.albums), "\(label) ⇒ invariant holds")
     }
-    // A frame from an earlier scan that this scan does not contain at all.
-    check(sort([g], album: ["U1", "OLD"]).album == ["U1"],
-          "a member this sort knows nothing about comes out too")
 
-    // The generic rule the other three albums use.
-    check(albumMembershipRemovals(currentMembers: ["A", "B", "C"], candidates: ["B", "D"]) == ["A", "C"],
-          "removals = current members that are not this sort's candidates")
-    check(albumMembershipRemovals(currentMembers: ["A"], candidates: ["A"]).isEmpty
-            && albumMembershipRemovals(currentMembers: [], candidates: ["A"]).isEmpty,
-          "a candidate is never removed; an empty album has nothing to remove")
-    // NEGATIVE CONTROL (run 2026-10-13, receipt in REPORT-fix-a.md): put
-    // `exactRemove` back to the old rule (`needsLook`) and the scenario fails
-    // with album = {U1, U2} — the photo and its only other copy.
+    // 6. The other albums run their real selectors through the same plan.
+    //    U10 keeper (sharp), U11 soft, U12 favorite, U13 document, U14 unreadable.
+    let mixed = [ph(10, 0, sharpness: 5), ph(11, 1, sharpness: 1), ph(12, 2, fav: true, sharpness: 9),
+                 ph(13, 3, isDocument: true), ph(14, 4, docDegraded: true)]
+    let first = sort([grp(mixed, keeper: "U10", exact: false)], kind: .burst, [:]).albums
+    check(first[.bursts]?.contains("U11") == true
+            && first[.bursts]?.isDisjoint(with: ["U10", "U12", "U13"]) == true,
+          "bursts: non-keeper, non-protected frames only")
+    check(first[.blurry]?.contains("U11") == true && first[.blurry]?.contains("U12") == false,
+          "blurry: less sharp than the keeper, never a protected frame")
+    check(first[.documents] == ["U13"] && first[.needsLook] == ["U14"] && exact(first).isEmpty,
+          "documents / needs-look / exact: each gets its own, a non-exact group files nothing as exact")
+    let renominated = sort([grp(mixed, keeper: "U11", exact: false)], kind: .lookAlikes, first)
+    check(renominated.albums[.bursts]?.contains("U11") == false
+            && renominated.albums[.bursts]?.contains("U10") == true,
+          "bursts: the new keeper leaves the review album, the old one enters")
+    check(renominated.albums[.blurry]?.contains("U11") == false,
+          "blurry: the new keeper is not 'the blurry one' any more")
+    check(renominated.moved >= 2, "…and both removals are counted")
+
+    // The rule itself.
+    check(albumMembershipRemovals(currentMembers: ["A", "B", "C"], workingSet: ["A", "B", "D"],
+                                  candidates: ["B", "D"]) == ["A"],
+          "removals = (current ∩ looked-at) − candidates")
+    check(albumMembershipRemovals(currentMembers: ["A"], workingSet: [], candidates: []).isEmpty,
+          "nothing looked at ⇒ nothing removed")
+    // NEGATIVE CONTROLS (run 2026-10-13, receipts in REPORT-fix-a.md):
+    //   • drop `.intersection(workingSet)` ⇒ sections 2, 4, 5 fail;
+    //   • make `scanKindFeeds` return true ⇒ the "kind … removes nothing,
+    //     groups or not" rows fail;
+    //   • return `remove: []` from `plain` ⇒ section 6's bursts/blurry rows fail.
 }
 
 print("Journal reconcile: cannot see ≠ gone (check 2026-10-11 F2)")
@@ -2116,39 +2186,171 @@ do {
     }
     let intent = DeletionSession(timestamp: "2026-10-13T00:00:00Z",
                                  records: [rec("A"), rec("B"), rec("C")])
-    func booked(_ r: DeletionAuditLog.JournalReconcile) -> [String]? {
-        if case .book(let records) = r { return records.map(\.assetIdentifier) }
-        return nil   // deferred
-    }
-    // (fully authorized, what the fetch returned, already logged) → booked ids, nil = defer
-    let table: [(String, Bool, Set<String>, Set<String>, [String]?)] = [
-        ("not authorized, fetch returned nothing", false, [], [], nil),
-        ("limited library, fetch returned a subset", false, ["A"], [], nil),
-        ("not authorized, even if everything 'exists'", false, ["A", "B", "C"], [], nil),
-        ("authorized, all three missing", true, [], [], ["A", "B", "C"]),
-        ("authorized, all three present (confirmation was cancelled)", true, ["A", "B", "C"], [], []),
-        ("authorized, B present, C already logged", true, ["B"], ["C"], ["A"]),
+    // (PHAuthorizationStatus raw value, what a fetch would return, already
+    //  logged) → booked ids, nil = defer. The fetch must not even be CALLED
+    //  unless access is full.
+    let table: [(String, Int, Set<String>, Set<String>, [String]?)] = [
+        ("0 notDetermined", 0, [], [], nil),
+        ("1 restricted", 1, [], [], nil),
+        ("2 denied", 2, [], [], nil),
+        ("4 limited, fetch would return a subset", 4, ["A"], [], nil),
+        ("99 unknown status", 99, ["A", "B", "C"], [], nil),
+        ("3 authorized, all three missing", 3, [], [], ["A", "B", "C"]),
+        ("3 authorized, all three present (confirmation was cancelled)", 3, ["A", "B", "C"], [], []),
+        ("3 authorized, B present, C already logged", 3, ["B"], ["C"], ["A"]),
     ]
-    for (label, authorized, existing, logged, expected) in table {
-        let got = booked(DeletionAuditLog.journalReconcile(
-            intent: intent, libraryFullyAuthorized: authorized,
-            stillExisting: existing, alreadyLogged: logged))
+    for (label, raw, existing, logged, expected) in table {
+        var fetches = 0
+        let result = DeletionAuditLog.journalReconcile(
+            intent: intent, access: DeletionAuditLog.PhotoAccess(photoKitRawValue: raw),
+            alreadyLogged: logged, stillExisting: { fetches += 1; return existing })
+        var got: [String]? = nil
+        if case .book(let records) = result { got = records.map(\.assetIdentifier) }
         check(got == expected,
               "\(label) ⇒ \(expected.map { "book \($0)" } ?? "DEFER, journal kept")")
+        check(fetches == (expected == nil ? 0 : 1),
+              "\(label) ⇒ library \(expected == nil ? "NOT asked" : "asked once")")
     }
-    // NEGATIVE CONTROL (run 2026-10-13): drop the `libraryFullyAuthorized`
-    // guard and the first two rows book A B C / B C — photos that still exist.
+
+    // A deferred journal must survive the NEXT commit (review P2-1).
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("snapsift-journal-\(UUID().uuidString)")
+    let journal = tmp.appendingPathComponent("pending-delete.json")
+    let history = tmp.appendingPathComponent("deletions.jsonl")
+    defer { try? FileManager.default.removeItem(at: tmp) }
+    func pending() -> [String] {
+        DeletionAuditLog.pendingIntent(at: journal)?.records.map(\.assetIdentifier) ?? []
+    }
+    func historyIDs() -> Set<String> {
+        DeletionAuditLog.loggedAssetIdentifiers(from: DeletionAuditLog.loadSessions(from: history))
+    }
+    let old = DeletionSession(timestamp: "2026-10-12T00:00:00Z", records: [rec("A"), rec("B")])
+    let next = DeletionSession(timestamp: "2026-10-13T00:00:00Z", records: [rec("C"), rec("D")])
+    // (what happens to the new commit) → journal after it, history at the end
+    for (label, committed) in [("the new commit succeeds", true), ("the new commit is cancelled", false)] {
+        try? FileManager.default.removeItem(at: tmp)
+        _ = DeletionAuditLog.writeIntent(old, to: journal)        // interrupted commit, deferred at launch
+        _ = DeletionAuditLog.writeIntent(next, to: journal)       // access granted, a new commit begins
+        check(pending() == ["A", "B", "C", "D"],
+              "\(label): writeIntent ADDS to an unreconciled journal, never replaces it")
+        if committed { _ = DeletionAuditLog.append(next, to: history) }
+        DeletionAuditLog.settleIntent(next, at: journal)          // the commit is done with the journal
+        check(pending() == ["A", "B"], "\(label): the earlier batch is still journalled afterwards")
+        // …and the next reconcile books it. A and B are really gone; C and D
+        // are gone only if the commit happened.
+        if let left = DeletionAuditLog.pendingIntent(at: journal),
+           case .book(let records) = DeletionAuditLog.journalReconcile(
+               intent: left, access: .authorized, alreadyLogged: historyIDs(),
+               stillExisting: { committed ? [] : ["C", "D"] }) {
+            _ = DeletionAuditLog.append(DeletionSession(timestamp: left.timestamp, records: records),
+                                        to: history)
+            DeletionAuditLog.clearIntent(at: journal)
+        }
+        check(historyIDs() == (committed ? ["A", "B", "C", "D"] : ["A", "B"]),
+              "\(label): \(committed ? "BOTH batches end" : "the earlier batch ends") in the history")
+        check(pending().isEmpty, "\(label): the journal is finally cleared")
+    }
+    check(DeletionAuditLog.mergedIntent(pending: nil, new: next).records.count == 2
+            && DeletionAuditLog.intentRemaining(pending: next, settled: next) == nil,
+          "no earlier journal ⇒ plain write, and settling clears it")
+    let overlap = DeletionAuditLog.mergedIntent(
+        pending: old, new: DeletionSession(timestamp: "t", records: [rec("B"), rec("C")]))
+    check(overlap.records.map(\.assetIdentifier) == ["A", "B", "C"],
+          "a photo named by both is journalled once")
+    // NEGATIVE CONTROLS (run 2026-10-13): drop the `seesWholeLibrary` guard ⇒
+    // the five non-authorized rows fail twice each; make `writeIntent` encode
+    // `session` instead of the merge ⇒ "writeIntent ADDS…" fails.
 }
 
-print("Verb guards: group membership, modifier keys (safety-r4 P2-1, a11y-keys §3)")
+print("Verbs as Core actions: K, ⇧K, D, and which key presses may be verbs")
 do {
-    let photos = [ph(1, 0), ph(2, 1)]
-    check(isGroupMember("U2", of: photos), "a frame of the group is a member")
-    check(!isGroupMember("U9", of: photos), "a uuid from elsewhere is NOT — K / ⇧K / 1–9 ignore it")
-    check(!isGroupMember("", of: photos) && !isGroupMember("U1", of: []),
-          "empty id / empty group ⇒ not a member")
+    // U1 U2 U5 plain, U3 favorite, U4 unreadable.
+    let photos = [ph(1, 0), ph(2, 1), ph(3, 2, fav: true), ph(4, 3, docDegraded: true), ph(5, 4)]
+    func snap(_ keeper: String, _ rejected: Set<String>, seeded: Set<String> = [],
+              override: Bool = false) -> GroupMarkSnapshot {
+        GroupMarkSnapshot(keeperID: keeper, rejected: rejected, autoSeeded: seeded,
+                          includeProtected: override)
+    }
 
-    // (⌘, ⌃, ⌥) → may reach a verb. Shift is deliberately not an input.
+    // --- K / 1–9 -----------------------------------------------------------
+    check(nominateAction(photos: photos, current: snap("U1", ["U2"]), to: "U9") == nil,
+          "K on a uuid that is not in the group ⇒ no action at all")
+    check(nominateAction(photos: photos, current: snap("U1", ["U2"]), to: "") == nil
+            && nominateAction(photos: [], current: snap("U1", []), to: "U1") == nil,
+          "empty id / empty group ⇒ no action")
+    check(nominateAction(photos: photos, current: snap("U1", ["U2", "U5"], seeded: ["U2", "U5"]), to: "U2")
+            == snap("U2", ["U5"], seeded: ["U5"]),
+          "K: keeper := frame, that frame un-marked (and its provenance), nothing else")
+    check(nominateAction(photos: photos, current: snap("U1", ["U3"], override: true), to: "U3")
+            == snap("U3", [], override: false),
+          "K on the only force-marked favorite drops the ⇧X override with it")
+    check(nominateAction(photos: photos, current: snap("U1", ["U3", "U2"], override: true), to: "U2")
+            == snap("U2", ["U3"], override: true),
+          "…but keeps it while a protected frame is still marked")
+
+    // --- D -----------------------------------------------------------------
+    let d = rejectAllAction(photos: photos, current: snap("U1", ["U3"], seeded: ["U3"], override: true))
+    check(d?.state == snap("U1", ["U2", "U5"]),
+          "D: every deletable non-keeper, provenance cleared, and the override switched OFF")
+    check(d?.withheld == 1, "D reports the unreadable frame it left out")
+    check(rejectAllAction(photos: photos, current: snap("GONE", []))?.state.rejected == ["U2", "U5"],
+          "D with a keeper that names no frame spares the first frame, as before")
+    check(rejectAllAction(photos: [], current: snap("U1", [])) == nil, "D on an empty group ⇒ no action")
+
+    // --- ⇧K and its undo ---------------------------------------------------
+    check(keepOnlyAction(photos: photos, current: snap("U1", []), undo: nil, frameID: "U9") == nil,
+          "⇧K on a uuid that is not in the group ⇒ no action")
+    /// What LibraryModel.keepOnly does with the outcome.
+    func press(_ frame: String, _ cur: GroupMarkSnapshot, _ undo: KeepOnlyUndo?)
+        -> (state: GroupMarkSnapshot, undo: KeepOnlyUndo?, undone: Bool) {
+        switch keepOnlyAction(photos: photos, current: cur, undo: undo, frameID: frame) {
+        case .undone(let back)?:             return (back, nil, true)
+        case .applied(let after, let keep)?: return (after, keep, false)
+        case nil:                            return (cur, undo, false)
+        }
+    }
+    let starts = [
+        snap("U1", []),
+        snap("U1", ["U2"], seeded: ["U2"]),
+        // The owner force-marked the favorite with ⇧X, then ⇧K's it by mistake.
+        snap("U1", ["U3"], override: true),
+        snap("U5", ["U1", "U2"], seeded: ["U1", "U2"]),
+    ]
+    for start in starts {
+        for frame in ["U2", "U3", "U5"] {
+            let once = press(frame, start, nil)
+            let twice = press(frame, once.state, once.undo)
+            if once.state == start {
+                // ⇧K changed nothing (review P3-1): there is nothing to undo,
+                // and the second press must not claim it restored anything.
+                check(once.undo == nil && !twice.undone && twice.state == start,
+                      "⇧K on \(frame) from \(start.keeperID)/\(start.rejected.sorted()) is a no-op ⇒ no undo recorded, no 'restored' banner")
+            } else {
+                check(twice.undone && twice.state == start && twice.undo == nil,
+                      "⇧K ⇧K on \(frame) from \(start.keeperID)/\(start.rejected.sorted()) ⇒ exactly the state before")
+            }
+        }
+    }
+    let first = press("U2", starts[0], nil)
+    check(first.state.rejected == ["U1", "U5"], "(fixture) ⇧K on U2 marks the other deletable frames")
+    check(!press("U5", first.state, first.undo).undone,
+          "⇧K on a DIFFERENT frame is a new nomination, not an undo")
+    let touched = snap(first.state.keeperID, first.state.rejected.subtracting(["U5"]))
+    check(keepOnlyUndoTarget(current: touched, undo: first.undo, frameID: "U2", photos: photos) == nil,
+          "a mark changed since ⇒ no undo (a stale 'before' is never restored)")
+    check(keepOnlyUndoTarget(current: first.state, undo: first.undo, frameID: "U2",
+                             photos: photos.filter { $0.uuid != "U1" }) == nil,
+          "the remembered keeper is no longer in the group ⇒ no undo")
+    let prov = press("U2", starts[3], nil).state
+    check(prov.rejected == ["U1", "U5"] && prov.autoSeeded == ["U1"],
+          "⇧K keeps `autoSeeded` on the seeded mark it left standing, and only there")
+    check(press("U5", snap("U1", ["U3"], override: true), nil).state.includeProtected,
+          "⇧K keeps the override while the force-marked favorite is still marked")
+    check(!press("U3", snap("U1", ["U3"], override: true), nil).state.includeProtected,
+          "…and drops it when ⇧K lands on that favorite")
+
+    // --- which key presses may be verbs ------------------------------------
+    // (⌘, ⌃, ⌥) → may reach a verb. Shift is deliberately not a gate.
     let keys: [(Bool, Bool, Bool, Bool)] = [
         (false, false, false, true),
         (true,  false, false, false), (false, true,  false, false), (false, false, true,  false),
@@ -2156,66 +2358,28 @@ do {
         (true,  true,  true,  false),
     ]
     for (cmd, ctrl, opt, expected) in keys {
-        check(isPlainVerbKey(command: cmd, control: ctrl, option: opt) == expected,
-              "⌘\(cmd ? 1 : 0) ⌃\(ctrl ? 1 : 0) ⌥\(opt ? 1 : 0) ⇒ \(expected ? "verb" : "ignored")")
-    }
-}
-
-print("⇧K again is an exact undo (safety-r4 P2-2)")
-do {
-    // U1 U2 U5 plain, U3 favorite, U4 unreadable.
-    let photos = [ph(1, 0), ph(2, 1), ph(3, 2, fav: true), ph(4, 3, docDegraded: true), ph(5, 4)]
-    /// What LibraryModel.keepOnly does, minus the UI: undo if it is one,
-    /// otherwise apply ⇧K and remember what it replaced.
-    func press(_ frame: String, _ cur: GroupMarkSnapshot, _ undo: KeepOnlyUndo?)
-        -> (GroupMarkSnapshot, KeepOnlyUndo?) {
-        if let back = keepOnlyUndoTarget(current: cur, undo: undo, frameID: frame, photos: photos) {
-            return (back, nil)
-        }
-        let next = keepOnlyState(photos: photos, keeperID: frame, rejected: cur.rejected)
-        let protectedMarked = photos.contains { $0.isProtected && next.rejected.contains($0.uuid) }
-        let after = GroupMarkSnapshot(keeperID: next.keeperID, rejected: next.rejected,
-                                      autoSeeded: cur.autoSeeded.intersection(next.rejected),
-                                      includeProtected: cur.includeProtected && protectedMarked)
-        return (after, KeepOnlyUndo(before: cur, after: after))
-    }
-    let starts: [GroupMarkSnapshot] = [
-        GroupMarkSnapshot(keeperID: "U1", rejected: [], autoSeeded: [], includeProtected: false),
-        GroupMarkSnapshot(keeperID: "U1", rejected: ["U2"], autoSeeded: ["U2"], includeProtected: false),
-        // The owner force-marked the favorite with ⇧X, then ⇧K's it by mistake.
-        GroupMarkSnapshot(keeperID: "U1", rejected: ["U3"], autoSeeded: [], includeProtected: true),
-        GroupMarkSnapshot(keeperID: "U5", rejected: ["U1", "U2"], autoSeeded: ["U1", "U2"], includeProtected: false),
-    ]
-    for start in starts {
-        for frame in ["U2", "U3", "U5"] {
-            let (after, undo) = press(frame, start, nil)
-            let (back, left) = press(frame, after, undo)
-            check(back == start && left == nil,
-                  "⇧K ⇧K on \(frame) from keeper \(start.keeperID) marks \(start.rejected.sorted()) ⇒ exactly the state before")
+        for shift in [false, true] {
+            let press = VerbKeyPress(command: cmd, control: ctrl, option: opt,
+                                     shift: shift, isRepeat: false)
+            check((press != nil) == expected,
+                  "⌘\(cmd ? 1 : 0) ⌃\(ctrl ? 1 : 0) ⌥\(opt ? 1 : 0) ⇧\(shift ? 1 : 0) ⇒ \(expected ? "verb" : "ignored")")
         }
     }
-    let start = starts[0]
-    let (after, undo) = press("U2", start, nil)
-    check(after.rejected == ["U1", "U5"], "(fixture) ⇧K on U2 marks the other deletable frames")
-    // Not an undo: a different frame, or anything touched in between.
-    check(keepOnlyUndoTarget(current: after, undo: undo, frameID: "U5", photos: photos) == nil,
-          "⇧K on a DIFFERENT frame is a new nomination, not an undo")
-    let touched = GroupMarkSnapshot(keeperID: after.keeperID, rejected: after.rejected.subtracting(["U5"]),
-                                    autoSeeded: after.autoSeeded, includeProtected: after.includeProtected)
-    check(keepOnlyUndoTarget(current: touched, undo: undo, frameID: "U2", photos: photos) == nil,
-          "a mark changed since ⇒ no undo (a stale 'before' is never restored)")
-    check(keepOnlyUndoTarget(current: after, undo: nil, frameID: "U2", photos: photos) == nil,
-          "nothing remembered ⇒ no undo")
-    check(keepOnlyUndoTarget(current: after, undo: undo, frameID: "U2",
-                             photos: photos.filter { $0.uuid != "U1" }) == nil,
-          "the remembered keeper is no longer in the group ⇒ no undo")
-    // Provenance (P3-2): a seeded mark that survives ⇧K keeps its attribution;
-    // a mark ⇧K adds is the user's.
-    let (prov, _) = press("U2", starts[3], nil)
-    check(prov.rejected == ["U1", "U5"] && prov.autoSeeded == ["U1"],
-          "⇧K keeps `autoSeeded` on the seeded mark it left standing, and only there")
-    // NEGATIVE CONTROL (run 2026-10-13): drop `current == undo.after` from
-    // keepOnlyUndoTarget and "a mark changed since ⇒ no undo" fails.
+    func keep(shift: Bool, isRepeat: Bool) -> VerbKeyPress.KeepVerb? {
+        VerbKeyPress(command: false, control: false, option: false,
+                     shift: shift, isRepeat: isRepeat)?.keepVerb
+    }
+    check(keep(shift: false, isRepeat: false) == .nominate && keep(shift: false, isRepeat: true) == .nominate,
+          "K, held or not, nominates")
+    check(keep(shift: true, isRepeat: false) == .keepOnly, "⇧K pressed ⇒ keep only")
+    check(keep(shift: true, isRepeat: true) == .swallow,
+          "⇧K HELD ⇒ swallowed: auto-repeat never toggles the undo")
+    // NEGATIVE CONTROLS (run 2026-10-13): drop the `isGroupMember` guard from
+    // nominateAction ⇒ "K on a uuid that is not in the group" fails; return
+    // `current.includeProtected` unchanged from rejectAllAction ⇒ the D row
+    // fails; drop `isRepeat ? .swallow :` ⇒ the ⇧K HELD row fails; drop
+    // `!command` ⇒ the ⌘1 rows fail; record an undo when after == current ⇒
+    // the no-op rows fail.
 }
 
 print("Own-write token restamp (P2-6)")

@@ -112,7 +112,12 @@ struct CategoryBucket: Identifiable {
 /// thumbnail vending, and native (recoverable) deletion.
 @MainActor
 final class LibraryModel: ObservableObject {
-    @Published var auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    @Published var auth = PHPhotoLibrary.authorizationStatus(for: .readWrite) {
+        // A journal deferred at launch for lack of access must not have to
+        // wait for a relaunch (review P2-1): whenever the answer changes, ask
+        // again. Core `journalReconcile` decides whether THIS status may book.
+        didSet { if auth != oldValue { reconcileDeletionJournal() } }
+    }
     @Published var groups: [ReviewGroup] = []
     @Published var isScanning = false
     /// True while `deleteReviewed` runs. Scans, face refines, album writes and
@@ -1248,33 +1253,27 @@ final class LibraryModel: ObservableObject {
     /// ⏎ action in grid and loupe.
     func promote(group groupID: ReviewGroup.ID, to photoID: String) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
-        // A keeper has to be one of the group's own frames (Core
-        // `isGroupMember`, the same guard `keepOnly` passes). A stale focus
-        // used to write a foreign uuid into `keeperID` here: no frame wore the
-        // keep badge and the next `D` fell back to `photos[0]`.
-        guard isGroupMember(photoID, of: groups[i].photos) else { return }
-        // Core `promoteState` is the rule: keeper := photoID, and the ONLY
-        // change to `rejected` is removing that frame. Shared with ⇧K's undo
-        // path so the test suite and the app run the same transition.
-        let next = promoteState(GroupMarkState(keeperID: groups[i].keeperID,
-                                               rejected: groups[i].rejected),
-                                to: photoID)
-        groups[i].keeperID = next.keeperID
-        groups[i].rejected = next.rejected
-        groups[i].autoSeeded.remove(photoID)
-        // Same rule `toggleReject` applies when it un-marks a frame
-        // (see its "a lingering flag would silently re-arm the next ⇧X"
-        // branch): the group-level override must not outlive its last
-        // protected rejection. Nominating a force-rejected protected frame
-        // used to clear the mark and leave the flag standing, so the
-        // pre-commit warning and the toolbar toggle both read a state that
-        // no longer had anything to describe. Never widens a deletion —
-        // it can only turn the override OFF, and only when nothing is
-        // relying on it.
-        if groups[i].protectedDeletionCount == 0 {
-            groups[i].includeProtected = false
-        }
+        // Core `nominateAction` is the whole verb: nil when the frame is not
+        // one of this group's (a stale focus used to write a foreign uuid into
+        // `keeperID`), otherwise keeper := frame, that frame un-marked and
+        // nothing else, and the ⇧X override dropped once no protected frame is
+        // marked any more. Never widens a deletion.
+        guard let next = nominateAction(photos: groups[i].photos,
+                                        current: markSnapshot(i), to: photoID) else { return }
+        applyMarks(next, to: i)
         scheduleSnapshotSave()
+    }
+
+    private func markSnapshot(_ i: Int) -> GroupMarkSnapshot {
+        GroupMarkSnapshot(keeperID: groups[i].keeperID, rejected: groups[i].rejected,
+                          autoSeeded: groups[i].autoSeeded,
+                          includeProtected: groups[i].includeProtected)
+    }
+    private func applyMarks(_ m: GroupMarkSnapshot, to i: Int) {
+        groups[i].keeperID = m.keeperID
+        groups[i].rejected = m.rejected
+        groups[i].autoSeeded = m.autoSeeded
+        groups[i].includeProtected = m.includeProtected
     }
 
     /// "Keep only this one" — ⇧K in grid and loupe.
@@ -1316,37 +1315,28 @@ final class LibraryModel: ObservableObject {
     @discardableResult
     func keepOnly(group groupID: ReviewGroup.ID, frame frameID: String) -> Bool {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return false }
-        guard isGroupMember(frameID, of: groups[i].photos) else { return false }
-        let current = GroupMarkSnapshot(keeperID: groups[i].keeperID,
-                                        rejected: groups[i].rejected,
-                                        autoSeeded: groups[i].autoSeeded,
-                                        includeProtected: groups[i].includeProtected)
-        if let back = keepOnlyUndoTarget(current: current, undo: keepOnlyUndo[groupID],
-                                         frameID: frameID, photos: groups[i].photos) {
-            groups[i].keeperID = back.keeperID
-            groups[i].rejected = back.rejected
-            groups[i].autoSeeded = back.autoSeeded
-            groups[i].includeProtected = back.includeProtected
+        // Core `keepOnlyAction` is the whole verb (membership guard, undo or
+        // apply, provenance, override rule, and whether there is anything to
+        // remember).
+        guard let outcome = keepOnlyAction(photos: groups[i].photos, current: markSnapshot(i),
+                                           undo: keepOnlyUndo[groupID], frameID: frameID) else {
+            return false
+        }
+        // Records for groups that no longer exist (committed away, rescanned)
+        // can never match again — drop them here rather than let them pile up.
+        let live = Set(groups.map(\.id))
+        keepOnlyUndo = keepOnlyUndo.filter { live.contains($0.key) }
+        defer { scheduleSnapshotSave() }
+        switch outcome {
+        case .undone(let back):
+            applyMarks(back, to: i)
             keepOnlyUndo[groupID] = nil
-            scheduleSnapshotSave()
             return true
+        case .applied(let after, let remember):
+            applyMarks(after, to: i)
+            keepOnlyUndo[groupID] = remember
+            return false
         }
-        let next = keepOnlyState(photos: groups[i].photos, keeperID: frameID,
-                                 rejected: groups[i].rejected)
-        groups[i].keeperID = next.keeperID
-        groups[i].rejected = next.rejected
-        groups[i].autoSeeded.formIntersection(next.rejected)
-        if groups[i].protectedDeletionCount == 0 {
-            groups[i].includeProtected = false
-        }
-        keepOnlyUndo[groupID] = KeepOnlyUndo(
-            before: current,
-            after: GroupMarkSnapshot(keeperID: groups[i].keeperID,
-                                     rejected: groups[i].rejected,
-                                     autoSeeded: groups[i].autoSeeded,
-                                     includeProtected: groups[i].includeProtected))
-        scheduleSnapshotSave()
-        return false
     }
 
     /// Keep the entire group — clear all rejections. `a` key.
@@ -1389,16 +1379,15 @@ final class LibraryModel: ObservableObject {
     @discardableResult
     func rejectAll(group groupID: ReviewGroup.ID) -> Int {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return 0 }
-        let photos = groups[i].photos
-        let keep = photos.first { $0.uuid == groups[i].keeperID } ?? photos[0]
-        groups[i].rejected = bulkRejectCandidates(photos: photos, keeperID: keep.uuid)
-        groups[i].autoSeeded = []   // user overrode — rejections are theirs now
-        // The override must not outlive its last protected mark (the rule
-        // `promote` and `keepOnly` apply): `d` just rewrote `rejected` without
-        // any protected frame in it. Can only turn the override OFF.
-        if groups[i].protectedDeletionCount == 0 { groups[i].includeProtected = false }
+        // Core `rejectAllAction` is the whole verb: the marks, the cleared
+        // provenance, the override that must not outlive its last protected
+        // mark (`d` rewrites `rejected` with no protected frame in it), and
+        // the count it had to leave out.
+        guard let action = rejectAllAction(photos: groups[i].photos,
+                                           current: markSnapshot(i)) else { return 0 }
+        applyMarks(action.state, to: i)
         scheduleSnapshotSave()
-        return bulkRejectWithheld(photos: photos, keeperID: keep.uuid).count
+        return action.withheld
     }
 
     /// Toggle reject-all: if not all non-protected are rejected, reject them;
@@ -1908,26 +1897,27 @@ final class LibraryModel: ObservableObject {
     /// view can say so — a history that silently repaired itself is still a
     /// history the user had no reason to trust.
     func reconcileDeletionJournal() {
-        guard let intent = DeletionAuditLog.pendingIntent() else { return }
-        // "Cannot see" is not "gone": without FULL read-write authorization
-        // the fetch below returns nothing, and every journalled photo would be
-        // booked as deleted and the journal cleared. Core `journalReconcile`
-        // owns that decision; here we only refuse to even ask the library a
-        // question it cannot answer. The journal stays for the next launch.
-        let authorized = PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized
-        let ids = intent.records.map(\.assetIdentifier)
-        var stillExisting: Set<String> = []
-        if authorized, !ids.isEmpty {
+        // Never while a commit is in flight: its own intent is in the journal
+        // and its photos are still there — reconciling now would clear it.
+        guard !isDeleting, let intent = DeletionAuditLog.pendingIntent() else { return }
+        // "Cannot see" is not "gone". Core `journalReconcile` gets PhotoKit's
+        // own status and the fetch as a closure: without full read-write
+        // access it defers WITHOUT calling the fetch, and the journal stays
+        // until access changes (`auth.didSet`) or the next launch.
+        let logged = DeletionAuditLog.loggedAssetIdentifiers(from: DeletionAuditLog.loadSessions())
+        let access = DeletionAuditLog.PhotoAccess(
+            photoKitRawValue: PHPhotoLibrary.authorizationStatus(for: .readWrite).rawValue)
+        switch DeletionAuditLog.journalReconcile(intent: intent, access: access,
+                                                 alreadyLogged: logged, stillExisting: {
+            var existing: Set<String> = []
+            let ids = intent.records.map(\.assetIdentifier)
+            guard !ids.isEmpty else { return existing }
             let opts = PHFetchOptions()
             opts.includeAllBurstAssets = true
             PHAsset.fetchAssets(withLocalIdentifiers: ids, options: opts)
-                .enumerateObjects { a, _, _ in stillExisting.insert(a.localIdentifier) }
-        }
-        let logged = DeletionAuditLog.loggedAssetIdentifiers(from: DeletionAuditLog.loadSessions())
-        switch DeletionAuditLog.journalReconcile(intent: intent,
-                                                 libraryFullyAuthorized: authorized,
-                                                 stillExisting: stillExisting,
-                                                 alreadyLogged: logged) {
+                .enumerateObjects { a, _, _ in existing.insert(a.localIdentifier) }
+            return existing
+        }) {
         case .deferUntilReadable:
             return   // journal left in place
         case .book(let records):
@@ -2350,6 +2340,7 @@ final class LibraryModel: ObservableObject {
             exactGroups: exactDupeGroupIDs,
             assetsByID: assetsByID,
             extraNeedsLookAssets: pairedVideoUndeterminedAssets,
+            scanKind: AlbumScanKind(rawValue: lastScanKind.rawValue),
             t: t
         )
         // A membership-only album write mutates no verdict-relevant state, but it
@@ -2629,8 +2620,10 @@ final class LibraryModel: ObservableObject {
             }
         } catch {
             // Nothing was deleted (performChanges is atomic), so the intent is
-            // a lie the next launch must not find.
-            DeletionAuditLog.clearIntent()
+            // a lie the next launch must not find. `settleIntent` removes only
+            // THIS commit's records — an earlier journal still waiting to be
+            // reconciled stays.
+            DeletionAuditLog.settleIntent(session)
             throw error
         }
 
@@ -2642,8 +2635,9 @@ final class LibraryModel: ObservableObject {
             lastDeleteAuditFailed = !DeletionAuditLog.append(session)
         }
         // Only once the history carries it (or we know it never will) is the
-        // journal's job done.
-        DeletionAuditLog.clearIntent()
+        // journal's job done — for THIS commit's records (`settleIntent`); an
+        // earlier unreconciled journal that `writeIntent` merged with is kept.
+        DeletionAuditLog.settleIntent(session)
 
         // Drop deleted frames; a group that loses all but its keeper is resolved.
         // Crucially, carry the user's review decisions forward: a "keep all" or

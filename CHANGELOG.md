@@ -28,18 +28,25 @@ reserved for the first signed and notarized build.
     its "Same photo" attribution.
 
 ### Fixed
-- **Snapsift's albums now hold exactly what the latest sort concluded.** Sorting
-  used to only add: if you changed which copy to keep and sorted again, the old
-  candidate stayed in "Exact Duplicates" next to the new one — the photo and its
-  only other copy, in the album described as safe to remove. Each sort now takes
-  out of Snapsift's own albums whatever it no longer puts there, and the banner
-  says how many. Membership only: nothing is deleted, and albums you made
-  yourself are never touched.
+- **Snapsift's albums now follow what the latest scan concluded about the photos
+  it looked at.** Sorting used to only add: if you changed which copy to keep and
+  sorted again, the old candidate stayed in "Exact Duplicates" next to the new
+  one — the photo and its only other copy, in the album described as safe to
+  remove. A sort now takes a photo out of a Snapsift album when this scan
+  re-evaluated it and no longer puts it there, and the banner says how many.
+  Photos the scan did not look at — results of an earlier scan of another album,
+  or of another kind of scan — stay where they are; a Similar Sets scan takes
+  nothing out. Membership only: nothing is deleted, and albums you made yourself
+  are never touched.
 - An interrupted delete is no longer booked into the history while Photos access
   is missing or limited — "cannot see the photo" was being read as "the photo is
-  gone". The check now waits for a launch with full access.
+  gone". The check now waits until Photos access is full (it runs again as soon
+  as access changes, not only at the next launch), and a delete started in the
+  meantime adds to that pending record instead of replacing it.
 - ⌘ / ⌃ / ⌥ combined with a letter, a digit or ⌫ can no longer trigger the plain
   key's action (⌘⌫ with nothing marked used to cross out the focused photo).
+  This includes the arrow keys in the list and the grid: ⌘↑, ⌥→ and the like now
+  do nothing there.
 - `K` and `1–9` ignore a photo that is not in the group.
 - `D` no longer leaves the "include protected" override switched on with no
   protected photo marked.

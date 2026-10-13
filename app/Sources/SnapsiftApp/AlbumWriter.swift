@@ -15,10 +15,10 @@ struct AlbumWriteResult {
     /// Live Photo pairing was undetermined. Never a delete bucket — the human
     /// decides in Photos.app (ruling, chodaict, 2026-09-16).
     var needsLook: Int = 0
-    /// Album memberships REMOVED from snapsift's own albums because this sort
-    /// no longer puts the frame there (it became the keeper, was starred or
-    /// edited, its group stopped being an exact duplicate, it moved to the
-    /// other bucket, or it is outside this scan). One per album it left.
+    /// Album memberships REMOVED from snapsift's own albums: frames THIS scan
+    /// re-evaluated and no longer puts there (it became the keeper, was starred
+    /// or edited, its group stopped being an exact duplicate, it moved to the
+    /// other bucket). Never a frame the scan did not look at. One per album.
     /// Membership-only; no photo is ever deleted (see `removeAssets`).
     var moved: Int = 0
 }
@@ -38,9 +38,9 @@ struct AlbumWriteResult {
 ///   its existing location. Nothing is moved or removed.
 /// - Idempotent: each call resolves the album by title (creating if absent),
 ///   fetches current members, and only adds assets NOT already present.
-/// - Authoritative per sort: a snapsift-owned album ends up holding exactly
-///   what THIS sort concluded — current members that are not this sort's
-///   candidates are taken out (Core `albumMembershipRemovals`).
+/// - Authoritative over what the scan looked at: a current member this scan
+///   re-evaluated and no longer puts there is taken out; members the scan
+///   never saw are left alone (Core `albumSortPlan`).
 ///
 /// The ONLY bucket where a delete suggestion is ever shown in the UI is
 /// `exactDupes` — see Part B in LibraryModel. All other buckets are for
@@ -141,6 +141,9 @@ enum AlbumWriter {
     /// `extraNeedsLookAssets` — assets that never became a `Photo` at all (Live
     ///                 Photo paired-video undetermined) but are just as
     ///                 unclassifiable; folded into the same needs-look album.
+    /// `scanKind`    — the kind of scan that produced `groups`; decides which
+    ///                 albums this sort may take anything OUT of (Core
+    ///                 `scanKindFeeds`). nil ⇒ add only.
     /// `t`           — localization tokens.
     @discardableResult
     static func write(
@@ -148,208 +151,72 @@ enum AlbumWriter {
         exactGroups: Set<ReviewGroup.ID>,
         assetsByID: [String: PHAsset],
         extraNeedsLookAssets: [PHAsset] = [],
+        scanKind: AlbumScanKind?,
         t: L10n
     ) async throws -> AlbumWriteResult {
         var result = AlbumWriteResult()
 
-        // Gather the assets for each bucket. Computed synchronously before the
-        // performChanges block — PHAsset is not Sendable through the closure.
-        let burstsIDs   = burstCandidates(groups: groups, exactGroups: exactGroups)
-        let blurryIDs   = blurryCandidates(groups: groups, exactGroups: exactGroups)
-        let docsIDs     = documentCandidates(groups: groups)
-        let exactIDs    = exactCandidates(groups: groups, exactGroups: exactGroups)
-        let needsLookIDs = needsLookCandidates(groups: groups)
-
-        let burstsAssets  = burstsIDs.compactMap  { assetsByID[$0] }
-        let blurryAssets  = blurryIDs.compactMap  { assetsByID[$0] }
-        let docsAssets    = docsIDs.compactMap    { assetsByID[$0] }
-        // Exclusivity across scans (red-team r2 P2-3). Within one write the two
-        // buckets cannot overlap, but the album write used to be add-only and
-        // never recomputed what a PREVIOUS run put there: a frame filed under
-        // "Exact Duplicates" while Full Disk Access was granted reappears under
-        // "Needs a look" on a run without it, and Photos.app — the surface this
-        // tool deliberately hands the decision to — then shows one photo wearing
-        // "safe to remove" and "snapsift couldn't read this" at the same time.
-        // The plan says what to add and what to take OUT of the other bucket.
-        let exactAssets   = exactIDs.compactMap   { assetsByID[$0] }
-        // De-dup by localIdentifier: a Photo-level unverifiable frame and an
-        // extra (asset-only) frame can never collide in practice, but two
-        // scans' worth of extras could if a caller ever passed the same asset
-        // twice — membership add is idempotent per-call too, so this is belt
-        // and suspenders, not load-bearing.
-        var needsLookAssets = needsLookIDs.compactMap { assetsByID[$0] }
-        var seenNeedsLook = Set(needsLookAssets.map(\.localIdentifier))
-        for a in extraNeedsLookAssets where !seenNeedsLook.contains(a.localIdentifier) {
-            needsLookAssets.append(a)
-            seenNeedsLook.insert(a.localIdentifier)
-        }
-
-        // Every snapsift-owned album is AUTHORITATIVE PER SORT (check
-        // 2026-10-11, F1): what is in it now and is not one of this sort's
-        // candidates comes out, BEFORE anything is added, so the final
-        // membership is what this sort believes. Candidates are compared by id,
-        // not by resolved asset — an id we could not resolve is still a
-        // candidate and is left where it is.
+        // Core `albumSortPlan` IS the sort: which frames belong in each album,
+        // and which current members come out. Nothing below decides anything —
+        // it resolves ids to assets and performs the steps, in order.
         //
-        // The removals run even when a bucket has no candidates at all: "this
-        // sort found no exact duplicates" has to EMPTY the album labelled safe
-        // to remove, not leave last week's contents under that label.
-        let burstsTitles = allTitles { $0.albumNameBursts() }
-        let blurryTitles = allTitles { $0.albumNameBlurry() }
-        let docsTitles   = allTitles { $0.albumNameDocs() }
-        let exactTitles  = allTitles { $0.albumNameExact() }
+        // Removals are scoped to what THIS scan re-evaluated (review P1-1):
+        // a member the scan never looked at — another scan kind's results, a
+        // photo outside a narrow scan — stays where it is.
+        let extraIDs = extraNeedsLookAssets.map(\.localIdentifier)
+        var extraByID: [String: PHAsset] = [:]
+        for a in extraNeedsLookAssets { extraByID[a.localIdentifier] = a }
 
-        result.moved += try await removeAssets(
-            ids: albumMembershipRemovals(currentMembers: currentMemberIDs(inAlbumTitles: burstsTitles),
-                                         candidates: burstsIDs),
-            fromAlbumTitles: burstsTitles)
-        result.moved += try await removeAssets(
-            ids: albumMembershipRemovals(currentMembers: currentMemberIDs(inAlbumTitles: blurryTitles),
-                                         candidates: blurryIDs),
-            fromAlbumTitles: blurryTitles)
-        result.moved += try await removeAssets(
-            ids: albumMembershipRemovals(currentMembers: currentMemberIDs(inAlbumTitles: docsTitles),
-                                         candidates: docsIDs),
-            fromAlbumTitles: docsTitles)
+        let steps = albumSortPlan(
+            groups: groups.map {
+                AlbumSortGroup(photos: $0.photos, keeperID: $0.keeperID,
+                               rejected: $0.rejected, includeProtected: $0.includeProtected,
+                               isExact: exactGroups.contains($0.id))
+            },
+            scanKind: scanKind,
+            extraNeedsLookIDs: extraIDs,
+            currentMembers: { currentMemberIDs(inAlbumTitles: titles(for: $0)) })
 
-        // Each performChanges block is atomic per album — one block per album
-        // keeps the operations small and lets PhotoKit interleave UI updates.
-        if !burstsAssets.isEmpty {
-            result.bursts = try await addAssets(burstsAssets,
-                                                toAlbumNamed: albumBursts(t),
-                                                candidateTitles: burstsTitles)
-        }
-        if !blurryAssets.isEmpty {
-            result.blurry = try await addAssets(blurryAssets,
-                                                toAlbumNamed: albumBlurry(t),
-                                                candidateTitles: blurryTitles)
-        }
-        if !docsAssets.isEmpty {
-            result.documents = try await addAssets(docsAssets,
-                                                   toAlbumNamed: albumDocs(t),
-                                                   candidateTitles: docsTitles)
-        }
-        // `albumBucketPlan` also resolves an (impossible-by-construction)
-        // overlap in the protective direction: needs-a-look wins, because a
-        // frame we could not classify must never be the one wearing the "safe
-        // to remove" label.
-        let plan = albumBucketPlan(
-            exactCandidates: exactIDs,
-            needsLookCandidates: needsLookIDs + needsLookAssets.map(\.localIdentifier),
-            currentExact: currentMemberIDs(inAlbumTitles: exactTitles),
-            currentNeedsLook: currentMemberIDs(inAlbumTitles: allNeedsLookTitles))
-        result.moved += try await removeAssets(
-            ids: plan.exactRemove,
-            fromAlbumTitles: exactTitles)
-        result.moved += try await removeAssets(
-            ids: plan.needsLookRemove,
-            fromAlbumTitles: allNeedsLookTitles)
-
-        let exactToAdd = Set(plan.exactAdd)
-        let exactAddAssets = exactAssets.filter { exactToAdd.contains($0.localIdentifier) }
-        if !exactAddAssets.isEmpty {
-            result.exactDupes = try await addAssets(exactAddAssets,
-                                                    toAlbumNamed: albumExact(t),
-                                                    candidateTitles: exactTitles)
-        }
-        if !needsLookAssets.isEmpty {
-            result.needsLook = try await addAssets(needsLookAssets,
-                                                    toAlbumNamed: albumNeedsLook(t),
-                                                    candidateTitles: allNeedsLookTitles)
+        // One step per album; each performChanges block is atomic per album.
+        // Take out first, then add, so the final membership is the plan's.
+        for step in steps {
+            result.moved += try await removeAssets(ids: step.remove,
+                                                   fromAlbumTitles: titles(for: step.bucket))
+            let assets = step.add.compactMap { assetsByID[$0] ?? extraByID[$0] }
+            guard !assets.isEmpty else { continue }
+            let added = try await addAssets(assets,
+                                            toAlbumNamed: name(for: step.bucket, t),
+                                            candidateTitles: titles(for: step.bucket))
+            switch step.bucket {
+            case .bursts:    result.bursts = added
+            case .blurry:    result.blurry = added
+            case .documents: result.documents = added
+            case .exact:     result.exactDupes = added
+            case .needsLook: result.needsLook = added
+            }
         }
         return result
     }
 
-    // MARK: - Bucket selectors
-
-    /// Non-keeper frames from non-exact groups → review bucket (not delete).
-    /// Protected frames are excluded: they should never appear to be "candidates".
-    private static func burstCandidates(
-        groups: [ReviewGroup],
-        exactGroups: Set<ReviewGroup.ID>
-    ) -> [String] {
-        groups
-            .filter { !exactGroups.contains($0.id) }
-            .flatMap { g in
-                g.photos.filter { p in
-                    !g.isKeeper(p) && !p.isProtected
-                }.map(\.uuid)
-            }
+    /// Every title this bucket's album answers to (resolution), and the title
+    /// to create it under (active language). Exhaustive over Core `AlbumBucket`.
+    private static func titles(for bucket: AlbumBucket) -> [String] {
+        switch bucket {
+        case .bursts:    return allTitles { $0.albumNameBursts() }
+        case .blurry:    return allTitles { $0.albumNameBlurry() }
+        case .documents: return allTitles { $0.albumNameDocs() }
+        case .exact:     return allTitles { $0.albumNameExact() }
+        case .needsLook: return allNeedsLookTitles
+        }
     }
-
-    /// Blurry non-keepers: only frames in a real multi-photo cluster that rank
-    /// lowest on sharpness AND are not the keeper. A lone photo is never "blurry".
-    /// Protected frames are excluded.
-    private static func blurryCandidates(
-        groups: [ReviewGroup],
-        exactGroups: Set<ReviewGroup.ID>
-    ) -> [String] {
-        groups
-            .filter { $0.photos.count >= 2 && !exactGroups.contains($0.id) }
-            .flatMap { g -> [String] in
-                // Among the non-keepers, find those whose sharpness is strictly
-                // below the keeper's. This is consistent with the Core ranking:
-                // sharpness is a within-group signal, and "blurry" only means
-                // "less sharp than the best frame we kept".
-                guard let keepPhoto = g.photos.first(where: { $0.uuid == g.keeperID }) else {
-                    return []
-                }
-                return g.photos.filter { p in
-                    !g.isKeeper(p)
-                        && !p.isProtected
-                        && p.sharpness < keepPhoto.sharpness
-                }.map(\.uuid)
-            }
-    }
-
-    /// Document/ID/scan frames across ALL groups — organizational, not delete.
-    /// Protected is already implied (isDocument → isProtected) but we include
-    /// them here to surface them as the organizational bucket they are.
-    private static func documentCandidates(groups: [ReviewGroup]) -> [String] {
-        groups
-            .flatMap(\.photos)
-            .filter(\.isDocument)
-            .map(\.uuid)
-    }
-
-    /// Non-keeper, deletable frames from exact-duplicate groups only. This is
-    /// the ONLY set that earns a delete suggestion in the UI, so it must use
-    /// the SAME predicate the delete pipeline uses (`Photo.isDeletable` =
-    /// not protected AND not unverifiable) — filtering `!isProtected` alone
-    /// let a documentEvalDegraded / editedUndetermined frame into the album
-    /// Photos.app shows as "safe to remove", even though snapsift's own
-    /// delete pipeline would never touch it. Honors the group's ACTUAL
-    /// keeperID (user promotion / face refine) — re-deriving via Core's
-    /// keeper() here could route the user's chosen keeper into the
-    /// suggest-delete album while sparing the ranked frame.
-    private static func exactCandidates(
-        groups: [ReviewGroup],
-        exactGroups: Set<ReviewGroup.ID>
-    ) -> [String] {
-        // Core `exactAlbumCandidates` is the rule (and what the test suite
-        // runs): not the keeper, deletable, and NOTHING from a group whose
-        // keeper is not one of its own frames.
-        groups
-            .filter { exactGroups.contains($0.id) }
-            .flatMap { exactAlbumCandidates(photos: $0.photos, keeperID: $0.keeperID) }
-    }
-
-    /// Every frame whose protection could not be determined AT ALL —
-    /// `Photo.isUnverifiable` (document eval ran blind, or edit state
-    /// unreadable). Independent of every other bucket and of keeper/reject
-    /// state: the point is not "this frame lost a delete vote", it is
-    /// "snapsift could not read this frame", so it is included regardless of
-    /// whether it happens to be a group's keeper. This bucket is ADDITIVE —
-    /// an unverifiable non-keeper frame may also land in `burstCandidates` /
-    /// `blurryCandidates` (organizational, never a delete suggestion, so no
-    /// safety concern in the overlap) — and it is the ONLY bucket that
-    /// exists purely to route the frame to a human, not to suggest anything
-    /// about it: `exactCandidates` never contains it (excluded upstream by
-    /// `isDeletable` before the exact-dup pass ever seeds), and
-    /// `documentCandidates` only catches a CONFIRMED document, not a
-    /// degraded eval.
-    private static func needsLookCandidates(groups: [ReviewGroup]) -> [String] {
-        groups.flatMap(\.photos).filter(\.isUnverifiable).map(\.uuid)
+    private static func name(for bucket: AlbumBucket, _ t: L10n) -> String {
+        switch bucket {
+        case .bursts:    return albumBursts(t)
+        case .blurry:    return albumBlurry(t)
+        case .documents: return albumDocs(t)
+        case .exact:     return albumExact(t)
+        case .needsLook: return albumNeedsLook(t)
+        }
     }
 
     // MARK: - PhotoKit helpers (idempotent add / bucket reconciliation)
