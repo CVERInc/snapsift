@@ -307,11 +307,7 @@ private struct GroupPreCommitRow: View {
                                 // These tiles are the removal list itself — a
                                 // VoiceOver user must hear WHICH photo and its albums.
                                 .accessibilityElement(children: .ignore)
-                                .accessibilityLabel(
-                                    (p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename)
-                                    + (group.uniqueMetadataIDs.contains(p.uuid)
-                                       ? " — " + t.preCommitUniqueMetadata() : "")
-                                    + (details.map { " — " + $0 } ?? ""))
+                                .accessibilityLabel(removalAccessibilityLabel(p, details: details))
                             }
                         }
                     }
@@ -325,6 +321,20 @@ private struct GroupPreCommitRow: View {
             RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous)
                 .strokeBorder(Color.reefBorder, lineWidth: 1)
         )
+    }
+
+    // Built as statements, not one `+` chain inside `body`: the three-term
+    // concatenation with a ternary and an optional map made Swift 5.10 give up
+    // type-checking the whole body ("unable to type-check in reasonable time").
+    private func removalAccessibilityLabel(_ p: Photo, details: String?) -> String {
+        var label: String = p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename
+        if group.uniqueMetadataIDs.contains(p.uuid) {
+            label += " — " + t.preCommitUniqueMetadata()
+        }
+        if let details {
+            label += " — " + details
+        }
+        return label
     }
 
     private func removalThumbnail(_ p: Photo) -> some View {
