@@ -803,9 +803,11 @@ struct L10n: Sendable {
     }
     func tipDelete() -> String {
         switch language {
-        case .en: return "This one gets deleted — it goes to Recently Deleted, recoverable for 30 days. Click it to keep it instead"
-        case .ja: return "これは削除されます（「最近削除した項目」に移動し、30日間は復元できます）— クリックすれば残せます"
-        case .zhTW: return "這張會被刪（移到「最近刪除」，30 天內可復原）—— 按一下改成留它"
+        // A click no longer changes anything (checks-b): it only focuses the
+        // card, so the old "click it to keep it instead" would now be false.
+        case .en: return "This one gets deleted — it goes to Recently Deleted, recoverable for 30 days"
+        case .ja: return "これは削除されます（「最近削除した項目」に移動し、30日間は復元できます）"
+        case .zhTW: return "這張會被刪（移到「最近刪除」，30 天內可復原）"
         }
     }
     /// For a card NOBODY has decided about. The tooltip used to hand these the
@@ -817,9 +819,9 @@ struct L10n: Sendable {
     /// does not keep; K is the verb that took over that job).
     func tipUndecided() -> String {
         switch language {
-        case .en: return "Not decided yet — X crosses this one out, K keeps it"
-        case .ja: return "まだ決まっていません — X で外す、K で残す"
-        case .zhTW: return "還沒決定 —— X 劃掉它，K 留下它"
+        case .en: return "Not decided yet — cross it out or keep it (X / K)"
+        case .ja: return "まだ決まっていません — 外すか、残すか（X / K）"
+        case .zhTW: return "還沒決定 —— 劃掉它或留下它（X／K）"
         }
     }
 
@@ -1232,7 +1234,7 @@ struct L10n: Sendable {
         }
     }
     func albumsWritten(bursts: Int, blurry: Int, docs: Int, exact: Int, needsLook: Int,
-                       moved: Int = 0) -> String {
+                       moved: Int = 0, movedReason: AlbumMoveReason? = nil) -> String {
         // Compact summary: "Sorted into albums · 12 bursts, 3 blurry, 1 exact dup"
         var parts: [String] = []
         if bursts > 0 { parts.append(albumsWrittenBursts(bursts)) }
@@ -1240,7 +1242,13 @@ struct L10n: Sendable {
         if docs   > 0 { parts.append(albumsWrittenDocs(docs)) }
         if exact  > 0 { parts.append(albumsWrittenExact(exact)) }
         if needsLook > 0 { parts.append(albumsWrittenNeedsLook(needsLook)) }
-        if moved > 0 { parts.append(albumsMovedBetweenBuckets(moved)) }
+        // Core `albumMoveReason` picks the sentence: after a stale restore the
+        // frames were not re-judged, so "no longer fits" would be a lie.
+        switch movedReason ?? albumMoveReason(moved: moved, resultsRestoredStale: false) {
+        case .noLongerFits?:      parts.append(albumsMovedBetweenBuckets(moved))
+        case .noLongerConfirmed?: parts.append(albumsNoLongerConfirmed(moved))
+        case nil:                 break
+        }
         // English joins with a comma; CJK uses the ideographic comma 「、」.
         let sep: String
         switch language {
@@ -1270,6 +1278,18 @@ struct L10n: Sendable {
         case .en:   return "\(n) taken out of a Snapsift album \(n == 1 ? "it no longer fits" : "they no longer fit") (the photo\(n == 1 ? " stays" : "s stay") in your library)"
         case .ja:   return "\(n)枚を今の分類に合わなくなった Snapsift アルバムから外しました（写真はライブラリに残ります）"
         case .zhTW: return "有 \(n) 張從不再符合的 Snapsift 相簿移出（照片仍在圖庫裡）"
+        }
+    }
+
+    /// The same removal after a STALE restore (review P3-A): the library changed
+    /// since the scan, so the app dropped its exact verdicts rather than trust
+    /// them. Nothing was found to be different — it is simply unproven now, and
+    /// a rescan is what proves it again.
+    private func albumsNoLongerConfirmed(_ n: Int) -> String {
+        switch language {
+        case .en:   return "\(n) taken out of a Snapsift album: no longer confirmed since your library changed. Scan again to re-check (the photo\(n == 1 ? " stays" : "s stay") in your library)"
+        case .ja:   return "\(n)枚を Snapsift アルバムから外しました。ライブラリが変わったため、確認が取れていません。もう一度スキャンすると判定し直します（写真はライブラリに残ります）"
+        case .zhTW: return "有 \(n) 張從 Snapsift 相簿移出：圖庫變動後還沒重新確認，再掃描一次就會重新判定（照片仍在圖庫裡）"
         }
     }
 

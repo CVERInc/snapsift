@@ -2606,5 +2606,184 @@ do {
           "only the two reasons real state can back are reachable (.notPicked is W2)")
 }
 
+
+print("checks-b (a): a whole-library scan re-evaluates every asset for Exact Duplicates (P2-A)")
+do {
+    typealias Albums = [AlbumBucket: Set<String>]
+    var libraryAsked = 0
+    func sort(_ groups: [AlbumSortGroup], kind: AlbumScanKind?, scope: AlbumScanScope,
+              library: Set<String>, _ albums: Albums) -> (albums: Albums, moved: Int) {
+        let steps = albumSortPlan(groups: groups, scanKind: kind, scanScope: scope,
+                                  libraryIDs: { libraryAsked += 1; return library },
+                                  currentMembers: { albums[$0] ?? [] })
+        var out = albums
+        var moved = 0
+        for step in steps {
+            out[step.bucket] = (out[step.bucket] ?? []).subtracting(step.remove).union(step.add)
+            moved += step.remove.count
+        }
+        return (out, moved)
+    }
+    func exact(_ a: Albums) -> Set<String> { a[.exact] ?? [] }
+    let pair = [ph(1, 0), ph(2, 1)]
+    let lib: Set<String> = ["U1", "U2", "U7", "U8"]
+    let first = sort([AlbumSortGroup(photos: pair, keeperID: "U1", rejected: [],
+                                     includeProtected: false, isExact: true)],
+                     kind: .burst, scope: .wholeLibrary, library: lib, [:])
+    check(exact(first.albums) == ["U2"], "pair {U1 keeper, U2} sorted ⇒ U2 is filed")
+
+    // U1 is deleted in Photos. U2 is alone now: no group holds it.
+    let after: Set<String> = ["U2", "U7", "U8"]
+    let whole = sort([], kind: .burst, scope: .wholeLibrary, library: after, first.albums)
+    check(exact(whole.albums).isEmpty && whole.moved == 1,
+          "U1 deleted outside; WHOLE-library rescan + sort ⇒ U2 leaves Exact Duplicates")
+    libraryAsked = 0
+    let narrow = sort([], kind: .burst, scope: .narrow, library: after, first.albums)
+    check(exact(narrow.albums) == ["U2"] && narrow.moved == 0,
+          "same, but a NARROW scan ⇒ U2 stays (that scan never looked at it)")
+    check(libraryAsked == 0, "…and a narrow sort never even asks for the library's ids")
+
+    // The widening is Exact Duplicates only, and only for a kind that feeds it.
+    let filed: Albums = [.exact: ["U2"], .bursts: ["U7"], .blurry: ["U8"],
+                         .documents: ["U7"], .needsLook: ["U8"]]
+    let others = sort([], kind: .lookAlikes, scope: .wholeLibrary, library: after, filed)
+    check(others.albums[.bursts] == ["U7"] && others.albums[.blurry] == ["U8"]
+            && others.albums[.documents] == ["U7"] && others.albums[.needsLook] == ["U8"]
+            && exact(others.albums).isEmpty,
+          "whole-library widens ONLY Exact Duplicates; the four review albums keep the narrow rule")
+    for kind in [AlbumScanKind.similarSets, nil] {
+        let none = sort([], kind: kind, scope: .wholeLibrary, library: after, first.albums)
+        check(exact(none.albums) == ["U2"] && none.moved == 0,
+              "kind \(kind.map { $0.rawValue } ?? "unknown") has no exact pass ⇒ whole-library removes nothing")
+    }
+    // A candidate of THIS sort is never removed by the widening.
+    let again = sort([AlbumSortGroup(photos: pair, keeperID: "U1", rejected: [],
+                                     includeProtected: false, isExact: true)],
+                     kind: .burst, scope: .wholeLibrary, library: lib, first.albums)
+    check(exact(again.albums) == ["U2"] && again.moved == 0,
+          "whole-library, pair intact ⇒ the filed copy stays filed")
+    // An album member that is not in the library set (and in no group) is untouched.
+    let ghost = sort([], kind: .burst, scope: .wholeLibrary, library: after, [.exact: ["U2", "ELSEWHERE"]])
+    check(exact(ghost.albums) == ["ELSEWHERE"], "an id the app did not vouch for is left alone")
+
+    let scopeTable: [(Bool?, Bool, AlbumScanScope)] = [
+        (true, true, .wholeLibrary), (true, false, .narrow),
+        (false, true, .narrow), (false, false, .narrow),
+        (nil, true, .narrow), (nil, false, .narrow),
+    ]
+    for (covered, current, want) in scopeTable {
+        check(albumScanScope(coveredWholeLibrary: covered, resultsCurrent: current) == want,
+              "covered=\(covered.map { "\($0)" } ?? "unknown") current=\(current) ⇒ \(want)")
+    }
+}
+
+print("checks-b (b): one scan-kind type, three pinned raw values (P3-D)")
+do {
+    check(AlbumScanKind.allCases.map(\.rawValue) == ["burst", "lookAlikes", "similarSets"],
+          "raw values are the snapshot's `kind` strings — renaming one orphans saved sessions")
+    for kind in AlbumScanKind.allCases {
+        check(AlbumScanKind(rawValue: kind.rawValue) == kind, "\(kind.rawValue) round-trips")
+    }
+    check(AlbumScanKind.allCases.filter { scanKindFeeds($0, .exact) } == [.burst, .lookAlikes],
+          "exactly the two kinds with an exact pass may remove from Exact Duplicates")
+}
+
+print("checks-b (c): after a stale restore, frames are 'no longer confirmed' (P3-A)")
+do {
+    let table: [(Int, Bool, AlbumMoveReason?)] = [
+        (0, false, nil), (0, true, nil),
+        (3, false, .noLongerFits), (3, true, .noLongerConfirmed),
+        (1, false, .noLongerFits), (1, true, .noLongerConfirmed),
+    ]
+    for (moved, stale, want) in table {
+        check(albumMoveReason(moved: moved, resultsRestoredStale: stale) == want,
+              "moved=\(moved) staleRestore=\(stale) ⇒ \(want.map { "\($0)" } ?? "say nothing")")
+    }
+}
+
+print("checks-b (d): the pointer's cross-out is the keys' X / ⇧X, chosen from state")
+do {
+    let table: [(Bool, Bool, Bool, CardRejectVerb)] = [
+        // marked, protected, unverifiable
+        (false, false, false, .crossOut),
+        (false, true,  false, .crossOutProtected),
+        (false, false, true,  .explainUnverifiable),
+        (false, true,  true,  .explainUnverifiable),
+        (true,  false, false, .undoCrossOut),
+        (true,  true,  false, .undoCrossOut),
+        (true,  false, true,  .undoCrossOut),
+        (true,  true,  true,  .undoCrossOut),
+    ]
+    for (marked, prot, unver, want) in table {
+        check(cardRejectVerb(isMarked: marked, isProtected: prot, isUnverifiable: unver) == want,
+              "marked=\(marked) protected=\(prot) unverifiable=\(unver) ⇒ \(want)")
+    }
+    for marked in [true, false] { for prot in [true, false] { for unver in [true, false] {
+        let v = cardRejectVerb(isMarked: marked, isProtected: prot, isUnverifiable: unver)
+        if prot || unver {
+            check(!v.marksImmediately,
+                  "a protected/unverifiable card (marked=\(marked) p=\(prot) u=\(unver)) is never marked by one click")
+        }
+        if unver { check(!v.usesShift, "an unverifiable card (marked=\(marked) p=\(prot)) never reaches the ⇧X override") }
+    } } }
+    check(cardVerbIsReadOnly(.focus) && cardVerbIsReadOnly(.preview),
+          "a click (focus) and a double-click (preview) change nothing")
+    check(!cardVerbIsReadOnly(.keep) && !cardVerbIsReadOnly(.reject) && !cardVerbIsReadOnly(.keepOnly),
+          "keep / cross out / keep only are the only card verbs that mutate")
+}
+
+print("checks-b (e): what a card says about itself")
+do {
+    let table: [(Bool, Bool, Bool, Bool, CardSpokenState)] = [
+        // keeper, delete, protected, unverifiable
+        (true,  false, false, false, .willKeep),
+        (true,  false, true,  true,  .willKeep),
+        (false, true,  false, false, .willDelete),
+        (false, true,  true,  false, .willDelete),      // ⇧X-confirmed favourite
+        (false, false, false, true,  .pleaseConfirm),
+        (false, false, true,  true,  .pleaseConfirm),
+        (false, false, true,  false, .protected),
+        (false, false, false, false, .undecided),
+    ]
+    for (keep, del, prot, unver, want) in table {
+        check(cardSpokenState(isKeeper: keep, isDelete: del, isProtected: prot, isUnverifiable: unver) == want,
+              "keeper=\(keep) delete=\(del) protected=\(prot) unverifiable=\(unver) ⇒ \(want)")
+    }
+    for keep in [true, false] { for del in [true, false] { for prot in [true, false] {
+        check(cardSpokenState(isKeeper: keep, isDelete: del, isProtected: prot, isUnverifiable: true) != .undecided,
+              "unclassifiable (keeper=\(keep) delete=\(del) protected=\(prot)) is never announced as 'no decision'")
+    } } }
+}
+
+print("checks-b (f): dimmed sidebar rows stay readable")
+do {
+    // Signet ReefTheme tokens (packages/native/Sources/Signet/Themes/ReefTheme.swift):
+    let reefDeep = RGB(hex: 0x052f30)       // sidebar colour
+    let reefText = RGB(hex: 0xe6f4f3)       // caption = reefTextDim = this at 0.62
+    let reefMint = RGB(hex: 0xaceace)       // row title
+    let textDimAlpha = 0.62
+    let dim = PaneDim.unselectedRowOpacity
+    let caption = contrastRatio(reefText, alpha: textDimAlpha * dim, over: reefDeep)
+    let title = contrastRatio(reefMint, alpha: dim, over: reefDeep)
+    print(String(format: "    caption %.2f:1, title %.2f:1 at row opacity %.2f", caption, title, dim))
+    check(caption >= 4.5, "dimmed caption ≥ 4.5:1 on the sidebar colour")
+    check(title >= 4.5, "dimmed title ≥ 4.5:1 on the sidebar colour")
+    // Control: the ruler reproduces the audit's numbers for the old 0.35.
+    let oldCaption = contrastRatio(reefText, alpha: textDimAlpha * 0.35, over: reefDeep)
+    let oldTitle = contrastRatio(reefMint, alpha: 0.35, over: reefDeep)
+    print(String(format: "    (old 0.35: caption %.2f:1, title %.2f:1)", oldCaption, oldTitle))
+    check(abs(oldCaption - 1.89) < 0.02 && abs(oldTitle - 2.58) < 0.02,
+          "the same ruler gives the audit's 1.89 / 2.58 for the old 0.35")
+    check(abs(contrastRatio(RGB(255, 255, 255), over: RGB(0, 0, 0)) - 21) < 0.001, "white on black = 21:1")
+    for active in [true, false] { for sel in [true, false] {
+        check(PaneDim.sidebarRowOpacity(contentActive: active, selected: sel, increaseContrast: true) == 1,
+              "Increase Contrast: no dimming (active=\(active) selected=\(sel))")
+    } }
+    check(PaneDim.sidebarRowOpacity(contentActive: true, selected: false, increaseContrast: false) == dim
+            && PaneDim.sidebarRowOpacity(contentActive: true, selected: true, increaseContrast: false) == 1
+            && PaneDim.sidebarRowOpacity(contentActive: false, selected: false, increaseContrast: false) == 1,
+          "only unselected rows dim, only while the content pane is active")
+}
+
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)

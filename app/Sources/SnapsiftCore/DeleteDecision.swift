@@ -839,11 +839,37 @@ public enum AlbumBucket: CaseIterable, Equatable {
     case bursts, blurry, documents, exact, needsLook
 }
 
-/// The kind of scan that produced the groups being sorted. Raw values match
-/// `LibraryModel.ScanKind` so the app converts by raw value, not by a switch
-/// that could quietly map two kinds onto one.
+/// The kind of scan that produced the groups being sorted.
+///
+/// THE scan-kind type: `LibraryModel.ScanKind` is a typealias of this, so the
+/// app has nothing to convert. It used to keep its own enum and bridge with
+/// `AlbumScanKind(rawValue: lastScanKind.rawValue)` — rename a case on either
+/// side and that returned nil, which `scanKindFeeds` reads as "this scan feeds
+/// no album": every sort quietly became add-only (review P3-D).
+///
+/// The raw values are ALSO the snapshot's `kind` field on disk. Renaming one
+/// makes every saved session restore as the default kind; the test suite pins
+/// the three strings for that reason.
 public enum AlbumScanKind: String, CaseIterable {
     case burst, lookAlikes, similarSets
+}
+
+/// How much of the library the scan that produced these results looked at.
+public enum AlbumScanScope: Equatable {
+    /// Every asset the library holds went through the scan.
+    case wholeLibrary
+    /// One album — or coverage we cannot vouch for. The cautious default.
+    case narrow
+}
+
+/// May this sort treat the WHOLE library as re-evaluated?
+///
+/// Only when the scan really covered it (`coveredWholeLibrary == true`; nil =
+/// nobody recorded what it covered, e.g. a session restored from disk) AND the
+/// library has not changed under the results since (`resultsCurrent`). Either
+/// one missing ⇒ `.narrow`, the rule that removes less.
+public func albumScanScope(coveredWholeLibrary: Bool?, resultsCurrent: Bool) -> AlbumScanScope {
+    (coveredWholeLibrary == true && resultsCurrent) ? .wholeLibrary : .narrow
 }
 
 /// Does a scan of this kind PRODUCE verdicts for this album?
@@ -935,13 +961,26 @@ public func albumCandidates(_ bucket: AlbumBucket,
 /// (`scanKindFeeds`), and EMPTY for a kind that does not. The asset-only
 /// needs-look extras belong to that album's working set too (they are always
 /// candidates, so this never removes one; it only keeps the set truthful).
+///
+/// ONE widening (review P2-A), for "Exact Duplicates" only: when the scan
+/// covered the WHOLE library (`scanScope == .wholeLibrary`), it did look at
+/// every asset — and an asset it put in no group is one it found no duplicate
+/// of. So the working set is every asset the library holds (`libraryIDs`,
+/// supplied by the app; asked for only in this case). Without it: {A, B}
+/// sorted, B filed; the user deletes A in Photos; B now has no group, so no
+/// scan would ever take it out, and the album labelled "safe to remove" holds
+/// the only copy left. A narrow scan keeps the narrow rule — it truly did not
+/// look. The other four albums are review-only and keep it too.
 public func albumWorkingSet(_ bucket: AlbumBucket,
                             scanKind: AlbumScanKind?,
+                            scanScope: AlbumScanScope = .narrow,
                             groups: [AlbumSortGroup],
-                            extraNeedsLookIDs: [String] = []) -> Set<String> {
+                            extraNeedsLookIDs: [String] = [],
+                            libraryIDs: () -> Set<String> = { [] }) -> Set<String> {
     guard scanKindFeeds(scanKind, bucket) else { return [] }
     var ids = Set(groups.flatMap { $0.photos.map(\.uuid) })
     if bucket == .needsLook { ids.formUnion(extraNeedsLookIDs) }
+    if bucket == .exact && scanScope == .wholeLibrary { ids.formUnion(libraryIDs()) }
     return ids
 }
 
@@ -964,10 +1003,13 @@ public struct AlbumStep: Equatable {
 /// remove".
 public func albumSortPlan(groups: [AlbumSortGroup],
                           scanKind: AlbumScanKind?,
+                          scanScope: AlbumScanScope = .narrow,
                           extraNeedsLookIDs: [String] = [],
+                          libraryIDs: () -> Set<String> = { [] },
                           currentMembers: (AlbumBucket) -> Set<String>) -> [AlbumStep] {
     func working(_ b: AlbumBucket) -> Set<String> {
-        albumWorkingSet(b, scanKind: scanKind, groups: groups, extraNeedsLookIDs: extraNeedsLookIDs)
+        albumWorkingSet(b, scanKind: scanKind, scanScope: scanScope, groups: groups,
+                        extraNeedsLookIDs: extraNeedsLookIDs, libraryIDs: libraryIDs)
     }
     func plain(_ b: AlbumBucket) -> AlbumStep {
         let candidates = albumCandidates(b, groups: groups)
@@ -988,6 +1030,26 @@ public func albumSortPlan(groups: [AlbumSortGroup],
     return [plain(.bursts), plain(.blurry), plain(.documents),
             AlbumStep(bucket: .exact, remove: pair.exactRemove, add: pair.exactAdd),
             AlbumStep(bucket: .needsLook, remove: pair.needsLookRemove, add: pair.needsLookAdd)]
+}
+
+/// Why the banner says frames left an album.
+public enum AlbumMoveReason: Equatable {
+    /// This scan judged them and they belong elsewhere now.
+    case noLongerFits
+    /// Nothing judged them: the session was restored over a library that had
+    /// changed, so its byte-verified verdicts were dropped, not overturned.
+    case noLongerConfirmed
+}
+
+/// What to tell the user about `moved` album removals — nil when nothing moved.
+///
+/// After a STALE restore the exact verdicts are cleared (the library changed;
+/// they may no longer be true), so the next sort takes those frames out of
+/// "Exact Duplicates". Saying they "no longer fit" claims a judgement nobody
+/// made (review P3-A); they are no longer CONFIRMED, and a rescan settles it.
+public func albumMoveReason(moved: Int, resultsRestoredStale: Bool) -> AlbumMoveReason? {
+    guard moved > 0 else { return nil }
+    return resultsRestoredStale ? .noLongerConfirmed : .noLongerFits
 }
 
 // MARK: - Own-write token restamp

@@ -141,6 +141,8 @@ enum AlbumWriter {
     /// `extraNeedsLookAssets` — assets that never became a `Photo` at all (Live
     ///                 Photo paired-video undetermined) but are just as
     ///                 unclassifiable; folded into the same needs-look album.
+    /// `scanScope` / `libraryIDs` — did that scan cover the whole library, and
+    ///                 if so the ids it looked at (Core `albumWorkingSet`).
     /// `scanKind`    — the kind of scan that produced `groups`; decides which
     ///                 albums this sort may take anything OUT of (Core
     ///                 `scanKindFeeds`). nil ⇒ add only.
@@ -152,6 +154,8 @@ enum AlbumWriter {
         assetsByID: [String: PHAsset],
         extraNeedsLookAssets: [PHAsset] = [],
         scanKind: AlbumScanKind?,
+        scanScope: AlbumScanScope = .narrow,
+        libraryIDs: () -> Set<String> = { [] },
         t: L10n
     ) async throws -> AlbumWriteResult {
         var result = AlbumWriteResult()
@@ -174,7 +178,12 @@ enum AlbumWriter {
                                isExact: exactGroups.contains($0.id))
             },
             scanKind: scanKind,
+            // Whole-library scan ⇒ Exact Duplicates is reconciled against every
+            // asset that scan looked at (review P2-A); Core asks for the ids
+            // only then.
+            scanScope: scanScope,
             extraNeedsLookIDs: extraIDs,
+            libraryIDs: libraryIDs,
             currentMembers: { currentMemberIDs(inAlbumTitles: titles(for: $0)) })
 
         // One step per album; each performChanges block is atomic per album.
