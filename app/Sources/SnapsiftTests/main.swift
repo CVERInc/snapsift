@@ -3066,19 +3066,19 @@ do {
         check(audited, "PhotoKit commit ports audit to the injected history")
         let history = PhotoLibraryHistoryStore(storage: storage)
         var reconciledIDs: [String] = []
-        let recovered = history.reconcile { ids in reconciledIDs = ids; return ["exists"] }
+        let recovered = history.reconcile(access: .authorized) { ids in reconciledIDs = ids; return ["exists"] }
         check(recovered == 1 && reconciledIDs == ["exists", "gone", "logged"],
               "reconciliation live-checks intent and books only vanished, unlogged assets")
         check(history.loadSessions().flatMap { $0.records.map(\.assetIdentifier) } == ["gone", "logged"],
               "recovered history is newest-first and contains no invented or duplicate removal")
         check(DeletionAuditLog.pendingIntent(at: storage.journalURL) == nil
-              && history.reconcile { _ in [] } == 0, "journal reconciliation is idempotent")
+              && history.reconcile(access: .authorized) { _ in [] } == 0, "journal reconciliation is idempotent")
         check(PhotoLibraryHistoryStore(storage: otherStorage).loadSessions().isEmpty,
               "history and journal storage remain isolated per app")
         check(history.exportText().contains("fixture.jpg"), "injected history supports plain-text export")
         check(DeletionAuditLog.writeIntent(intent, to: storage.journalURL), "cancelled-commit intent fixture is written")
         let before = history.loadSessions().count
-        check(history.reconcile { Set($0) } == 0 && history.loadSessions().count == before,
+        check(history.reconcile(access: .authorized) { Set($0) } == 0 && history.loadSessions().count == before,
               "cancelled system confirmation invents no deletion history")
         check(DeletionAuditLog.writeIntent(intent, to: storage.journalURL), "clear-intent fixture is written")
         await MainActor.run { ports.clearIntent() }

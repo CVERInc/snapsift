@@ -1624,8 +1624,19 @@ public final class PhotoLibrarySession {
     /// and inventing history is worse than missing it. Publishes a count so the
     /// view can say so — a history that silently repaired itself is still a
     /// history the user had no reason to trust.
+    ///
+    /// "Cannot see" is not "gone": without full read-write Photos access the
+    /// journal is left in place and nothing is fetched (Core
+    /// `journalReconcile`). Shells call this again whenever authorization
+    /// changes, so a journal deferred at launch does not wait for a relaunch.
+    /// Never while a commit is in flight: its own intent is in the journal and
+    /// its photos are still there — reconciling then would book nothing and
+    /// clear it.
     public func reconcileDeletionJournal() {
-        let recovered = history.reconcile { ids in
+        guard !isDeleting else { return }
+        let access = DeletionAuditLog.PhotoAccess(
+            photoKitRawValue: PHPhotoLibrary.authorizationStatus(for: .readWrite).rawValue)
+        let recovered = history.reconcile(access: access) { ids in
             var existing: Set<String> = []
             let opts = PHFetchOptions()
             opts.includeAllBurstAssets = true
@@ -1633,7 +1644,7 @@ public final class PhotoLibrarySession {
                 .enumerateObjects { a, _, _ in existing.insert(a.localIdentifier) }
             return existing
         }
-        if recovered > 0 { journalRecoveredCount = recovered }
+        if let recovered, recovered > 0 { journalRecoveredCount = recovered }
     }
 
     // MARK: - Scan snapshot (cross-launch persistence)

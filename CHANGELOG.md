@@ -77,6 +77,11 @@ reserved for the first signed and notarized build.
   or of another kind of scan — stay where they are; a Similar Sets scan takes
   nothing out. Membership only: nothing is deleted, and albums you made yourself
   are never touched.
+- An interrupted Apple Photos delete is no longer booked into the history while
+  Photos access is missing or limited — "cannot see the photo" was being read as
+  "the photo is gone". The check now waits until Photos access is full (it runs
+  again as soon as access changes, not only at the next launch), and a delete
+  started in the meantime adds to that pending record instead of replacing it.
 - ⌘ / ⌃ / ⌥ combined with a letter, a digit or ⌫ can no longer trigger the plain
   key's action (⌘⌫ with nothing marked used to cross out the focused photo).
   This includes the arrow keys in the list and the grid: ⌘↑, ⌥→ and the like now

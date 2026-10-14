@@ -31,21 +31,31 @@ public struct PhotoLibraryHistoryStore: Sendable {
         DeletionAuditLog.exportText(sessions: loadSessions(), labels: labels)
     }
 
-    /// Book only vanished, unlogged assets. The caller supplies a live public fetch.
+    /// Book only vanished, unlogged assets, and only when the library can be
+    /// read in full (`access`): "cannot see" is not "gone". Without full
+    /// read-write access the journal is left exactly where it is and
+    /// `stillExisting` is never called. Returns nil when it deferred, else
+    /// the number of records booked.
+    ///
+    /// When the history write fails the journal is kept too: it is still the
+    /// only record of those deletions, and the next reconcile tries again.
     @discardableResult
-    public func reconcile(stillExisting: ([String]) -> Set<String>) -> Int {
+    public func reconcile(access: DeletionAuditLog.PhotoAccess,
+                          stillExisting: ([String]) -> Set<String>) -> Int? {
         guard let intent = DeletionAuditLog.pendingIntent(at: storage.journalURL) else { return 0 }
-        let existing = stillExisting(intent.records.map(\.assetIdentifier))
         let logged = DeletionAuditLog.loggedAssetIdentifiers(from: loadSessions())
-        let records = DeletionAuditLog.recoverableRecords(from: intent,
-                                                          stillExisting: existing,
-                                                          alreadyLogged: logged)
-        var recovered = 0
-        if !records.isEmpty {
-            let session = DeletionSession(timestamp: intent.timestamp, records: records)
-            if DeletionAuditLog.append(session, to: storage.historyURL) { recovered = records.count }
+        switch DeletionAuditLog.journalReconcile(
+            intent: intent, access: access, alreadyLogged: logged,
+            stillExisting: { stillExisting(intent.records.map(\.assetIdentifier)) }) {
+        case .deferUntilReadable:
+            return nil
+        case .book(let records):
+            if !records.isEmpty {
+                let session = DeletionSession(timestamp: intent.timestamp, records: records)
+                guard DeletionAuditLog.append(session, to: storage.historyURL) else { return 0 }
+            }
+            DeletionAuditLog.clearIntent(at: storage.journalURL)
+            return records.count
         }
-        DeletionAuditLog.clearIntent(at: storage.journalURL)
-        return recovered
     }
 }

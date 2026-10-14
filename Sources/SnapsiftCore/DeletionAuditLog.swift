@@ -162,7 +162,12 @@ public struct DeletionAuditLog: Sendable {
             if !fm.fileExists(atPath: dir.path) {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
             }
-            try JSONEncoder().encode(session).write(to: url, options: .atomic)
+            // NEVER overwrite: a journal already here is an earlier commit
+            // nobody has reconciled yet (deferred at launch for lack of
+            // access, or its history write failed). It is the only record of
+            // those deletions — the new intent is added to it.
+            let merged = mergedIntent(pending: pendingIntent(at: url), new: session)
+            try JSONEncoder().encode(merged).write(to: url, options: .atomic)
             return true
         } catch {
             return false
@@ -195,6 +200,95 @@ public struct DeletionAuditLog: Sendable {
         intent.records.filter {
             !stillExisting.contains($0.assetIdentifier)
                 && !alreadyLogged.contains($0.assetIdentifier)
+        }
+    }
+
+    /// What to do with a journal found at launch.
+    public enum JournalReconcile {
+        /// The library cannot be read in full right now. Book nothing and
+        /// LEAVE THE JOURNAL where it is, for a moment that can see.
+        case deferUntilReadable
+        /// The library was read: book these (possibly none), then clear.
+        case book([DeletionRecord])
+    }
+
+    /// How much of the Photos library this process may read right now. Built
+    /// from `PHAuthorizationStatus.rawValue` so the PhotoKit layer hands over
+    /// the platform's own answer and never a Bool it computed itself.
+    public enum PhotoAccess: Equatable, Sendable {
+        case notDetermined, restricted, denied, authorized, limited, unknown
+
+        /// `PHAuthorizationStatus`: 0 notDetermined, 1 restricted, 2 denied,
+        /// 3 authorized, 4 limited. Anything else is `unknown`, which is not
+        /// full access.
+        public init(photoKitRawValue raw: Int) {
+            switch raw {
+            case 0: self = .notDetermined
+            case 1: self = .restricted
+            case 2: self = .denied
+            case 3: self = .authorized
+            case 4: self = .limited
+            default: self = .unknown
+            }
+        }
+
+        /// Only full read-write access can tell "gone" from "hidden": a LIMITED
+        /// library hides everything outside the user's selection.
+        public var seesWholeLibrary: Bool { self == .authorized }
+    }
+
+    /// "Cannot see" is not "gone" (check 2026-10-11, F2).
+    ///
+    /// `recoverableRecords` books every journalled asset the live fetch did not
+    /// return. That is only evidence of a deletion if the fetch COULD have
+    /// returned it: without full read-write access PhotoKit answers with
+    /// nothing, and the history would record a whole session of photos as
+    /// deleted that are all still there, then clear the only evidence. So: no
+    /// full access ⇒ defer — and `stillExisting` (the library fetch) is NOT
+    /// EVEN CALLED, so asking can neither mislead nor raise a permission prompt.
+    public static func journalReconcile(intent: DeletionSession,
+                                        access: PhotoAccess,
+                                        alreadyLogged: Set<String>,
+                                        stillExisting: () -> Set<String>) -> JournalReconcile {
+        guard access.seesWholeLibrary else { return .deferUntilReadable }
+        return .book(recoverableRecords(from: intent,
+                                        stillExisting: stillExisting(),
+                                        alreadyLogged: alreadyLogged))
+    }
+
+    /// What the journal must hold once a NEW commit announces itself while an
+    /// earlier journal is still unreconciled: both. The earlier records come
+    /// first and keep the earlier session's timestamp; a record the new commit
+    /// also names is carried once, as the new commit's.
+    public static func mergedIntent(pending: DeletionSession?,
+                                    new: DeletionSession) -> DeletionSession {
+        guard let pending else { return new }
+        let newIDs = Set(new.records.map(\.assetIdentifier))
+        let carried = pending.records.filter { !newIDs.contains($0.assetIdentifier) }
+        guard !carried.isEmpty else { return new }
+        return DeletionSession(timestamp: pending.timestamp, records: carried + new.records)
+    }
+
+    /// What is left in the journal when ONE commit is finished with it (its
+    /// history line is written, or it deleted nothing): everything that commit
+    /// did not put there. nil = the journal is done, remove the file.
+    public static func intentRemaining(pending: DeletionSession?,
+                                       settled: DeletionSession) -> DeletionSession? {
+        guard let pending else { return nil }
+        let done = Set(settled.records.map(\.assetIdentifier))
+        let left = pending.records.filter { !done.contains($0.assetIdentifier) }
+        return left.isEmpty ? nil : DeletionSession(timestamp: pending.timestamp, records: left)
+    }
+
+    /// A commit is finished with the journal: take ITS records out and leave
+    /// any earlier, still-unreconciled ones for `journalReconcile`. The commit
+    /// path calls this — never `clearIntent`, which would erase a journal that
+    /// was deferred at launch (review P2-1).
+    public static func settleIntent(_ session: DeletionSession, at url: URL = intentURL) {
+        if let left = intentRemaining(pending: pendingIntent(at: url), settled: session) {
+            _ = try? JSONEncoder().encode(left).write(to: url, options: .atomic)
+        } else {
+            clearIntent(at: url)
         }
     }
 

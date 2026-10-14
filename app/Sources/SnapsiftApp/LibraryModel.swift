@@ -10,7 +10,12 @@ final class LibraryModel: ObservableObject {
     typealias ScanKind = PhotoLibrarySession.ScanKind
     private let session: PhotoLibrarySession
     private var localization = L10n(Language.detect())
-    @Published var auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    @Published var auth = PHPhotoLibrary.authorizationStatus(for: .readWrite) {
+        // A journal deferred at launch for lack of access must not have to
+        // wait for a relaunch: whenever the answer changes, ask again. The
+        // session decides whether THIS status may book anything.
+        didSet { if auth != oldValue { reconcileDeletionJournal() } }
+    }
     @Published var showSaveRotationConfirm = false
     @Published var saveRotationError: Error?
     @Published var saveRotationSuccess = false
