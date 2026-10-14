@@ -67,7 +67,11 @@ struct FolderPreCommitReviewSheet: View {
         .background(Color.reefGround).preferredColorScheme(.dark)
     }
 
-    private func groupRow(_ group: ReviewGroup) -> some View {
+    // @MainActor: the row reads the main-actor FolderLibraryModel. Only `body`
+    // is main-actor on the Swift 5.10 SDK (the whole View protocol is on newer
+    // ones), and this struct holds the model as a plain `let`, so nothing
+    // infers the isolation for a helper method.
+    @MainActor private func groupRow(_ group: ReviewGroup) -> some View {
         let withdrawal = payload.summary.withdrawals.first { $0.groupID == group.id }
         let keptPhotos = group.photos.filter { !group.isDelete($0) }
         return VStack(alignment: .leading, spacing: 8) {

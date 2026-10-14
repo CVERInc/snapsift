@@ -84,7 +84,9 @@ public func folderHistoryUnavailableReason(
         while true {
             if volumeKey(ancestor) == record.volumeKey { return true }
             let parent = ancestor.deletingLastPathComponent()
-            if parent.path == ancestor.path { return false }
+            // At the root, older Foundation (macOS 14) returns "/.." from
+            // deletingLastPathComponent, so comparing paths alone never ends.
+            if ancestor.pathComponents.count <= 1 || parent.path == ancestor.path { return false }
             ancestor = parent
         }
     }

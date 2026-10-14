@@ -295,7 +295,7 @@ private func checkFolderPipeline(root: URL) async throws {
     try FileManager.default.copyItem(at: original, to: sameRoot.appendingPathComponent("second.png"))
     let same = try await FolderScanPipeline.scan(roots: [sameRoot])
     defer { same.accesses.forEach { $0.stop() } }
-    check(same.groups.count == 1 && same.exactGroupIDs == [same.groups[0].id]
+    checkNeedsVision(same.groups.count == 1 && same.exactGroupIDs == [same.groups[0].id]
           && same.groups[0].rejected.count == 1 && same.groups[0].rejected == same.groups[0].autoSeeded,
           "folder pipeline: generated same-folder byte copies are exact and seed one non-keeper")
     check(same.items.allSatisfy { !$0.photo.documentEvalDegraded && $0.photo.sharpness > 0 },
@@ -310,7 +310,7 @@ private func checkFolderPipeline(root: URL) async throws {
     check(cross.crossFolderDuplicates.count == 1 && cross.crossFolderDuplicates[0].itemIDs.count == 3
           && cross.crossFolderDuplicates[0].folderKeys.count == 2 && cross.roots.count == 2,
           "folder pipeline: mixed same/cross-folder primary-byte copies surface as data")
-    check(cross.exactGroupIDs.count == 1 && cross.groups.allSatisfy { $0.rejected.isEmpty && $0.autoSeeded.isEmpty },
+    checkNeedsVision(cross.exactGroupIDs.count == 1 && cross.groups.allSatisfy { $0.rejected.isEmpty && $0.autoSeeded.isEmpty },
           "folder pipeline: mixed-folder exact badge is retained and every pre-mark withheld")
     let aliasRoot = try folder(root, "pipeline-hardlink")
     let alias = aliasRoot.appendingPathComponent("linked.png")
@@ -330,7 +330,7 @@ private func checkFolderPipeline(root: URL) async throws {
           "folder pipeline fixture: near-identical generated images qualify for shared time clustering")
     let near = try await FolderScanPipeline.scan(roots: [nearRoot])
     defer { near.accesses.forEach { $0.stop() } }
-    check(near.groups.count == 1 && near.groups[0].photos.count == 2 && near.groups[0].confidentDupe,
+    checkNeedsVision(near.groups.count == 1 && near.groups[0].photos.count == 2 && near.groups[0].confidentDupe,
           "folder pipeline: shared content clustering and neural gate group near-identical generated images")
     check(near.exactGroupIDs.isEmpty && near.groups[0].rejected.isEmpty && Set(near.primaryHashes.values).count == 2,
           "folder pipeline: perceptual near-copies with different bytes are never pre-marked")
