@@ -512,7 +512,7 @@ enum AlbumWriter {
         // would leave the contradiction this exists to end.
         for album in albums {
             var members: [PHAsset] = []
-            PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { a, _, _ in
+            PHAsset.fetchAssets(in: album, options: allMembersFetchOptions()).enumerateObjects { a, _, _ in
                 if ids.contains(a.localIdentifier) { members.append(a) }
             }
             guard !members.isEmpty else { continue }
@@ -576,7 +576,7 @@ enum AlbumWriter {
 
         if let album = resolved {
             collectionLocalID = album.localIdentifier
-            let memberResult = PHAsset.fetchAssets(in: album, options: nil)
+            let memberResult = PHAsset.fetchAssets(in: album, options: allMembersFetchOptions())
             var memberIDs = Set<String>()
             memberResult.enumerateObjects { a, _, _ in memberIDs.insert(a.localIdentifier) }
             toAdd = assets.filter { !memberIDs.contains($0.localIdentifier) }
@@ -608,4 +608,14 @@ enum AlbumWriter {
         _ = newCollectionID  // used implicitly via the change block capture
         return toAdd.count
     }
+}
+
+/// Album member fetches must see every burst frame, like the scan fetch does:
+/// without `includeAllBurstAssets` Photos returns only each burst's
+/// representative, so a filed non-representative frame is invisible here and
+/// can never be removed (or is re-added as if missing).
+private func allMembersFetchOptions() -> PHFetchOptions {
+    let opts = PHFetchOptions()
+    opts.includeAllBurstAssets = true
+    return opts
 }
