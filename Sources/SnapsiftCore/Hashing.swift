@@ -65,8 +65,9 @@ public final class BKTree {
 public enum HashGroupingStrategy {
     /// Multi-index hashing when it pays, the BK-tree otherwise.
     case automatic
-    /// Always multi-index hashing. Correct for every distance, but slower than
-    /// the BK-tree on small inputs or large distances.
+    /// Multi-index hashing whenever the item indices fit in Int32 (beyond
+    /// that it falls back to the BK-tree). Correct for every distance, but
+    /// slower than the BK-tree on small inputs or large distances.
     case multiIndex
     /// Always the BK-tree: quadratic on 64-bit hashes, cheap on small inputs.
     case bkTree
