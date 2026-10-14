@@ -1394,6 +1394,24 @@ struct L10n: Sendable {
     // FIX C: include-protected override strings.
 
     /// Button label for the per-group "include protected" toggle (N = protected frame count).
+    /// Folder Mode labels for the include-protected toggle: the action marks,
+    /// it does not delete.
+    func folderIncludeProtected(_ n: Int) -> String {
+        switch language {
+        case .en: return "Also mark protected (\(n))"
+        case .ja: return "保護対象もマーク（\(n)）"
+        case .zhTW: return "也標記受保護的（\(n)）"
+        }
+    }
+
+    func folderIncludingProtected(_ n: Int) -> String {
+        switch language {
+        case .en: return "Marking protected too (\(n))"
+        case .ja: return "保護対象もマークします（\(n)）"
+        case .zhTW: return "受保護的也會標記（\(n)）"
+        }
+    }
+
     func includeProtected(_ n: Int) -> String {
         switch language {
         case .en: return "Also delete protected (\(n))"
@@ -1412,6 +1430,16 @@ struct L10n: Sendable {
     }
 
     /// Tooltip for the include-protected toggle button.
+    /// Folder Mode counterpart: marking moves nothing, and removal goes to the
+    /// Trash after its own review — never "Recently Deleted".
+    func folderTipIncludeProtected() -> String {
+        switch language {
+        case .en: return "Also marks this group's edited photos and documents. This turns off snapsift's protection for them — use with care. Marking moves nothing; moving to the Trash needs a separate review."
+        case .ja: return "このグループの編集済み写真・書類にもマークを付けます。snapsift の保護を解除する操作です。慎重に使ってください。マークだけでは移動しません。ゴミ箱への移動には別の確認が必要です。"
+        case .zhTW: return "把這組的已編輯照片與文件也標記起來。這會解除 snapsift 對它們的保護，請謹慎使用。標記不會移動任何檔案，移至垃圾桶前仍需另行確認。"
+        }
+    }
+
     func tipIncludeProtected() -> String {
         switch language {
         case .en: return "Also deletes this group's favorites, edited photos and documents. This turns off snapsift's protection for them — use with care. They go to Recently Deleted, recoverable for 30 days."
