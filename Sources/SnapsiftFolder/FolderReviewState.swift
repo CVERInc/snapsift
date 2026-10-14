@@ -10,6 +10,9 @@ public func folderUniqueMetadataIDs(_ metadata: [String: LibraryMetadata]) -> Se
 /// In-memory Folder Mode decisions. No persistence or Photos effects belong here.
 public struct FolderReviewState {
     public var groups: [ReviewGroup]
+    /// What the last ⇧K did to each group, so ⇧K again can put it back exactly
+    /// (Core `keepOnlyUndoTarget`). In memory only, like the Photos session's.
+    private var keepOnlyUndo: [ReviewGroup.ID: KeepOnlyUndo] = [:]
 
     public init(groups: [ReviewGroup] = []) { self.groups = groups }
 
@@ -27,20 +30,19 @@ public struct FolderReviewState {
     @discardableResult
     public mutating func apply(_ action: Action, to id: ReviewGroup.ID) -> Bool {
         guard let index = groups.firstIndex(where: { $0.id == id }) else { return false }
+        if case .keepOnly(let frame) = action { return keepOnly(frame, in: id) != nil }
         var group = groups[index]
         switch action {
-        case .promote(let frame), .keepOnly(let frame):
+        case .promote(let frame):
+            // The membership guard `PhotoLibrarySession.promote` gets from Core
+            // `nominateAction`: a frame outside the group is never a keeper.
             guard group.photos.contains(where: { $0.uuid == frame }) else { return false }
-            let next: GroupMarkState
-            if case .keepOnly = action {
-                next = keepOnlyState(photos: group.photos, keeperID: frame, rejected: group.rejected)
-                group.autoSeeded = []
-            } else {
-                next = promoteState(GroupMarkState(keeperID: group.keeperID, rejected: group.rejected), to: frame)
-                group.autoSeeded.remove(frame)
-            }
+            let next = promoteState(GroupMarkState(keeperID: group.keeperID, rejected: group.rejected), to: frame)
+            group.autoSeeded.remove(frame)
             group.keeperID = next.keeperID
             group.rejected = next.rejected
+        case .keepOnly:
+            return false   // handled above
         case .keepAll:
             group.rejected = []
             group.autoSeeded = []
@@ -81,6 +83,38 @@ public struct FolderReviewState {
         if group.protectedDeletionCount == 0 { group.includeProtected = false }
         groups[index] = group
         return true
+    }
+
+    /// ⇧K through Core `keepOnlyAction`, the verb the Photos session runs:
+    /// membership guard, provenance (seeded marks ⇧K leaves standing stay
+    /// seeded), the override rule, and the undo — ⇧K again on the same frame
+    /// with nothing touched in between puts the group back exactly as it was.
+    /// nil = no such group or frame.
+    @discardableResult
+    public mutating func keepOnly(_ frame: String, in id: ReviewGroup.ID) -> KeepOnlyOutcome? {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return nil }
+        let group = groups[index]
+        let current = GroupMarkSnapshot(keeperID: group.keeperID, rejected: group.rejected,
+                                        autoSeeded: group.autoSeeded,
+                                        includeProtected: group.includeProtected)
+        guard let outcome = keepOnlyAction(photos: group.photos, current: current,
+                                           undo: keepOnlyUndo[id], frameID: frame) else { return nil }
+        let live = Set(groups.map(\.id))
+        keepOnlyUndo = keepOnlyUndo.filter { live.contains($0.key) }
+        let next: GroupMarkSnapshot
+        switch outcome {
+        case .undone(let back):
+            next = back
+            keepOnlyUndo[id] = nil
+        case .applied(let after, let remember):
+            next = after
+            keepOnlyUndo[id] = remember
+        }
+        groups[index].keeperID = next.keeperID
+        groups[index].rejected = next.rejected
+        groups[index].autoSeeded = next.autoSeeded
+        groups[index].includeProtected = next.includeProtected
+        return outcome
     }
 
     private func nominateSurvivor(in group: inout ReviewGroup) {

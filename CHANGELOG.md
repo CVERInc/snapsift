@@ -38,7 +38,10 @@ reserved for the first signed and notarized build.
   the stronger one. Works in the grid and in the preview, and appears in the `?`
   cheat sheet in English, Japanese and Traditional Chinese.
   - It **marks only**: nothing leaves the library until the pre-commit sheet is
-    confirmed, and `K` or `A` afterwards undo it the ordinary way.
+    confirmed. Pressing `⇧K` again on the same photo, before touching anything
+    else in the group, puts the group back exactly as it was. (`A` keeps the
+    whole group; plain `K` only un-marks the one photo it nominates.) Holding
+    `⇧K` down does not flip it back and forth. Works the same in Folder Mode.
   - Protected photos (favorite / edited / document) and anything snapsift could
     not classify are **never** crossed out by ⇧K — only the per-photo ⇧X path,
     which asks first, can cross out a known protection. The set it marks is the
@@ -46,8 +49,9 @@ reserved for the first signed and notarized build.
     use; there is no second definition of "deletable".
   - It does not undo your decisions either: a protected photo you had already
     force-crossed-out yourself with ⇧X **stays** crossed out.
-  - Marks made this way are attributed as "marked by you" in the audit log,
-    never as an app suggestion.
+  - Marks ⇧K adds are attributed as "marked by you" in the audit log. A copy
+    the exact-duplicate pass had already marked, and that stays marked, keeps
+    its "Same photo" attribution.
 
 ### Changed
 - Shared Core and PhotoKit libraries are now published from the root Swift
@@ -61,6 +65,30 @@ reserved for the first signed and notarized build.
   written.** Previously the deletion went ahead without the journal; now
   nothing is deleted and the usual "nothing was deleted" alert appears, so an
   interrupted deletion always leaves a record.
+
+### Fixed
+- **Snapsift's albums now follow what the latest scan concluded about the photos
+  it looked at.** Sorting used to only add: if you changed which copy to keep and
+  sorted again, the old candidate stayed in "Exact Duplicates" next to the new
+  one — the photo and its only other copy, in the album described as safe to
+  remove. A sort now takes a photo out of a Snapsift album when this scan
+  re-evaluated it and no longer puts it there, and the banner says how many.
+  Photos the scan did not look at — results of an earlier scan of another album,
+  or of another kind of scan — stay where they are; a Similar Sets scan takes
+  nothing out. Membership only: nothing is deleted, and albums you made yourself
+  are never touched.
+- An interrupted Apple Photos delete is no longer booked into the history while
+  Photos access is missing or limited — "cannot see the photo" was being read as
+  "the photo is gone". The check now waits until Photos access is full (it runs
+  again as soon as access changes, not only at the next launch), and a delete
+  started in the meantime adds to that pending record instead of replacing it.
+- ⌘ / ⌃ / ⌥ combined with a letter, a digit or ⌫ can no longer trigger the plain
+  key's action (⌘⌫ with nothing marked used to cross out the focused photo).
+  This includes the arrow keys in the list and the grid: ⌘↑, ⌥→ and the like now
+  do nothing there. Folder Mode already ignored ⌘ and ⌃; it now ignores ⌥ too.
+- `K` and `1–9` ignore a photo that is not in the group.
+- `D` no longer leaves the "include protected" override switched on with no
+  protected photo marked.
 
 ## [0.10.0] — 2026-09-18
 

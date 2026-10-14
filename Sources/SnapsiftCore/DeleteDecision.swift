@@ -149,7 +149,9 @@ public func promoteState(_ state: GroupMarkState, to frameID: String) -> GroupMa
 ///
 /// K : ⇧K :: X : ⇧X — plain verb, stronger verb. The stronger one here is
 /// still only a MARKING action: nothing leaves the library until the pre-commit
-/// sheet is confirmed, and `K` / `A` undo it the ordinary way.
+/// sheet is confirmed. ⇧K again on the same frame, with nothing touched in
+/// between, puts the group back exactly as it was (`keepOnlyUndoTarget`); `A`
+/// keeps everything. Plain `K` is NOT an undo — it un-marks one frame.
 ///
 /// What it marks is `bulkRejectCandidates` — THE one composition rule, shared
 /// with `d` (reject-all) and the exact-duplicate auto-seed. That is the whole
@@ -192,6 +194,188 @@ public func keepOnlyState(photos: [Photo],
         .union(ownProtectedMarks)
         .subtracting([keeperID])
     return GroupMarkState(keeperID: keeperID, rejected: marks)
+}
+
+// MARK: - Verb guards and the ⇧K undo
+
+/// Is `frameID` one of this group's frames? The guard every verb that takes a
+/// frame id must pass before it writes that id into group state.
+///
+/// `keepOnly` always had it; `promote` did not, so a stale focus (same group
+/// id, different members) could write a FOREIGN uuid into `keeperID`: no frame
+/// wears the keep badge, and the next `D` silently falls back to `photos[0]` —
+/// the app's pick replacing the owner's (check 2026-10-11, safety-r4 P2-1).
+public func isGroupMember(_ frameID: String, of photos: [Photo]) -> Bool {
+    photos.contains { $0.uuid == frameID }
+}
+
+/// Everything ⇧K can move in a group, so its undo can put ALL of it back.
+public struct GroupMarkSnapshot: Equatable {
+    public let keeperID: String
+    public let rejected: Set<String>
+    public let autoSeeded: Set<String>
+    public let includeProtected: Bool
+    public init(keeperID: String, rejected: Set<String>,
+                autoSeeded: Set<String>, includeProtected: Bool) {
+        self.keeperID = keeperID
+        self.rejected = rejected
+        self.autoSeeded = autoSeeded
+        self.includeProtected = includeProtected
+    }
+}
+
+/// What one ⇧K did to one group: the state it found and the state it left.
+/// Held in memory only, per group; never persisted.
+public struct KeepOnlyUndo: Equatable {
+    public let before: GroupMarkSnapshot
+    public let after: GroupMarkSnapshot
+    public init(before: GroupMarkSnapshot, after: GroupMarkSnapshot) {
+        self.before = before
+        self.after = after
+    }
+}
+
+/// ⇧K pressed again on the frame it just kept, with NOTHING changed since:
+/// the state to put back, or nil when this press is not an undo.
+///
+/// An EXACT undo or none at all. It returns `undo.before` verbatim — the marks,
+/// keeper and override the owner had one keystroke ago — and only when
+///   • the group is still precisely what that ⇧K left (`current == undo.after`:
+///     any X / K / A / D / commit sweep in between and this is a fresh ⇧K),
+///   • the press is on the same frame (⇧K on a different frame is a new
+///     nomination, not a retraction), and
+///   • every id it would restore still names a frame of the group.
+/// It never composes a set: there is no path here that marks a frame the owner
+/// had not already marked himself immediately before ⇧K.
+public func keepOnlyUndoTarget(current: GroupMarkSnapshot,
+                               undo: KeepOnlyUndo?,
+                               frameID: String,
+                               photos: [Photo]) -> GroupMarkSnapshot? {
+    guard let undo, current == undo.after, frameID == undo.after.keeperID else { return nil }
+    let ids = Set(photos.map(\.uuid))
+    guard ids.contains(undo.before.keeperID),
+          undo.before.rejected.isSubset(of: ids) else { return nil }
+    return undo.before
+}
+
+/// Is any protected frame of this group marked? `includeProtected` (the ⇧X
+/// consent) must not outlive the last one — the ONE rule every verb below
+/// applies. It can only turn the override OFF.
+private func hasProtectedMark(_ photos: [Photo], _ rejected: Set<String>) -> Bool {
+    photos.contains { $0.isProtected && rejected.contains($0.uuid) }
+}
+
+/// `K` / `1–9` as a complete action: the state to write, or nil = do nothing.
+///
+/// This is what `PhotoLibrarySession.promote` applies, whole — the membership
+/// guard, `promoteState`, the provenance of the nominated frame, and the
+/// override rule are one decision here, so the session cannot nominate without
+/// passing the guard and the suite runs the code the app runs. (Folder Mode's
+/// `FolderReviewState.apply(.promote)` carries the same guard of its own.)
+public func nominateAction(photos: [Photo],
+                           current: GroupMarkSnapshot,
+                           to frameID: String) -> GroupMarkSnapshot? {
+    guard isGroupMember(frameID, of: photos) else { return nil }
+    let next = promoteState(GroupMarkState(keeperID: current.keeperID, rejected: current.rejected),
+                            to: frameID)
+    return GroupMarkSnapshot(keeperID: next.keeperID,
+                             rejected: next.rejected,
+                             autoSeeded: current.autoSeeded.subtracting([frameID]),
+                             includeProtected: current.includeProtected
+                                && hasProtectedMark(photos, next.rejected))
+}
+
+/// What one ⇧K press does.
+public enum KeepOnlyOutcome: Equatable {
+    /// This press was the undo: write this state and forget the undo record.
+    case undone(GroupMarkSnapshot)
+    /// A fresh ⇧K: write this state; `remember` is the undo record to keep,
+    /// or nil when the press changed nothing (there is nothing to go back to,
+    /// and a second press must not announce a restore that did not happen).
+    case applied(GroupMarkSnapshot, remember: KeepOnlyUndo?)
+}
+
+/// `⇧K` as a complete action (nil = the frame is not in this group). Shared by
+/// the Photos session and Folder Mode's review state.
+///
+/// PROVENANCE: a mark the exact-duplicate pass seeded and ⇧K left standing
+/// stays `autoSeeded`; marks ⇧K adds are the user's. It only ever shrinks
+/// `autoSeeded`.
+public func keepOnlyAction(photos: [Photo],
+                           current: GroupMarkSnapshot,
+                           undo: KeepOnlyUndo?,
+                           frameID: String) -> KeepOnlyOutcome? {
+    guard isGroupMember(frameID, of: photos) else { return nil }
+    if let back = keepOnlyUndoTarget(current: current, undo: undo,
+                                     frameID: frameID, photos: photos) {
+        return .undone(back)
+    }
+    let next = keepOnlyState(photos: photos, keeperID: frameID, rejected: current.rejected)
+    let after = GroupMarkSnapshot(keeperID: next.keeperID,
+                                  rejected: next.rejected,
+                                  autoSeeded: current.autoSeeded.intersection(next.rejected),
+                                  includeProtected: current.includeProtected
+                                    && hasProtectedMark(photos, next.rejected))
+    return .applied(after, remember: after == current ? nil
+                                                      : KeepOnlyUndo(before: current, after: after))
+}
+
+/// `D` as a complete action: the state to write and how many frames it had to
+/// leave out because they are unverifiable. nil for an empty group.
+///
+/// The keeper is not changed; a `keeperID` that names no frame falls back to
+/// the first frame for the purpose of "who is spared", as it always did.
+public func rejectAllAction(photos: [Photo],
+                            current: GroupMarkSnapshot) -> (state: GroupMarkSnapshot, withheld: Int)? {
+    guard let first = photos.first else { return nil }
+    let spared = isGroupMember(current.keeperID, of: photos) ? current.keeperID : first.uuid
+    let marks = bulkRejectCandidates(photos: photos, keeperID: spared)
+    return (GroupMarkSnapshot(keeperID: current.keeperID,
+                              rejected: marks,
+                              autoSeeded: [],   // user overrode — the marks are theirs now
+                              includeProtected: current.includeProtected
+                                && hasProtectedMark(photos, marks)),
+            bulkRejectWithheld(photos: photos, keeperID: spared).count)
+}
+
+/// May this key press reach the single-letter verbs (X K A D R 1–9 ⌫ …)?
+///
+/// Only a press carrying none of ⌘ ⌃ ⌥. SPEC §2: ⌘⏎ is the only key that
+/// changes data and ⌘⌫ opens the sheet — but those are menu Commands, and when
+/// a menu item is DISABLED its key equivalent is not consumed, so ⌘⌫ with
+/// nothing marked fell through to the plain ⌫ verb and crossed out the focused
+/// photo; ⌘A / ⌘D / ⌘K / ⌘1 landed on keep-all / reject-all / nominate the
+/// same way (check 2026-10-11, a11y-keys §3). Folder Mode's handler refused ⌘
+/// and ⌃ but let ⌥ through. Shift is NOT in this list: ⇧X, ⇧K and ⇧R are
+/// verbs in their own right.
+public func isPlainVerbKey(command: Bool, control: Bool, option: Bool) -> Bool {
+    !command && !control && !option
+}
+
+/// A key press that MAY act as a verb. It can only be constructed from a press
+/// that passes `isPlainVerbKey`, and the handlers' verb helpers take this type
+/// rather than raw modifiers — so in the Photos grid, the preview and Folder
+/// Mode there is no way to reach K / X / ⌫ / R without the gate having been
+/// asked.
+public struct VerbKeyPress: Equatable {
+    public let shift: Bool
+    public let isRepeat: Bool
+
+    public init?(command: Bool, control: Bool, option: Bool, shift: Bool, isRepeat: Bool) {
+        guard isPlainVerbKey(command: command, control: control, option: option) else { return nil }
+        self.shift = shift
+        self.isRepeat = isRepeat
+    }
+
+    public enum KeepVerb: Equatable { case nominate, keepOnly, swallow }
+
+    /// Which K this is. ⇧K toggles (press again = undo), so a HELD ⇧K must not
+    /// flip the group back and forth at the key-repeat rate: auto-repeat of ⇧K
+    /// is swallowed. Plain K is idempotent and repeats harmlessly.
+    public var keepVerb: KeepVerb {
+        guard shift else { return .nominate }
+        return isRepeat ? .swallow : .keepOnly
+    }
 }
 
 // MARK: - Commit-time sweep
@@ -568,8 +752,8 @@ public func evaluateLibraryIdentity(sidecarPath: String?,
 ///
 /// The two buckets are mutually exclusive within a single write
 /// (`exactCandidates` filters on `isDeletable`, `needsLookCandidates` on
-/// `isUnverifiable`), but the album write itself is membership-only and never
-/// recomputes what it wrote last time. So a frame filed under "Exact
+/// `isUnverifiable`), but the album write USED TO be add-only and never
+/// recomputed what it wrote last time. So a frame filed under "Exact
 /// Duplicates" (which the UI and the README call safe to remove) on a run with
 /// Full Disk Access reappears under "Needs a look" on a run without it, and
 /// Photos.app — the surface this tool deliberately delegates the decision to —
@@ -588,24 +772,121 @@ public struct AlbumBucketPlan: Equatable {
     public let exactAdd: [String]
     /// Frames to add to "Snapsift · Needs a look".
     public let needsLookAdd: [String]
-    /// Frames to remove from "Snapsift · Exact Duplicates" — they belong in
-    /// Needs-a-look now.
+    /// Frames to take OUT of "Snapsift · Exact Duplicates": they belong in
+    /// Needs-a-look now, or this scan re-evaluated them and no longer files
+    /// them as exact (`albumMembershipRemovals`).
     public let exactRemove: Set<String>
-    /// Frames to remove from "Snapsift · Needs a look" — they are classifiable
-    /// again and belong in Exact Duplicates.
+    /// Frames to take OUT of "Snapsift · Needs a look": they are classifiable
+    /// again and belong in Exact Duplicates, or this scan re-evaluated them
+    /// and they are readable now.
     public let needsLookRemove: Set<String>
 }
 
+/// `exactWorkingSet` / `needsLookWorkingSet` — what THIS scan re-evaluated for
+/// each album (`albumWorkingSet`). Empty (the default) ⇒ the old add-only
+/// behaviour plus cross-bucket exclusivity.
 public func albumBucketPlan(exactCandidates: [String],
-                            needsLookCandidates: [String]) -> AlbumBucketPlan {
+                            needsLookCandidates: [String],
+                            exactWorkingSet: Set<String> = [],
+                            needsLookWorkingSet: Set<String> = []) -> AlbumBucketPlan {
     let needsLook = Set(needsLookCandidates)
     // Overlap is a bug upstream; resolve it in the protective direction here
     // rather than letting both albums claim the frame.
     let exact = exactCandidates.filter { !needsLook.contains($0) }
-    return AlbumBucketPlan(exactAdd: exact,
-                           needsLookAdd: needsLookCandidates,
-                           exactRemove: needsLook,
-                           needsLookRemove: Set(exact))
+    return AlbumBucketPlan(
+        exactAdd: exact,
+        needsLookAdd: needsLookCandidates,
+        exactRemove: needsLook.union(albumMembershipRemovals(workingSet: exactWorkingSet,
+                                                             candidates: exact)),
+        needsLookRemove: Set(exact).union(albumMembershipRemovals(workingSet: needsLookWorkingSet,
+                                                                  candidates: needsLookCandidates)))
+}
+
+// MARK: - Snapsift's own albums: authoritative over what the scan looked at
+
+/// A snapsift-owned album is authoritative per sort ONLY OVER WHAT THE SCAN
+/// LOOKED AT: a member comes out when this scan re-evaluated it (`workingSet`)
+/// and no longer puts it there. A member the scan never looked at stays
+/// exactly where it is. The writer removes only ids that are actually members
+/// (`AlbumWriter.removeAssets` intersects with the album), so this is the set
+/// of ids that MAY come out, never a set that is added anywhere.
+///
+/// Two failures, one on each side of this rule:
+///   • add-only (before 2026-10-13, check F1): {A keeper, B} sorted put B in
+///     "Exact Duplicates"; the owner chose B as keeper and sorted again, which
+///     added A and LEFT B — the album the README calls safe to remove held the
+///     photo and its only other copy.
+///   • authoritative over EVERYTHING (review P1-1 on the first fix): sorting
+///     after a scan of one small album, or after a scan kind that has no exact
+///     pass, took every other scan's results out of all five albums. They had
+///     not been judged; they had not been seen.
+///
+/// Removal is membership-only (`PHAssetCollectionChangeRequest.removeAssets`)
+/// and only from albums resolved by snapsift's own titles.
+public func albumMembershipRemovals(workingSet: Set<String>, candidates: [String]) -> Set<String> {
+    workingSet.subtracting(candidates)
+}
+
+/// The frames of ONE exact-duplicate group that may sit in the album labelled
+/// "safe to remove": not the keeper, and deletable (`Photo.isDeletable` — the
+/// same predicate the delete pipeline uses).
+///
+/// A group whose `keeperID` names no frame in it contributes NOTHING. Without
+/// that, "everything that is not the keeper" is every frame of the group, and
+/// the album would hold all copies of a photo — the one state it must never be
+/// in. Unknown keeper ⇒ nobody is a candidate.
+public func exactAlbumCandidates(photos: [Photo], keeperID: String) -> [String] {
+    guard isGroupMember(keeperID, of: photos) else { return [] }
+    return photos.filter { $0.uuid != keeperID && $0.isDeletable }.map(\.uuid)
+}
+
+/// Snapsift's five albums.
+public enum AlbumBucket: CaseIterable, Equatable {
+    case bursts, blurry, documents, exact, needsLook
+}
+
+/// The kind of scan that produced the groups being sorted. Raw values match
+/// `PhotoLibrarySession.ScanKind`, so the session converts by raw value, not by
+/// a switch that could quietly map two kinds onto one.
+public enum AlbumScanKind: String, CaseIterable {
+    case burst, lookAlikes, similarSets
+}
+
+/// Does a scan of this kind PRODUCE verdicts for this album?
+///
+/// Burst and look-alike scans build review groups and run the exact-duplicate
+/// pass over every one of them, so they feed all five. A similar-sets scan
+/// builds sets (browsed on macOS; reviewed and removed through
+/// `deleteReviewed(in:)` on a session without an enrichment port) and never
+/// writes an album: no review groups, no exact pass. It decides nothing about
+/// any of these albums, so a sort after it may add (the Live Photo videos it
+/// could not pair still go to Needs-a-look) and removes NOTHING. An unknown
+/// kind (nil) is treated the same way.
+public func scanKindFeeds(_ kind: AlbumScanKind?, _ bucket: AlbumBucket) -> Bool {
+    switch kind {
+    case .burst?, .lookAlikes?: return true
+    case .similarSets?, nil:    return false
+    }
+}
+
+/// The asset ids this scan re-evaluated FOR THIS ALBUM — the only members a
+/// sort may take out of it.
+///
+/// No scan kind keeps a record of every asset it examined: the full-library
+/// map is trimmed to group members the moment a scan ends. What survives, and
+/// what a verdict was actually reached about, is the frames of the current
+/// review groups — so that is the working set, for the kinds that feed the
+/// album (`scanKindFeeds`), and EMPTY for a kind that does not. The asset-only
+/// needs-look extras belong to that album's working set too (they are always
+/// candidates, so this never removes one; it only keeps the set truthful).
+public func albumWorkingSet(_ bucket: AlbumBucket,
+                            scanKind: AlbumScanKind?,
+                            groupPhotoIDs: [String],
+                            extraNeedsLookIDs: [String] = []) -> Set<String> {
+    guard scanKindFeeds(scanKind, bucket) else { return [] }
+    var ids = Set(groupPhotoIDs)
+    if bucket == .needsLook { ids.formUnion(extraNeedsLookIDs) }
+    return ids
 }
 
 // MARK: - Own-write token restamp

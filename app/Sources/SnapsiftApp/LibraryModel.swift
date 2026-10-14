@@ -10,7 +10,12 @@ final class LibraryModel: ObservableObject {
     typealias ScanKind = PhotoLibrarySession.ScanKind
     private let session: PhotoLibrarySession
     private var localization = L10n(Language.detect())
-    @Published var auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    @Published var auth = PHPhotoLibrary.authorizationStatus(for: .readWrite) {
+        // A journal deferred at launch for lack of access must not have to
+        // wait for a relaunch: whenever the answer changes, ask again. The
+        // session decides whether THIS status may book anything.
+        didSet { if auth != oldValue { reconcileDeletionJournal() } }
+    }
     @Published var showSaveRotationConfirm = false
     @Published var saveRotationError: Error?
     @Published var saveRotationSuccess = false
@@ -124,7 +129,9 @@ final class LibraryModel: ObservableObject {
         session.reviewAlbumNames(for: id).flatMap { t.reviewAlbums($0) }
     }
     func promote(group: ReviewGroup.ID, to id: String) { session.promote(group: group, to: id) }
-    func keepOnly(group: ReviewGroup.ID, frame: String) { session.keepOnly(group: group, frame: frame) }
+    /// True when this press was ⇧K's undo (the group is back as it was).
+    @discardableResult
+    func keepOnly(group: ReviewGroup.ID, frame: String) -> Bool { session.keepOnly(group: group, frame: frame) }
     func keepAll(group: ReviewGroup.ID) { session.keepAll(group: group) }
     func toggleKeepAll(group: ReviewGroup.ID) { session.toggleKeepAll(group: group) }
     @discardableResult

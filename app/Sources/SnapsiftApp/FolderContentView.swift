@@ -262,7 +262,10 @@ struct FolderContentView: View {
     }
 
     private func handleKey(_ key: KeyPress, _ group: ReviewGroup) -> KeyPress.Result {
-        guard !model.isScanning, !model.isBusy, !key.modifiers.contains(.command), !key.modifiers.contains(.control),
+        // ⌘ / ⌃ / ⌥ never reach a verb — the same gate as Apple Photos Mode
+        // (`KeyPress.verbPress`, Core `VerbKeyPress`). This handler used to
+        // refuse ⌘ and ⌃ but let ⌥ through, so ⌥X crossed out a file.
+        guard !model.isScanning, !model.isBusy, let press = key.verbPress,
               let id = model.focusedFrame, let index = group.photos.firstIndex(where: { $0.uuid == id }) else { return .ignored }
         switch key.key {
         case .leftArrow, .rightArrow:
@@ -279,13 +282,18 @@ struct FolderContentView: View {
                 model.focusedFrame = group.photos[next].uuid
             }
         case "k", "K":
-            if key.modifiers.contains(.shift) { model.keepOnly(group: group.id, frame: id) }
-            else { model.promote(group: group.id, to: id) }
+            // Core decides which K this is (and swallows a held ⇧K, which
+            // would otherwise toggle its own undo at the key-repeat rate).
+            switch press.keepVerb {
+            case .nominate: model.promote(group: group.id, to: id)
+            case .keepOnly: if model.keepOnly(group: group.id, frame: id) { hint = t.keepOnlyUndone() }
+            case .swallow:  break
+            }
         case "a", "A": model.keepAll(group: group.id)
         case "d", "D": model.toggleDeleteAll(group: group.id)
         case "x", "X", .delete:
             let photo = group.photos[index]
-            if key.modifiers.contains(.shift), photo.isProtected, !photo.isUnverifiable, !group.rejected.contains(id) {
+            if press.shift, photo.isProtected, !photo.isUnverifiable, !group.rejected.contains(id) {
                 forceTarget = id
             } else if !model.toggleReject(group: group.id, frameID: id) {
                 hint = photo.isUnverifiable ? t.folderUnverifiable() : t.protectedHint()
