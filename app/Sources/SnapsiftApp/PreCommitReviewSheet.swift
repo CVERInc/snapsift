@@ -134,7 +134,10 @@ struct PreCommitReviewSheet: View {
                             .font(.callout)
                             .foregroundStyle(Color.reefText)
                     }
+                    // `.checkbox` is macOS-only; iOS keeps the default switch.
+                    #if os(macOS)
                     .toggleStyle(.checkbox)
+                    #endif
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
@@ -183,6 +186,10 @@ struct PreCommitReviewSheet: View {
                     .tint(.reefRed)
                     .disabled(!confirmEnabled)
                     .keyboardShortcut(.return, modifiers: .command)
+                    // Spoken without the "⌘⏎" glyphs, and WITH the count and the
+                    // destination: a VoiceOver user who jumps straight to this
+                    // button must hear how many photos and where they go.
+                    .accessibilityLabel(t.preCommitConfirmSpoken(totalDeletions))
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)

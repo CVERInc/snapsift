@@ -65,6 +65,22 @@ reserved for the first signed and notarized build.
   written.** Previously the deletion went ahead without the journal; now
   nothing is deleted and the usual "nothing was deleted" alert appears, so an
   interrupted deletion always leaves a record.
+- **A click on a photo only focuses it, in both modes.** It used to make the
+  clicked photo the keeper. Keep and cross-out are now two buttons on the
+  focused (or hovered) card and items in its context menu, with "Keep only
+  this one" there too; double-click opens the preview in Apple Photos Mode.
+  They go through the same rules as K, X, ⇧X and ⇧K, so a protected photo
+  still asks first and an unclassifiable one still cannot be marked.
+- **VoiceOver can do the whole review.** A card is read as its position,
+  capture date and what will happen to it, with the reason; an
+  unclassifiable photo is read as protected, never as "no decision". Each card
+  has named actions for the same verbs, and marks, keeper changes and banners
+  are announced. The destructive buttons are spoken as their visible title
+  plus the count, without the ⌘⏎ glyphs.
+- **Sidebar dimming stays readable (proposal).** While the photos have focus,
+  unselected sidebar rows dim to 0.85 instead of 0.35 and the selected row
+  turns from filled to outlined. Increase Contrast turns dimming off; Reduce
+  Motion turns the fades into cuts. Apple Photos Mode only.
 
 ### Fixed
 - **Snapsift's albums now follow what the latest scan concluded about the photos
