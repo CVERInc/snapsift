@@ -124,7 +124,9 @@ final class LibraryModel: ObservableObject {
         session.reviewAlbumNames(for: id).flatMap { t.reviewAlbums($0) }
     }
     func promote(group: ReviewGroup.ID, to id: String) { session.promote(group: group, to: id) }
-    func keepOnly(group: ReviewGroup.ID, frame: String) { session.keepOnly(group: group, frame: frame) }
+    /// True when this press was ⇧K's undo (the group is back as it was).
+    @discardableResult
+    func keepOnly(group: ReviewGroup.ID, frame: String) -> Bool { session.keepOnly(group: group, frame: frame) }
     func keepAll(group: ReviewGroup.ID) { session.keepAll(group: group) }
     func toggleKeepAll(group: ReviewGroup.ID) { session.toggleKeepAll(group: group) }
     @discardableResult

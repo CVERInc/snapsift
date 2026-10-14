@@ -193,7 +193,12 @@ public final class FolderLibrarySession {
     }
 
     public func promote(group: ReviewGroup.ID, to id: String) { if !isBusy { review.apply(.promote(id), to: group) } }
-    public func keepOnly(group: ReviewGroup.ID, frame id: String) { if !isBusy { review.apply(.keepOnly(id), to: group) } }
+    /// ⇧K. True when this press was the undo of the previous ⇧K on that frame.
+    @discardableResult
+    public func keepOnly(group: ReviewGroup.ID, frame id: String) -> Bool {
+        guard !isBusy, case .undone? = review.keepOnly(id, in: group) else { return false }
+        return true
+    }
     public func keepAll(group: ReviewGroup.ID) { if !isBusy { review.apply(.keepAll, to: group) } }
     public func toggleDeleteAll(group: ReviewGroup.ID) { if !isBusy { review.apply(.toggleDeleteAll, to: group) } }
     public func setIncludeProtected(group: ReviewGroup.ID, value: Bool) { if !isBusy { review.apply(.includeProtected(value), to: group) } }

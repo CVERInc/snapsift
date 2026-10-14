@@ -217,6 +217,10 @@ public final class PhotoLibrarySession {
     public private(set) var refiningFaces = false { willSet { onChange?() } }
     /// True once a face-refinement pass has re-picked keepers.
     public private(set) var facesApplied = false { willSet { onChange?() } }
+    /// What the last ⇧K did to each group, so ⇧K again can put it back exactly
+    /// (Core `keepOnlyUndoTarget`). In memory only — never in the snapshot: an
+    /// undo across a relaunch would restore marks nobody remembers making.
+    private var keepOnlyUndo: [ReviewGroup.ID: KeepOnlyUndo] = [:]
     /// Semantic category buckets from the "Similar sets" pass. When non-empty the
     /// UI is in browse mode (categories), not cluster-review mode.
     public internal(set) var categories: [CategoryBucket] = [] { willSet { onChange?() } }
@@ -1149,28 +1153,28 @@ public final class PhotoLibrarySession {
     /// ⏎ action in grid and loupe.
     public func promote(group groupID: ReviewGroup.ID, to photoID: String) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
-        // Core `promoteState` is the rule: keeper := photoID, and the ONLY
-        // change to `rejected` is removing that frame. Shared with ⇧K's undo
-        // path so the test suite and the app run the same transition.
-        let next = promoteState(GroupMarkState(keeperID: groups[i].keeperID,
-                                               rejected: groups[i].rejected),
-                                to: photoID)
-        groups[i].keeperID = next.keeperID
-        groups[i].rejected = next.rejected
-        groups[i].autoSeeded.remove(photoID)
-        // Same rule `toggleReject` applies when it un-marks a frame
-        // (see its "a lingering flag would silently re-arm the next ⇧X"
-        // branch): the group-level override must not outlive its last
-        // protected rejection. Nominating a force-rejected protected frame
-        // used to clear the mark and leave the flag standing, so the
-        // pre-commit warning and the toolbar toggle both read a state that
-        // no longer had anything to describe. Never widens a deletion —
-        // it can only turn the override OFF, and only when nothing is
-        // relying on it.
-        if groups[i].protectedDeletionCount == 0 {
-            groups[i].includeProtected = false
-        }
+        // Core `nominateAction` is the whole verb: nil when the frame is not
+        // one of this group's (a stale focus used to write a foreign uuid into
+        // `keeperID`), otherwise keeper := frame, that frame un-marked and
+        // nothing else, its provenance dropped, and the ⇧X override dropped
+        // once no protected frame is marked any more. Never widens a deletion.
+        guard let next = nominateAction(photos: groups[i].photos,
+                                        current: markSnapshot(i), to: photoID) else { return }
+        applyMarks(next, to: i)
         scheduleSnapshotSave()
+    }
+
+    private func markSnapshot(_ i: Int) -> GroupMarkSnapshot {
+        GroupMarkSnapshot(keeperID: groups[i].keeperID, rejected: groups[i].rejected,
+                          autoSeeded: groups[i].autoSeeded,
+                          includeProtected: groups[i].includeProtected)
+    }
+
+    private func applyMarks(_ m: GroupMarkSnapshot, to i: Int) {
+        groups[i].keeperID = m.keeperID
+        groups[i].rejected = m.rejected
+        groups[i].autoSeeded = m.autoSeeded
+        groups[i].includeProtected = m.includeProtected
     }
 
     /// "Keep only this one" — ⇧K in grid and loupe.
@@ -1181,8 +1185,15 @@ public final class PhotoLibrarySession {
     /// keeper is nominated and excluded in the SAME transition.
     ///
     /// MARKING ONLY. Nothing is deleted here; the pre-commit sheet is still the
-    /// only door to `performChanges`, and K (re-nominate) or A (keep all) undo
-    /// it the ordinary way.
+    /// only door to `performChanges`.
+    ///
+    /// UNDO: ⇧K again on the same frame, with nothing else touched in between,
+    /// puts the group back EXACTLY as it was — keeper, marks, provenance and
+    /// override (Core `keepOnlyUndoTarget`; returns true when that happened).
+    /// The earlier wording here said "K or A undo it the ordinary way", which
+    /// was not true: K un-marks one frame and leaves the others marked, and A
+    /// clears everything including ⇧X marks ⇧K had deliberately kept. A is
+    /// still the "keep them all" exit; it is not a way back.
     ///
     /// The marked set comes from Core `keepOnlyState` → `bulkRejectCandidates`,
     /// the same composition rule `d` and the exact-duplicate auto-seed use, so
@@ -1197,21 +1208,36 @@ public final class PhotoLibrarySession {
     /// force-marked protected frame (including one ⇧K just carried over) keeps
     /// it, correctly: that frame still needs the confirmation it was given.
     ///
-    /// The marks are the USER's, not the app's suggestion: `autoSeeded` is
-    /// cleared so the audit log attributes them as "marked by you"
-    /// (`DeleteMarkReason.userRejected`) and never as `.exactDuplicate`.
-    public func keepOnly(group groupID: ReviewGroup.ID, frame frameID: String) {
-        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
-        guard groups[i].photos.contains(where: { $0.uuid == frameID }) else { return }
-        let next = keepOnlyState(photos: groups[i].photos, keeperID: frameID,
-                                 rejected: groups[i].rejected)
-        groups[i].keeperID = next.keeperID
-        groups[i].rejected = next.rejected
-        groups[i].autoSeeded = []   // user decision — never an app suggestion
-        if groups[i].protectedDeletionCount == 0 {
-            groups[i].includeProtected = false
+    /// PROVENANCE: a mark the exact-duplicate pass seeded and ⇧K left standing
+    /// stays `autoSeeded` — it is still a byte-verified copy, and the history
+    /// should keep saying so ("Same photo") rather than flatten it to "You
+    /// marked it". Marks ⇧K ADDS are the user's (`.userRejected`). `promote`
+    /// keeps provenance the same way. It only ever shrinks `autoSeeded`.
+    @discardableResult
+    public func keepOnly(group groupID: ReviewGroup.ID, frame frameID: String) -> Bool {
+        guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return false }
+        // Core `keepOnlyAction` is the whole verb (membership guard, undo or
+        // apply, provenance, override rule, and whether there is anything to
+        // remember).
+        guard let outcome = keepOnlyAction(photos: groups[i].photos, current: markSnapshot(i),
+                                           undo: keepOnlyUndo[groupID], frameID: frameID) else {
+            return false
         }
-        scheduleSnapshotSave()
+        // Records for groups that no longer exist (committed away, rescanned)
+        // can never match again — drop them here rather than let them pile up.
+        let live = Set(groups.map(\.id))
+        keepOnlyUndo = keepOnlyUndo.filter { live.contains($0.key) }
+        defer { scheduleSnapshotSave() }
+        switch outcome {
+        case .undone(let back):
+            applyMarks(back, to: i)
+            keepOnlyUndo[groupID] = nil
+            return true
+        case .applied(let after, let remember):
+            applyMarks(after, to: i)
+            keepOnlyUndo[groupID] = remember
+            return false
+        }
     }
 
     /// Keep the entire group — clear all rejections. `a` key.
@@ -1254,12 +1280,15 @@ public final class PhotoLibrarySession {
     @discardableResult
     public func rejectAll(group groupID: ReviewGroup.ID) -> Int {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return 0 }
-        let photos = groups[i].photos
-        let keep = photos.first { $0.uuid == groups[i].keeperID } ?? photos[0]
-        groups[i].rejected = bulkRejectCandidates(photos: photos, keeperID: keep.uuid)
-        groups[i].autoSeeded = []   // user overrode — rejections are theirs now
+        // Core `rejectAllAction` is the whole verb: the marks, the cleared
+        // provenance, the override that must not outlive its last protected
+        // mark (`d` rewrites `rejected` with no protected frame in it), and
+        // the count it had to leave out.
+        guard let action = rejectAllAction(photos: groups[i].photos,
+                                           current: markSnapshot(i)) else { return 0 }
+        applyMarks(action.state, to: i)
         scheduleSnapshotSave()
-        return bulkRejectWithheld(photos: photos, keeperID: keep.uuid).count
+        return action.withheld
     }
 
     /// Toggle reject-all: if not all non-protected are rejected, reject them;

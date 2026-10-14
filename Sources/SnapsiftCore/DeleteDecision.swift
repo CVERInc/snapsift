@@ -149,7 +149,9 @@ public func promoteState(_ state: GroupMarkState, to frameID: String) -> GroupMa
 ///
 /// K : ⇧K :: X : ⇧X — plain verb, stronger verb. The stronger one here is
 /// still only a MARKING action: nothing leaves the library until the pre-commit
-/// sheet is confirmed, and `K` / `A` undo it the ordinary way.
+/// sheet is confirmed. ⇧K again on the same frame, with nothing touched in
+/// between, puts the group back exactly as it was (`keepOnlyUndoTarget`); `A`
+/// keeps everything. Plain `K` is NOT an undo — it un-marks one frame.
 ///
 /// What it marks is `bulkRejectCandidates` — THE one composition rule, shared
 /// with `d` (reject-all) and the exact-duplicate auto-seed. That is the whole
@@ -192,6 +194,188 @@ public func keepOnlyState(photos: [Photo],
         .union(ownProtectedMarks)
         .subtracting([keeperID])
     return GroupMarkState(keeperID: keeperID, rejected: marks)
+}
+
+// MARK: - Verb guards and the ⇧K undo
+
+/// Is `frameID` one of this group's frames? The guard every verb that takes a
+/// frame id must pass before it writes that id into group state.
+///
+/// `keepOnly` always had it; `promote` did not, so a stale focus (same group
+/// id, different members) could write a FOREIGN uuid into `keeperID`: no frame
+/// wears the keep badge, and the next `D` silently falls back to `photos[0]` —
+/// the app's pick replacing the owner's (check 2026-10-11, safety-r4 P2-1).
+public func isGroupMember(_ frameID: String, of photos: [Photo]) -> Bool {
+    photos.contains { $0.uuid == frameID }
+}
+
+/// Everything ⇧K can move in a group, so its undo can put ALL of it back.
+public struct GroupMarkSnapshot: Equatable {
+    public let keeperID: String
+    public let rejected: Set<String>
+    public let autoSeeded: Set<String>
+    public let includeProtected: Bool
+    public init(keeperID: String, rejected: Set<String>,
+                autoSeeded: Set<String>, includeProtected: Bool) {
+        self.keeperID = keeperID
+        self.rejected = rejected
+        self.autoSeeded = autoSeeded
+        self.includeProtected = includeProtected
+    }
+}
+
+/// What one ⇧K did to one group: the state it found and the state it left.
+/// Held in memory only, per group; never persisted.
+public struct KeepOnlyUndo: Equatable {
+    public let before: GroupMarkSnapshot
+    public let after: GroupMarkSnapshot
+    public init(before: GroupMarkSnapshot, after: GroupMarkSnapshot) {
+        self.before = before
+        self.after = after
+    }
+}
+
+/// ⇧K pressed again on the frame it just kept, with NOTHING changed since:
+/// the state to put back, or nil when this press is not an undo.
+///
+/// An EXACT undo or none at all. It returns `undo.before` verbatim — the marks,
+/// keeper and override the owner had one keystroke ago — and only when
+///   • the group is still precisely what that ⇧K left (`current == undo.after`:
+///     any X / K / A / D / commit sweep in between and this is a fresh ⇧K),
+///   • the press is on the same frame (⇧K on a different frame is a new
+///     nomination, not a retraction), and
+///   • every id it would restore still names a frame of the group.
+/// It never composes a set: there is no path here that marks a frame the owner
+/// had not already marked himself immediately before ⇧K.
+public func keepOnlyUndoTarget(current: GroupMarkSnapshot,
+                               undo: KeepOnlyUndo?,
+                               frameID: String,
+                               photos: [Photo]) -> GroupMarkSnapshot? {
+    guard let undo, current == undo.after, frameID == undo.after.keeperID else { return nil }
+    let ids = Set(photos.map(\.uuid))
+    guard ids.contains(undo.before.keeperID),
+          undo.before.rejected.isSubset(of: ids) else { return nil }
+    return undo.before
+}
+
+/// Is any protected frame of this group marked? `includeProtected` (the ⇧X
+/// consent) must not outlive the last one — the ONE rule every verb below
+/// applies. It can only turn the override OFF.
+private func hasProtectedMark(_ photos: [Photo], _ rejected: Set<String>) -> Bool {
+    photos.contains { $0.isProtected && rejected.contains($0.uuid) }
+}
+
+/// `K` / `1–9` as a complete action: the state to write, or nil = do nothing.
+///
+/// This is what `PhotoLibrarySession.promote` applies, whole — the membership
+/// guard, `promoteState`, the provenance of the nominated frame, and the
+/// override rule are one decision here, so the session cannot nominate without
+/// passing the guard and the suite runs the code the app runs. (Folder Mode's
+/// `FolderReviewState.apply(.promote)` carries the same guard of its own.)
+public func nominateAction(photos: [Photo],
+                           current: GroupMarkSnapshot,
+                           to frameID: String) -> GroupMarkSnapshot? {
+    guard isGroupMember(frameID, of: photos) else { return nil }
+    let next = promoteState(GroupMarkState(keeperID: current.keeperID, rejected: current.rejected),
+                            to: frameID)
+    return GroupMarkSnapshot(keeperID: next.keeperID,
+                             rejected: next.rejected,
+                             autoSeeded: current.autoSeeded.subtracting([frameID]),
+                             includeProtected: current.includeProtected
+                                && hasProtectedMark(photos, next.rejected))
+}
+
+/// What one ⇧K press does.
+public enum KeepOnlyOutcome: Equatable {
+    /// This press was the undo: write this state and forget the undo record.
+    case undone(GroupMarkSnapshot)
+    /// A fresh ⇧K: write this state; `remember` is the undo record to keep,
+    /// or nil when the press changed nothing (there is nothing to go back to,
+    /// and a second press must not announce a restore that did not happen).
+    case applied(GroupMarkSnapshot, remember: KeepOnlyUndo?)
+}
+
+/// `⇧K` as a complete action (nil = the frame is not in this group). Shared by
+/// the Photos session and Folder Mode's review state.
+///
+/// PROVENANCE: a mark the exact-duplicate pass seeded and ⇧K left standing
+/// stays `autoSeeded`; marks ⇧K adds are the user's. It only ever shrinks
+/// `autoSeeded`.
+public func keepOnlyAction(photos: [Photo],
+                           current: GroupMarkSnapshot,
+                           undo: KeepOnlyUndo?,
+                           frameID: String) -> KeepOnlyOutcome? {
+    guard isGroupMember(frameID, of: photos) else { return nil }
+    if let back = keepOnlyUndoTarget(current: current, undo: undo,
+                                     frameID: frameID, photos: photos) {
+        return .undone(back)
+    }
+    let next = keepOnlyState(photos: photos, keeperID: frameID, rejected: current.rejected)
+    let after = GroupMarkSnapshot(keeperID: next.keeperID,
+                                  rejected: next.rejected,
+                                  autoSeeded: current.autoSeeded.intersection(next.rejected),
+                                  includeProtected: current.includeProtected
+                                    && hasProtectedMark(photos, next.rejected))
+    return .applied(after, remember: after == current ? nil
+                                                      : KeepOnlyUndo(before: current, after: after))
+}
+
+/// `D` as a complete action: the state to write and how many frames it had to
+/// leave out because they are unverifiable. nil for an empty group.
+///
+/// The keeper is not changed; a `keeperID` that names no frame falls back to
+/// the first frame for the purpose of "who is spared", as it always did.
+public func rejectAllAction(photos: [Photo],
+                            current: GroupMarkSnapshot) -> (state: GroupMarkSnapshot, withheld: Int)? {
+    guard let first = photos.first else { return nil }
+    let spared = isGroupMember(current.keeperID, of: photos) ? current.keeperID : first.uuid
+    let marks = bulkRejectCandidates(photos: photos, keeperID: spared)
+    return (GroupMarkSnapshot(keeperID: current.keeperID,
+                              rejected: marks,
+                              autoSeeded: [],   // user overrode — the marks are theirs now
+                              includeProtected: current.includeProtected
+                                && hasProtectedMark(photos, marks)),
+            bulkRejectWithheld(photos: photos, keeperID: spared).count)
+}
+
+/// May this key press reach the single-letter verbs (X K A D R 1–9 ⌫ …)?
+///
+/// Only a press carrying none of ⌘ ⌃ ⌥. SPEC §2: ⌘⏎ is the only key that
+/// changes data and ⌘⌫ opens the sheet — but those are menu Commands, and when
+/// a menu item is DISABLED its key equivalent is not consumed, so ⌘⌫ with
+/// nothing marked fell through to the plain ⌫ verb and crossed out the focused
+/// photo; ⌘A / ⌘D / ⌘K / ⌘1 landed on keep-all / reject-all / nominate the
+/// same way (check 2026-10-11, a11y-keys §3). Folder Mode's handler refused ⌘
+/// and ⌃ but let ⌥ through. Shift is NOT in this list: ⇧X, ⇧K and ⇧R are
+/// verbs in their own right.
+public func isPlainVerbKey(command: Bool, control: Bool, option: Bool) -> Bool {
+    !command && !control && !option
+}
+
+/// A key press that MAY act as a verb. It can only be constructed from a press
+/// that passes `isPlainVerbKey`, and the handlers' verb helpers take this type
+/// rather than raw modifiers — so in the Photos grid, the preview and Folder
+/// Mode there is no way to reach K / X / ⌫ / R without the gate having been
+/// asked.
+public struct VerbKeyPress: Equatable {
+    public let shift: Bool
+    public let isRepeat: Bool
+
+    public init?(command: Bool, control: Bool, option: Bool, shift: Bool, isRepeat: Bool) {
+        guard isPlainVerbKey(command: command, control: control, option: option) else { return nil }
+        self.shift = shift
+        self.isRepeat = isRepeat
+    }
+
+    public enum KeepVerb: Equatable { case nominate, keepOnly, swallow }
+
+    /// Which K this is. ⇧K toggles (press again = undo), so a HELD ⇧K must not
+    /// flip the group back and forth at the key-repeat rate: auto-repeat of ⇧K
+    /// is swallowed. Plain K is idempotent and repeats harmlessly.
+    public var keepVerb: KeepVerb {
+        guard shift else { return .nominate }
+        return isRepeat ? .swallow : .keepOnly
+    }
 }
 
 // MARK: - Commit-time sweep

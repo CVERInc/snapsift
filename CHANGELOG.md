@@ -38,7 +38,10 @@ reserved for the first signed and notarized build.
   the stronger one. Works in the grid and in the preview, and appears in the `?`
   cheat sheet in English, Japanese and Traditional Chinese.
   - It **marks only**: nothing leaves the library until the pre-commit sheet is
-    confirmed, and `K` or `A` afterwards undo it the ordinary way.
+    confirmed. Pressing `⇧K` again on the same photo, before touching anything
+    else in the group, puts the group back exactly as it was. (`A` keeps the
+    whole group; plain `K` only un-marks the one photo it nominates.) Holding
+    `⇧K` down does not flip it back and forth. Works the same in Folder Mode.
   - Protected photos (favorite / edited / document) and anything snapsift could
     not classify are **never** crossed out by ⇧K — only the per-photo ⇧X path,
     which asks first, can cross out a known protection. The set it marks is the
@@ -46,8 +49,9 @@ reserved for the first signed and notarized build.
     use; there is no second definition of "deletable".
   - It does not undo your decisions either: a protected photo you had already
     force-crossed-out yourself with ⇧X **stays** crossed out.
-  - Marks made this way are attributed as "marked by you" in the audit log,
-    never as an app suggestion.
+  - Marks ⇧K adds are attributed as "marked by you" in the audit log. A copy
+    the exact-duplicate pass had already marked, and that stays marked, keeps
+    its "Same photo" attribution.
 
 ### Changed
 - Shared Core and PhotoKit libraries are now published from the root Swift
@@ -61,6 +65,15 @@ reserved for the first signed and notarized build.
   written.** Previously the deletion went ahead without the journal; now
   nothing is deleted and the usual "nothing was deleted" alert appears, so an
   interrupted deletion always leaves a record.
+
+### Fixed
+- ⌘ / ⌃ / ⌥ combined with a letter, a digit or ⌫ can no longer trigger the plain
+  key's action (⌘⌫ with nothing marked used to cross out the focused photo).
+  This includes the arrow keys in the list and the grid: ⌘↑, ⌥→ and the like now
+  do nothing there. Folder Mode already ignored ⌘ and ⌃; it now ignores ⌥ too.
+- `K` and `1–9` ignore a photo that is not in the group.
+- `D` no longer leaves the "include protected" override switched on with no
+  protected photo marked.
 
 ## [0.10.0] — 2026-09-18
 

@@ -127,7 +127,9 @@ final class FolderLibraryModel: ObservableObject, GroupReviewModel {
         session.item(for: id).map { folderReviewFormat(for: $0) }
     }
     func promote(group: ReviewGroup.ID, to id: String) { session.promote(group: group, to: id) }
-    func keepOnly(group: ReviewGroup.ID, frame id: String) { session.keepOnly(group: group, frame: id) }
+    /// True when this press was ⇧K's undo (the group is back as it was).
+    @discardableResult
+    func keepOnly(group: ReviewGroup.ID, frame id: String) -> Bool { session.keepOnly(group: group, frame: id) }
     func keepAll(group: ReviewGroup.ID) { session.keepAll(group: group) }
     func toggleDeleteAll(group: ReviewGroup.ID) { session.toggleDeleteAll(group: group) }
     func setIncludeProtected(group: ReviewGroup.ID, value: Bool) { session.setIncludeProtected(group: group, value: value) }
