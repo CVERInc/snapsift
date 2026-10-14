@@ -60,6 +60,9 @@ struct FolderPreCommitReviewSheet: View {
                     .buttonStyle(.borderedProminent).tint(.reefRed)
                     .disabled(payload.summary.eligibleItemIDs.isEmpty || (payload.noSurvivorCount > 0 && !noSurvivorAcknowledged))
                     .keyboardShortcut(.return, modifiers: .command)
+                    // Spoken without the "⌘⏎" glyphs, starting with the visible
+                    // title (Voice Control), then how many items it moves.
+                    .accessibilityLabel(t.folderPreCommitConfirmSpoken(payload.summary.eligibleItemIDs.count))
             }
             .padding(CVERSpacing.lg)
         }

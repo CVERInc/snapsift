@@ -78,11 +78,7 @@ struct FolderContentView: View {
                                 focusedFrame: model.focusedFrame,
                                 isExactDupeGroup: model.result?.exactGroupIDs.contains(group.id) == true,
                                 sectionTitle: t.folderReviewTitle(),
-                                onDesktopTap: { id in
-                                    model.focusedFrame = id
-                                    model.promote(group: group.id, to: id)
-                                    gridFocused = true
-                                })
+                                onCardVerb: { verb, id in performCardVerb(verb, on: id, in: group.id) })
                     .focusable().focused($gridFocused)
                     .onKeyPress { key in handleKey(key, group) }
                 } else {
@@ -171,7 +167,10 @@ struct FolderContentView: View {
             get: { forceTarget != nil }, set: { if !$0 { forceTarget = nil } }
         )) {
             Button(t.folderMarkAnyway(), role: .destructive) {
-                if let group = selectedGroup, let id = forceTarget { model.forceReject(group: group.id, frameID: id) }
+                if let group = selectedGroup, let id = forceTarget {
+                    model.forceReject(group: group.id, frameID: id)
+                    announceSet(group.id) { del, total in t.annCrossedOut(del, of: total, folder: true) }
+                }
                 forceTarget = nil
             }
             Button(t.deleteProtectedAlertCancel(), role: .cancel) { forceTarget = nil }
@@ -282,22 +281,15 @@ struct FolderContentView: View {
                 model.focusedFrame = group.photos[next].uuid
             }
         case "k", "K":
-            // Core decides which K this is (and swallows a held ⇧K, which
-            // would otherwise toggle its own undo at the key-repeat rate).
-            switch press.keepVerb {
-            case .nominate: model.promote(group: group.id, to: id)
-            case .keepOnly: if model.keepOnly(group: group.id, frame: id) { hint = t.keepOnlyUndone() }
-            case .swallow:  break
-            }
-        case "a", "A": model.keepAll(group: group.id)
-        case "d", "D": model.toggleDeleteAll(group: group.id)
+            keep(press, id, in: group)
+        case "a", "A":
+            model.keepAll(group: group.id)
+            announceSet(group.id) { del, total in t.annSetChanged(del, of: total, folder: true) }
+        case "d", "D":
+            model.toggleDeleteAll(group: group.id)
+            announceSet(group.id) { del, total in t.annSetChanged(del, of: total, folder: true) }
         case "x", "X", .delete:
-            let photo = group.photos[index]
-            if press.shift, photo.isProtected, !photo.isUnverifiable, !group.rejected.contains(id) {
-                forceTarget = id
-            } else if !model.toggleReject(group: group.id, frameID: id) {
-                hint = photo.isUnverifiable ? t.folderUnverifiable() : t.protectedHint()
-            }
+            reject(press, id, in: group)
         default:
             guard let number = Int(key.characters), (1...9).contains(number), group.photos.indices.contains(number - 1) else {
                 return .ignored
@@ -307,5 +299,84 @@ struct FolderContentView: View {
             model.focusedFrame = frame
         }
         return .handled
+    }
+
+    /// K / ⇧K on `id`. Core decides which K this is (and swallows a held ⇧K,
+    /// which would otherwise toggle its own undo at the key-repeat rate).
+    /// Shared by the key handler and the card's pointer / VoiceOver verbs.
+    private func keep(_ press: VerbKeyPress, _ id: String, in group: ReviewGroup) {
+        let position = (group.photos.firstIndex { $0.uuid == id } ?? 0) + 1
+        switch press.keepVerb {
+        case .nominate:
+            model.promote(group: group.id, to: id)
+            announceSet(group.id) { del, total in t.annKeeping(position, del, of: total, folder: true) }
+        case .keepOnly:
+            if model.keepOnly(group: group.id, frame: id) {
+                hint = t.keepOnlyUndone()
+                announce(t.keepOnlyUndone())
+            } else {
+                announceSet(group.id) { del, total in t.annKeepOnly(position, del, of: total, folder: true) }
+            }
+        case .swallow:  break
+        }
+    }
+
+    /// X / ⇧X on `id`: ⇧X on a KNOWN protection asks first; everything else
+    /// toggles, and a refused toggle says why. Shared like `keep`.
+    private func reject(_ press: VerbKeyPress, _ id: String, in group: ReviewGroup) {
+        guard let photo = group.photos.first(where: { $0.uuid == id }) else { return }
+        let wasMarked = group.rejected.contains(id)
+        if press.shift, photo.isProtected, !photo.isUnverifiable, !wasMarked {
+            forceTarget = id
+        } else if model.toggleReject(group: group.id, frameID: id) {
+            announceSet(group.id) { del, total in
+                wasMarked ? t.annCrossOutUndone(del, of: total, folder: true)
+                          : t.annCrossedOut(del, of: total, folder: true)
+            }
+        } else {
+            let why = photo.isUnverifiable ? t.folderUnverifiable() : t.protectedHint()
+            hint = why
+            announce(why)
+        }
+    }
+
+    /// Every card verb that does not come from a key (click, the card's
+    /// buttons, its context menu, a VoiceOver action) lands here and calls the
+    /// SAME `keep` / `reject` the keys call, with the press a key would have
+    /// produced (Core `cardRejectVerb` picks X or ⇧X from state). A click only
+    /// focuses: it used to promote the clicked file to keeper. Folder Mode has
+    /// no preview, so `.preview` only focuses too.
+    private func performCardVerb(_ verb: CardVerb, on id: String, in groupID: ReviewGroup.ID) {
+        guard !model.isScanning, !model.isBusy,
+              let group = model.groups.first(where: { $0.id == groupID }),
+              let photo = group.photos.first(where: { $0.uuid == id }) else { return }
+        model.focusedFrame = id
+        gridFocused = true
+        func press(shift: Bool) -> VerbKeyPress? {
+            VerbKeyPress(command: false, control: false, option: false, shift: shift, isRepeat: false)
+        }
+        switch verb {
+        case .focus, .preview:
+            break
+        case .keep:
+            if let k = press(shift: false) { keep(k, id, in: group) }
+        case .keepOnly:
+            if let k = press(shift: true) { keep(k, id, in: group) }
+        case .reject:
+            let which = cardRejectVerb(isMarked: group.rejected.contains(id),
+                                       isProtected: photo.isProtected,
+                                       isUnverifiable: photo.isUnverifiable)
+            if let x = press(shift: which.usesShift) { reject(x, id, in: group) }
+        }
+    }
+
+    private func announce(_ text: String) {
+        AccessibilityNotification.Announcement(text).post()
+    }
+
+    /// Announce what a verb did, with the counts read AFTER it from the model.
+    private func announceSet(_ id: ReviewGroup.ID, _ line: (Int, Int) -> String) {
+        guard let g = model.groups.first(where: { $0.id == id }) else { return }
+        announce(line(g.deletionIDs.count, g.photos.count))
     }
 }

@@ -215,9 +215,11 @@ struct L10n: Sendable {
     }
     func folderMarkedTip() -> String {
         switch language {
-        case .en: return "Marked for Trash review — click to keep instead"
-        case .ja: return "ゴミ箱への移動候補 — クリックで残す"
-        case .zhTW: return "已標記供移至垃圾桶前檢視，按一下可改為保留"
+        // A click only focuses the card now (checks-b), so "click to keep
+        // instead" would be false here too.
+        case .en: return "Marked for Trash review"
+        case .ja: return "ゴミ箱への移動候補"
+        case .zhTW: return "已標記供移至垃圾桶前檢視"
         }
     }
     func folderMarkOthers(_ marked: Bool) -> String {
@@ -1659,9 +1661,11 @@ struct L10n: Sendable {
     }
     func tipDelete() -> String {
         switch language {
-        case .en: return "This one gets deleted — it goes to Recently Deleted, recoverable for 30 days. Click it to keep it instead"
-        case .ja: return "これは削除されます（「最近削除した項目」に移動し、30日間は復元できます）— クリックすれば残せます"
-        case .zhTW: return "這張會被刪（移到「最近刪除」，30 天內可復原）—— 按一下改成留它"
+        // A click no longer changes anything (checks-b): it only focuses the
+        // card, so the old "click it to keep it instead" would now be false.
+        case .en: return "This one gets deleted — it goes to Recently Deleted, recoverable for 30 days"
+        case .ja: return "これは削除されます（「最近削除した項目」に移動し、30日間は復元できます）"
+        case .zhTW: return "這張會被刪（移到「最近刪除」，30 天內可復原）"
         }
     }
     /// For a card NOBODY has decided about. The tooltip used to hand these the
@@ -1673,9 +1677,9 @@ struct L10n: Sendable {
     /// does not keep; K is the verb that took over that job).
     func tipUndecided() -> String {
         switch language {
-        case .en: return "Not decided yet — X crosses this one out, K keeps it"
-        case .ja: return "まだ決まっていません — X で外す、K で残す"
-        case .zhTW: return "還沒決定 —— X 劃掉它，K 留下它"
+        case .en: return "Not decided yet — cross it out or keep it (X / K)"
+        case .ja: return "まだ決まっていません — 外すか、残すか（X / K）"
+        case .zhTW: return "還沒決定 —— 劃掉它或留下它（X／K）"
         }
     }
 
@@ -3127,9 +3131,11 @@ struct L10n: Sendable {
     /// exactly as it was before the first press.
     func keepOnlyUndone() -> String {
         switch language {
-        case .en:   return "Put back as it was before ⇧K"
-        case .ja:   return "⇧K の前の状態に戻しました"
-        case .zhTW: return "已還原成按 ⇧K 之前的樣子"
+        // No key name: the same banner answers the context-menu "Keep only
+        // this one" chosen with a mouse.
+        case .en:   return "Put back as it was"
+        case .ja:   return "元の状態に戻しました"
+        case .zhTW: return "已還原成原本的樣子"
         }
     }
 

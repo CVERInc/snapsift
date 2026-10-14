@@ -46,6 +46,13 @@ struct ContentView: View {
     /// sidebar losing focus IS reported reliably, so the ring and the pane
     /// dimming key off that plus the logical `focusedFrame`.
     private var contentActive: Bool { gridFocused || (!sidebarFocused && focusedFrame != nil) }
+    // System accessibility settings the pane-focus signal has to honour
+    // (checks-b f): Reduce Motion ⇒ the fades are cuts; Increase Contrast ⇒
+    // nothing dims at all.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var schemeContrast
+    private var increaseContrast: Bool { schemeContrast == .increased }
+    private var paneFade: Animation? { reduceMotion ? nil : .easeInOut(duration: 0.15) }
     @State private var banner: String?
     // Only the most-recent banner's dismiss timer may clear it. Without this,
     // an earlier banner's 3.2s timer truncates whatever banner replaced it.
@@ -326,8 +333,8 @@ struct ContentView: View {
                     // W1.5: pane focus reads as dimming, not a coloured frame.
                     // Sidebar-focused ⇒ content dims slightly; toolbar (a
                     // sibling, set via .toolbar{} below) is untouched.
-                    .opacity(sidebarFocused ? 0.7 : 1)
-                    .animation(.easeInOut(duration: 0.15), value: sidebarFocused)
+                    .opacity(sidebarFocused && !increaseContrast ? 0.7 : 1)
+                    .animation(paneFade, value: sidebarFocused)
                 if showHelp {
                     Divider()
                     helpPanel
@@ -475,6 +482,7 @@ struct ContentView: View {
             Button(t.forceRejectAlertConfirm(), role: .destructive) {
                 if let target = forceRejectTarget {
                     model.forceReject(group: target.groupID, frameID: target.frameID)
+                    announceSet(target.groupID) { _, del, total in t.annCrossedOut(del, of: total) }
                 }
                 forceRejectTarget = nil
             }
@@ -581,20 +589,6 @@ struct ContentView: View {
         .contentShape(Rectangle())   // swallow all mouse input underneath
     }
 
-    /// Touch platforms open the loupe from a thumbnail tap; on the desktop this
-    /// is nil so clicks keep their promote semantics.
-    private var touchOpenLoupe: ((String) -> Void)? {
-        #if os(iOS)
-        { uuid in
-            focusedFrame = uuid
-            previewID = uuid
-            loupeOpen = true
-        }
-        #else
-        nil
-        #endif
-    }
-
     /// Floor for the detail pane so the docked help column can't squeeze the
     /// GroupReview header controls. macOS-only (see the frame comment).
     private var detailMinWidth: CGFloat {
@@ -606,7 +600,7 @@ struct ContentView: View {
     }
 
     private func toggleHelp() {
-        withAnimation(.easeOut(duration: 0.18)) { showHelp.toggle() }
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { showHelp.toggle() }
     }
 
     /// The menu-bar action bridge (see Commands.swift). Enablement mirrors the
@@ -791,11 +785,17 @@ struct ContentView: View {
         default: break
         }
         switch kp.characters {
-        case "a": if let id = selection { model.keepAll(group: id) }; return .handled
+        case "a":
+            if let id = selection {
+                model.keepAll(group: id)
+                announceSet(id) { _, del, total in t.annSetChanged(del, of: total) }
+            }
+            return .handled
         case "d":
             if let id = selection {
                 let withheld = model.rejectAll(group: id)
                 if withheld > 0 { showBanner(t.bulkRejectWithheld(withheld)) }
+                announceSet(id) { _, del, total in t.annSetChanged(del, of: total) }
             }
             return .handled
         case let c where c.count == 1 && c.first!.isNumber:
@@ -862,10 +862,14 @@ struct ContentView: View {
         case " ":
             if let f = focusedFrame { previewID = f; loupeOpen = true }
             return .handled
-        case "a":      model.keepAll(group: g.id); return .handled
+        case "a":
+            model.keepAll(group: g.id)
+            announceSet(g.id) { _, del, total in t.annSetChanged(del, of: total) }
+            return .handled
         case "d":
             let withheld = model.rejectAll(group: g.id)
             if withheld > 0 { showBanner(t.bulkRejectWithheld(withheld)) }
+            announceSet(g.id) { _, del, total in t.annSetChanged(del, of: total) }
             return .handled
         case "k", "K":
             handleKeepKey(g, press); return .handled
@@ -983,13 +987,56 @@ struct ContentView: View {
     /// with Core `bulkRejectCandidates`, so there is nothing to consent to. And
     /// like plain K it is not blocked on the focused frame's own protection —
     /// keeping a favorite is the outcome protection exists to produce.
-    private func handleKeepKey(_ g: ReviewGroup, _ press: VerbKeyPress) {
-        guard let f = focusedFrame else { return }
+    ///
+    /// `frame` is nil for a key (it acts on the focused frame) and the card's
+    /// id for a pointer / VoiceOver verb — the ONLY difference between the two
+    /// routes; everything below is shared.
+    private func handleKeepKey(_ g: ReviewGroup, _ press: VerbKeyPress, on frame: String? = nil) {
+        guard let f = frame ?? focusedFrame else { return }
+        let position = (g.photos.firstIndex { $0.uuid == f } ?? 0) + 1
         // Core decides which K this is (and swallows a held ⇧K).
         switch press.keepVerb {
-        case .nominate: model.promote(group: g.id, to: f)
-        case .keepOnly: if model.keepOnly(group: g.id, frame: f) { showBanner(t.keepOnlyUndone()) }
+        case .nominate:
+            model.promote(group: g.id, to: f)
+            announceSet(g.id) { _, del, total in t.annKeeping(position, del, of: total) }
+        case .keepOnly:
+            if model.keepOnly(group: g.id, frame: f) { showBanner(t.keepOnlyUndone()) }
+            else { announceSet(g.id) { _, del, total in t.annKeepOnly(position, del, of: total) } }
         case .swallow:  break
+        }
+    }
+
+    /// Every card verb that does NOT come from a key — the card's buttons, its
+    /// context menu, a click, a double-click, a VoiceOver action — lands here,
+    /// and from here calls the SAME handlers the keys call, with the same
+    /// `VerbKeyPress` a key would have produced. There is no second code path:
+    /// the pointer's "cross out" is X (or ⇧X where Core `cardRejectVerb` says
+    /// the frame is a known protection), its "keep" is K, "keep only" is ⇧K.
+    private func performCardVerb(_ verb: CardVerb, on uuid: String, in groupID: ReviewGroup.ID) {
+        guard !deleting else { return }   // input locked mid-delete, as for keys
+        guard let g = model.groups.first(where: { $0.id == groupID }),
+              let p = g.photos.first(where: { $0.uuid == uuid }) else { return }
+        // Every verb focuses its card first: the ring shows what was acted on,
+        // and the keyboard continues from there.
+        focusedFrame = uuid
+        gridFocused = true
+        func press(shift: Bool) -> VerbKeyPress? {
+            VerbKeyPress(command: false, control: false, option: false, shift: shift, isRepeat: false)
+        }
+        switch verb {
+        case .focus:
+            break   // look, change nothing (Core `cardVerbIsReadOnly`)
+        case .preview:
+            previewID = uuid; loupeOpen = true
+        case .keep:
+            if let k = press(shift: false) { handleKeepKey(g, k, on: uuid) }
+        case .keepOnly:
+            if let k = press(shift: true) { handleKeepKey(g, k, on: uuid) }
+        case .reject:
+            let which = cardRejectVerb(isMarked: g.rejected.contains(uuid),
+                                       isProtected: p.isProtected,
+                                       isUnverifiable: p.isUnverifiable)
+            if let x = press(shift: which.usesShift) { handleRejectKey(g, x, on: uuid) }
         }
     }
 
@@ -999,17 +1046,19 @@ struct ContentView: View {
     /// An UNVERIFIABLE frame has no ⇧X override (there is no fact to consent
     /// to overriding — `Photo.isUnverifiable`), so ⇧X on one falls through to
     /// the same blocked-toggle branch plain X uses, and shows the same hint.
-    private func handleRejectKey(_ g: ReviewGroup, _ press: VerbKeyPress) {
-        guard let f = focusedFrame else { return }
+    private func handleRejectKey(_ g: ReviewGroup, _ press: VerbKeyPress, on frame: String? = nil) {
+        guard let f = frame ?? focusedFrame else { return }
         guard let p = g.photos.first(where: { $0.uuid == f }) else { return }
         let isShift = press.shift
-        if isShift && p.isProtected {
-            // ⇧X path: force-reject a protected frame.
+        if isShift && p.isProtected && !p.isUnverifiable {
+            // ⇧X path: force-reject a protected frame. Unverifiable has no
+            // override (the model refuses it), so it falls to the hint below.
             // Already force-rejected → ⇧X toggles it back out. Un-marking
             // is the safe direction, so no confirmation (the destructive
             // dialog re-confirming a mark it's about to keep was a dead end).
             if g.rejected.contains(f) {
                 model.toggleReject(group: g.id, frameID: f)
+                announceSet(g.id) { _, del, total in t.annCrossOutUndone(del, of: total) }
                 return
             }
             forceRejectTarget = (groupID: g.id, frameID: f)
@@ -1017,9 +1066,16 @@ struct ContentView: View {
         } else {
             // Plain X, or ⇧X on anything that isn't a KNOWN protection —
             // toggle reject, block (with hint) on protected/unverifiable.
+            let wasMarked = g.rejected.contains(f)
             let toggled = model.toggleReject(group: g.id, frameID: f)
-            if !toggled {
-                // Show inline hint.
+            if toggled {
+                announceSet(g.id) { _, del, total in
+                    wasMarked ? t.annCrossOutUndone(del, of: total) : t.annCrossedOut(del, of: total)
+                }
+            } else {
+                // Show inline hint — and say it: the hint is 2.5 s of amber
+                // text, the only explanation of why nothing happened.
+                announce(p.isUnverifiable ? t.unverifiableHint() : t.protectedHint())
                 protectedHintFrame = f
                 Task {
                     try? await Task.sleep(nanoseconds: 2_500_000_000)
@@ -1113,9 +1169,9 @@ struct ContentView: View {
         return Hovering { hovering in
             VStack(alignment: .leading, spacing: 3) {
                 Text(c.display).font(.headline)
-                    .foregroundStyle(sel ? .white : Color.reefMint)
+                    .foregroundStyle(rowTitleColor(sel))
                 Text(t.frames(c.count)).font(.caption)
-                    .foregroundStyle(sel ? Color.white.opacity(0.85) : Color.reefTextDim)
+                    .foregroundStyle(rowCaptionColor(sel))
             }
             .padding(.vertical, CVERSpacing.xs)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1127,16 +1183,10 @@ struct ContentView: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(sel ? [.isButton, .isSelected] : .isButton)
             .accessibilityAction { categorySelection = c.id; sidebarFocused = true }
-            .listRowBackground(
-                RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)
-                    .fill(sel ? Color.reefTeal
-                              : hovering ? Color.reefMint.opacity(0.08) : Color.clear)
-                    .padding(.vertical, 1)
-            )
-            // W1.5: content pane has focus ⇒ sidebar rows dim (selected row
-            // stays readable so "where am I" survives the dim).
-            .opacity(contentActive && !sel ? 0.35 : 1)
-            .animation(.easeInOut(duration: 0.15), value: contentActive)
+            .listRowBackground(rowBackground(sel: sel, hovering: hovering))
+            // Pane focus: see `rowBackground` / `rowOpacity`.
+            .opacity(rowOpacity(sel))
+            .animation(paneFade, value: contentActive)
         }
     }
 
@@ -1147,19 +1197,30 @@ struct ContentView: View {
             HStack(spacing: 6) {
                 Text(t.frames(g.photos.count))
                     .font(.headline)
-                    .foregroundStyle(sel ? .white : Color.reefMint)
+                    .foregroundStyle(rowTitleColor(sel))
                 // FIX 6: sidebar info badges use reefMint, not amber.
                 // Amber is reserved strictly for "protected — won't delete" warnings
                 // (frame borders, protection badges in the grid, the "All protected"
                 // label). Informational indicators must not borrow the same colour
                 // or they blur the meaning of the protection signal.
-                if g.hasFavorite { Text("★").foregroundStyle(Color.reefMint) }
-                if g.hasVideo { Image(systemName: "video.fill").font(.caption2).foregroundStyle(Color.reefMint) }
-                if g.keepAll { Image(systemName: "checkmark.circle.fill").font(.caption2).foregroundStyle(Color.reefGreen) }
+                // The three glyphs carry facts, so each has words for VoiceOver
+                // (the row is one combined element; "★" alone is read as a
+                // symbol name, and the SF Symbols as nothing useful).
+                if g.hasFavorite {
+                    Text("★").foregroundStyle(Color.reefMint).accessibilityLabel(t.a11yHasFavorite())
+                }
+                if g.hasVideo {
+                    Image(systemName: "video.fill").font(.caption2).foregroundStyle(Color.reefMint)
+                        .accessibilityLabel(t.a11yHasVideo())
+                }
+                if g.keepAll {
+                    Image(systemName: "checkmark.circle.fill").font(.caption2).foregroundStyle(Color.reefGreen)
+                        .accessibilityLabel(t.a11yNothingCrossedOut())
+                }
             }
             Text(t.sidebarSubtitle(span: g.spanSec, delete: g.deletionIDs.count))
                 .font(.caption)
-                .foregroundStyle(sel ? Color.white.opacity(0.85) : Color.reefTextDim)
+                .foregroundStyle(rowCaptionColor(sel))
           }
           .padding(.vertical, CVERSpacing.xs)
           .frame(maxWidth: .infinity, alignment: .leading)
@@ -1173,18 +1234,49 @@ struct ContentView: View {
           .accessibilityElement(children: .combine)
           .accessibilityAddTraits(sel ? [.isButton, .isSelected] : .isButton)
           .accessibilityAction { selection = g.id; sidebarFocused = true }
-          .listRowBackground(
-              RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)
-                  .fill(sel ? Color.reefTeal
-                            : hovering ? Color.reefMint.opacity(0.08) : Color.clear)
-                  .padding(.vertical, 1)
-          )
-          // W1.5: same as categoryRow — dim non-selected rows while the
-          // content pane holds focus.
-          .opacity(contentActive && !sel ? 0.35 : 1)
-          .animation(.easeInOut(duration: 0.15), value: contentActive)
+          .listRowBackground(rowBackground(sel: sel, hovering: hovering))
+          .opacity(rowOpacity(sel))
+          .animation(paneFade, value: contentActive)
         }
         .id(g.id)
+    }
+
+    // MARK: sidebar pane-focus signal (checks-b f)
+    //
+    // Which pane has the keys used to be said by dimming every unselected row
+    // to 0.35 — 1.89:1 for the caption, unreadable for exactly the people who
+    // most need to read it. The signal is now the SELECTED row's shape:
+    //   sidebar active  ⇒ filled teal (the usual "this is where the keys go")
+    //   content active  ⇒ teal OUTLINE, text back in the normal row colours
+    // and unselected rows dim only to Core `PaneDim.proposal`'s opacity, which
+    // keeps title and caption ≥ 4.5:1 on the sidebar colour. Increase
+    // Contrast ⇒ no dimming.
+    //
+    // A PROPOSAL, not a ruling: the ratified spec says 0.35 and "no colour
+    // line", and the outline is a colour line. The owner judges it on screen;
+    // both numbers live in `PaneDim.proposal` and nowhere else.
+
+    private func selectedRowIsFilled(_ sel: Bool) -> Bool { sel && !contentActive }
+    private func rowTitleColor(_ sel: Bool) -> Color {
+        selectedRowIsFilled(sel) ? .white : Color.reefMint
+    }
+    private func rowCaptionColor(_ sel: Bool) -> Color {
+        selectedRowIsFilled(sel) ? Color.white.opacity(0.85) : Color.reefTextDim
+    }
+    private func rowOpacity(_ sel: Bool) -> Double {
+        PaneDim.sidebarRowOpacity(contentActive: contentActive, selected: sel,
+                                  increaseContrast: increaseContrast)
+    }
+    private func rowBackground(sel: Bool, hovering: Bool) -> some View {
+        let shape = RoundedRectangle(cornerRadius: CVERRadius.chip, style: .continuous)
+        return ZStack {
+            shape.fill(selectedRowIsFilled(sel) ? Color.reefTeal
+                       : hovering ? Color.reefMint.opacity(0.08) : Color.clear)
+            if sel && contentActive {
+                shape.strokeBorder(Color.reefTeal, lineWidth: PaneDim.proposal.selectedRowOutlineWidth)
+            }
+        }
+        .padding(.vertical, 1)
     }
 
     private var emptyState: some View {
@@ -1196,6 +1288,7 @@ struct ContentView: View {
             } else {
                 Image(systemName: model.hasScanned ? "checkmark.circle" : "rectangle.stack.badge.minus")
                     .font(.system(size: 34)).foregroundStyle(Color.reefBorder)
+                    .accessibilityHidden(true)
                 Text(model.hasScanned ? t.scannedEmptyHint() : t.scanHint())
                     .font(.caption).foregroundStyle(Color.reefTextDim)
                     .multilineTextAlignment(.center)
@@ -1225,12 +1318,7 @@ struct ContentView: View {
                         isExactDupeGroup: model.exactDupeGroupIDs.contains(g.id),
                         sectionTitle: model.confidentGroups.contains(where: { $0.id == g.id }) ? t.sectionConfidentName() : t.sectionPendingName(),
                         protectedHintFrame: protectedHintFrame,
-                        onOpenLoupe: touchOpenLoupe,
-                        onDesktopTap: { uuid in
-                            model.promote(group: g.id, to: uuid)
-                            focusedFrame = uuid
-                            gridFocused = true
-                        })
+                        onCardVerb: { verb, uuid in performCardVerb(verb, on: uuid, in: g.id) })
                 .focusable()
                 // W1.5 (owner dogfood ruling): pane focus is shown by dimming
                 // the OTHER pane, not by the system's default focus glow — that
@@ -1243,10 +1331,15 @@ struct ContentView: View {
                 // Belt-and-braces Esc: macOS may deliver Esc as the cancel
                 // COMMAND rather than a key press depending on input source,
                 // so route the exit command explicitly alongside onKeyPress.
+                // `.onExitCommand` is macOS/tvOS-only. iOS needs no twin: a
+                // hardware Esc arrives as a key press (handleGridKey), and
+                // touch closes the preview with its own button.
+                #if os(macOS)
                 .onExitCommand {
                     if loupeOpen { loupeOpen = false; previewID = nil }
                     else { sidebarFocused = true }
                 }
+                #endif
         } else if model.groups.isEmpty {
             // Focusable so the bare "?" cheat-sheet key works on the first-run
             // screen too (the sidebar isn't focusable until groups exist). The
@@ -1269,6 +1362,7 @@ struct ContentView: View {
     private func placeholder(_ icon: String, _ text: String) -> some View {
         VStack(spacing: 8) {
             Image(systemName: icon).font(.system(size: 40)).foregroundStyle(Color.reefBorder)
+                .accessibilityHidden(true)
             Text(text).foregroundStyle(Color.reefTextDim)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1284,7 +1378,8 @@ struct ContentView: View {
             Image(systemName: "sparkle.magnifyingglass")
                 .font(.system(size: 40))
                 .foregroundStyle(Color.reefMint)
-                .symbolEffect(.pulse, options: .repeating)
+                .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion)
+                .accessibilityHidden(true)   // decorative; the text below is the status
             if let frac = model.progressFraction {
                 ProgressView(value: frac)
                     .tint(.reefMint)
@@ -1865,6 +1960,9 @@ struct ContentView: View {
             noSurvivor: noSurvivorCountForCurrentGroups(),
             withdrawnCount: withheld.count
         )
+        // A set withdrawn from this commit (its keeper is gone from the
+        // library) is an amber row in the sheet — say it as the sheet opens.
+        if !withheld.isEmpty { announce(t.preCommitWithdrawnWarning(withheld.count)) }
     }
 
     /// Step 2: the actual delete — called only after the user confirmed the sheet.
@@ -1952,13 +2050,30 @@ struct ContentView: View {
     private func showBanner(_ text: String) {
         bannerGeneration += 1
         let gen = bannerGeneration
-        withAnimation(.spring(duration: 0.3)) { banner = text }
+        withAnimation(reduceMotion ? nil : .spring(duration: 0.3)) { banner = text }
+        // The banner is a 3.2 s visual; say it too (scan finished, sorted into
+        // albums, deleted N, withheld N — everything that reports here).
+        announce(text)
         Task {
             try? await Task.sleep(nanoseconds: 3_200_000_000)
             // A generation counter (not a text compare) also handles the same
             // message shown twice in quick succession without early dismissal.
-            if bannerGeneration == gen { withAnimation(.easeOut) { banner = nil } }
+            if bannerGeneration == gen { withAnimation(reduceMotion ? nil : .easeOut) { banner = nil } }
         }
+    }
+
+    /// Speak a state change to assistive technology. Nothing in this app
+    /// changed audibly before checks-b: a mark, an un-mark, a new keeper, a
+    /// finished scan were all colour and position only.
+    private func announce(_ text: String) {
+        AccessibilityNotification.Announcement(text).post()
+    }
+
+    /// Announce what a verb just did to a set, with the counts AFTER it — read
+    /// from the model, not from the (pre-verb) group value the caller holds.
+    private func announceSet(_ id: ReviewGroup.ID, _ line: (ReviewGroup, Int, Int) -> String) {
+        guard let g = model.groups.first(where: { $0.id == id }) else { return }
+        announce(line(g, g.deletionIDs.count, g.photos.count))
     }
 }
 
@@ -1980,16 +2095,36 @@ struct GroupReview<Model: GroupReviewModel>: View {
     var sectionTitle: String = ""
     /// Frame currently showing the "protected — ⇧X to force" hint (from keyboard handler).
     var protectedHintFrame: String? = nil
-    /// Touch platforms: tapping a thumbnail opens the loupe here instead of
-    /// promoting (the desktop click behaviour) — set by ContentView on iOS.
-    var onOpenLoupe: ((String) -> Void)? = nil
-    /// Desktop: a card click promotes AND reclaims keyboard focus into the grid
-    /// zone, mirroring the sidebar row. Without it, keys after a click still go
-    /// to the (unfocused) list zone and the natural x/Space/R keystrokes die.
-    var onDesktopTap: ((String) -> Void)? = nil
+    /// Every pointer / touch / VoiceOver verb on a card goes out through this
+    /// one closure (ContentView `performCardVerb`), which calls the handlers
+    /// the keys call. The card itself never touches the model: a click used to
+    /// `promote` right here, which made "just looking" a mutation and left the
+    /// mouse with no way to cross one photo out, undo that, or open the preview.
+    var onCardVerb: ((CardVerb, String) -> Void)? = nil
+    /// Folder Mode has no large preview (no loupe), so its cards offer no
+    /// "Open preview" and a double-click there only focuses.
+    private var offersPreview: Bool { !model.isFolderReview }
 
     // FIX C: confirmation alert state for including protected frames in deletion.
     @State private var showDeleteProtectedAlert = false
+
+    /// The focused card whose control buttons have been on screen for longer
+    /// than a double-click takes. Until then they are drawn but inert (Core
+    /// `cardControlsHittable`): the click that focused the card is what made
+    /// them appear, and the second click of a double-click must reach the
+    /// card (preview), not a "cross out" button that slid in under it.
+    @State private var armedFrame: String?
+    /// The card under the pointer, and the one whose hover-shown controls have
+    /// been on screen for a double-click interval (same rule as `armedFrame`).
+    @State private var hoveredFrame: String?
+    @State private var hoverArmedFrame: String?
+    private static var doubleClickInterval: TimeInterval {
+        #if os(macOS)
+        return NSEvent.doubleClickInterval
+        #else
+        return 0.35   // UIKit's double-tap window; there is no public constant
+        #endif
+    }
 
     /// Horizontal gap between frames in a row (and vertical gap between rows).
     /// Static: the keyboard handler needs the identical spacing to re-pack rows.
@@ -2111,6 +2246,20 @@ struct GroupReview<Model: GroupReviewModel>: View {
         .task(id: group.id) {
             await model.loadReviewDetails(for: group.photos.map(\.uuid))
         }
+        // Arm the focused card's controls one double-click interval after the
+        // focus landed there; any focus change restarts the wait.
+        .task(id: focusedFrame) {
+            armedFrame = nil
+            guard let f = focusedFrame else { return }
+            try? await Task.sleep(nanoseconds: UInt64(Self.doubleClickInterval * 1_000_000_000))
+            if !Task.isCancelled { armedFrame = f }
+        }
+        .task(id: hoveredFrame) {
+            hoverArmedFrame = nil
+            guard let h = hoveredFrame else { return }
+            try? await Task.sleep(nanoseconds: UInt64(Self.doubleClickInterval * 1_000_000_000))
+            if !Task.isCancelled { hoverArmedFrame = h }
+        }
         // FIX C: confirmation alert before protected frames enter the deletion set.
         // The model is only updated when the user explicitly confirms — Cancel is a
         // full no-op so accidentally tapping "Include protected" is reversible.
@@ -2228,7 +2377,12 @@ struct GroupReview<Model: GroupReviewModel>: View {
             : (del ? .reefRed : .clear)))
         // Exact-dup non-keepers dim just like regular delete candidates.
         let dimmed = del || isExactSuggested
-        return ZStack(alignment: .topLeading) {
+        let rejectVerb = cardRejectVerb(isMarked: group.rejected.contains(p.uuid),
+                                        isProtected: p.isProtected,
+                                        isUnverifiable: p.isUnverifiable)
+        let send: (CardVerb) -> Void = { verb in onCardVerb?(verb, p.uuid) }
+        return Hovering { hovering in
+          ZStack(alignment: .topLeading) {
             // True-aspect, orientation-upright, display-rotatable image (FIX 1 + 3).
             // The thumbnail self-sizes to `box` and applies rotation correctly
             // (it swaps the pre-rotation layout box internally, so an odd turn is
@@ -2275,28 +2429,72 @@ struct GroupReview<Model: GroupReviewModel>: View {
         // W1.5: focus ring drawn OUTSIDE the KEEP/amber/teal border so both
         // read at once — see `CVERFocusRing` in Chrome.swift.
         .cverFocusRing(focused)
+        .contentShape(Rectangle())
+        .cardHover()
+        .onHover { inside in
+            if inside { hoveredFrame = p.uuid } else if hoveredFrame == p.uuid { hoveredFrame = nil }
+        }
+        // Click / tap = FOCUS this card. Nothing changes; the ring shows where
+        // you are and the controls below appear. Double-click = preview (the
+        // Photos / Finder convention). The double-tap is `simultaneous` so the
+        // single tap is not held back waiting for it — harmless, because the
+        // single tap is read-only (Core `cardVerbIsReadOnly`).
+        .onTapGesture {
+            #if os(iOS)
+            // iOS keeps main's touch behaviour: a tap focuses and opens the
+            // preview (there is no hover and no double-click convention).
+            send(.focus)
+            if offersPreview { send(.preview) }
+            #else
+            send(.focus)
+            #endif
+        }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { send(.preview) },
+                             including: offersPreview ? .all : .none)
+        // The controls are attached AFTER the gestures, so they are not inside
+        // them: clicking a button is that button's verb and nothing else.
+        // Shown on the FOCUSED card — a state the app owns, reachable by click,
+        // tap or arrow keys — and additionally on hover. Hover is never the
+        // only way in (there is none on iOS).
+        .overlay(alignment: .bottomTrailing) {
+            if focused || hovering {
+                let live = cardControlsHittable(
+                    isFocused: focused,
+                    focusAge: armedFrame == p.uuid ? Self.doubleClickInterval : 0,
+                    hoverAge: hoverArmedFrame == p.uuid ? Self.doubleClickInterval : 0,
+                    doubleClickInterval: Self.doubleClickInterval)
+                cardControls(showKeep: !keep, rejectVerb: rejectVerb, send: send)
+                    // Inert ⇒ the click passes through to the card beneath.
+                    .allowsHitTesting(live)
+                    .opacity(live ? 1 : 0.55)
+            }
+        }
         .overlay(alignment: .bottom) {
             if protectedHintFrame == p.uuid {
                 // Unverifiable has no ⇧X override — a distinct hint that
                 // doesn't advertise one, and points at the Needs-a-look album.
                 Text(p.isUnverifiable ? t.unverifiableHint() : t.protectedHint())
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
+                    // Was white on amber: 2.49:1, on the one line that explains
+                    // why nothing happened. The chips' dark ink is 8.64:1.
+                    .foregroundStyle(Color(hex: 0x1a1203))
                     .padding(.horizontal, CVERSpacing.sm).padding(.vertical, 5)
                     .background(Color.reefAmber.opacity(0.92), in: RoundedRectangle(cornerRadius: CVERRadius.control, style: .continuous))
                     .padding(.bottom, 6)
                     .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                    .allowsHitTesting(false)
             }
         }
-        .contentShape(Rectangle())
-        .cardHover()
-        .onTapGesture {
-            // Desktop click = promote + reclaim grid focus (onDesktopTap). Touch
-            // tap = open the loupe — inspect first, decide with swipes there;
-            // promotion happens inside the loupe.
-            if let onOpenLoupe { onOpenLoupe(p.uuid) }
-            else if let onDesktopTap { onDesktopTap(p.uuid) }
-            else { model.promote(group: group.id, to: p.uuid) }
+        // Right-click / long-press: the same verbs, plus the two that have no
+        // room on the card. Same closure, same handlers.
+        .contextMenu {
+            if !keep { Button(t.cardKeepThis()) { send(.keep) } }
+            Button(rejectLabel(rejectVerb)) { send(.reject) }
+            Button(t.cardKeepOnly()) { send(.keepOnly) }
+            if offersPreview {
+                Divider()
+                Button(t.cardOpenPreview()) { send(.preview) }
+            }
         }
         // The last arm used to be a bare `t.tipDelete()`: any card that was not
         // kept, not protected and not an exact dup got "this one gets deleted"
@@ -2327,9 +2525,70 @@ struct GroupReview<Model: GroupReviewModel>: View {
         // state + protection reasons (the amber chips inside are decorative and
         // ignored, their meaning is folded into this label).
         .accessibilityElement(children: .ignore)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(cardAccessibilityLabel(for: p, keep: keep, del: del,
+        .accessibilityAddTraits(focused ? [.isButton, .isSelected] : .isButton)
+        .accessibilityLabel(cardAccessibilityLabel(for: p, index: index, keep: keep, del: del,
                                                     exactSuggested: isExactSuggested))
+        // VoiceOver's own cursor is not `focusedFrame`; each action names its
+        // card explicitly, so "cross out" lands on the card being read — it
+        // used to be reachable only through X, which acted on a DIFFERENT card.
+        .accessibilityAction { send(.focus) }
+        .accessibilityAction(named: Text(t.cardKeepThis())) { send(.keep) }
+        .accessibilityAction(named: Text(rejectLabel(rejectVerb))) { send(.reject) }
+        .accessibilityAction(named: Text(t.cardKeepOnly())) { send(.keepOnly) }
+        .accessibilityActions {
+            if offersPreview { Button(t.cardOpenPreview()) { send(.preview) } }
+        }
+        }
+    }
+
+    /// The name of the cross-out verb this card offers right now — one string
+    /// for the button's tooltip, the context-menu item and the VoiceOver action.
+    private func rejectLabel(_ verb: CardRejectVerb) -> String {
+        switch verb {
+        case .crossOut:            return t.cardCrossOut()
+        case .undoCrossOut:        return t.cardUndoCrossOut()
+        case .crossOutProtected:   return t.cardCrossOutProtected()
+        case .explainUnverifiable: return t.cardWhyNotCrossOut()   // refuses, and says why
+        }
+    }
+
+    /// The two always-reachable card controls. Icon-only on purpose: the card's
+    /// chip already states the decision in words once, and a second copy of it
+    /// here would be the same fact twice on one card. 28 pt targets (≥ 24).
+    private func cardControls(showKeep: Bool, rejectVerb: CardRejectVerb,
+                              send: @escaping (CardVerb) -> Void) -> some View {
+        let rejectSymbol: String
+        let rejectTint: Color
+        switch rejectVerb {
+        case .crossOut:            rejectSymbol = "xmark";                rejectTint = .reefRed
+        case .undoCrossOut:        rejectSymbol = "arrow.uturn.backward"; rejectTint = .reefMint
+        case .crossOutProtected:   rejectSymbol = "xmark";                rejectTint = .reefAmber
+        case .explainUnverifiable: rejectSymbol = "xmark";                rejectTint = .reefAmber
+        }
+        return HStack(spacing: 6) {
+            if showKeep {
+                cardControl("checkmark", t.cardKeepThis(), .reefGreen) { send(.keep) }
+            }
+            cardControl(rejectSymbol, rejectLabel(rejectVerb), rejectTint) { send(.reject) }
+        }
+        .padding(.trailing, 6)
+        .padding(.bottom, 26)   // clears the filename strip
+    }
+
+    private func cardControl(_ symbol: String, _ label: String, _ tint: Color,
+                             _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(Color.reefGround.opacity(0.9), in: Circle())
+                .overlay(Circle().strokeBorder(tint, lineWidth: 1.5))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
     }
 
     /// Why THIS card is marked for removal. A label over state that already
@@ -2342,26 +2601,55 @@ struct GroupReview<Model: GroupReviewModel>: View {
                          wholeGroupMarked: group.deleteAll)
     }
 
-    /// One spoken line for a frame card: filename · decision · protection reasons.
-    /// Reuses the loupe HUD's localized state tokens so VoiceOver and the visible
-    /// HUD stay in lockstep.
-    private func cardAccessibilityLabel(for p: Photo, keep: Bool, del: Bool,
+    /// One spoken line for a frame card: where it is in the set, when it was
+    /// taken, what will happen to it and why.
+    ///
+    /// Not the filename first: a burst is `IMG_4821`…`IMG_4829`, which sounds
+    /// like nine copies of one word. Position and capture time tell them apart.
+    /// The decision is Core `cardSpokenState`, in whole words — the old label
+    /// reused the HUD's "★ keeping" tokens (read as "black star"), and gave an
+    /// unclassifiable frame "no decision", which is the opposite of the truth:
+    /// the app decided it may NOT be deleted.
+    private func cardAccessibilityLabel(for p: Photo, index: Int, keep: Bool, del: Bool,
                                         exactSuggested: Bool) -> String {
-        let fname = p.filename.isEmpty ? String(p.uuid.prefix(8)) : p.filename
-        var parts: [String] = []
-        if keep { parts.append(t.loupeKeeper()) }
-        else if exactSuggested { parts.append(t.exactDupeBadge()) }
-        else if del {
-            // Spoken WITH its reason, so VoiceOver and the tooltip say the same
-            // thing about the same card (they disagreed before: one said "will
-            // be deleted", the other "no decision").
-            parts.append(t.loupeReject())
-            parts.append(t.deleteWhy(deleteWhyReason(for: p)))
+        var parts = [t.a11yPosition(index + 1, of: group.photos.count)]
+        // Folder Mode reviews FILES: the name is what she sees on the card and
+        // what Finder will show in the Trash, so it is said there as well.
+        if model.isFolderReview, !p.filename.isEmpty { parts.append(p.filename) }
+        if p.takenAt > 0 {
+            parts.append(Date(timeIntervalSince1970: p.takenAt)
+                .formatted(Date.FormatStyle(date: .abbreviated, time: .standard)
+                    .locale(t.language.locale)))
+        } else if !model.isFolderReview, !p.filename.isEmpty {
+            parts.append(p.filename)
         }
-        else { parts.append(t.loupeNoDecision()) }
-        if p.favorite   { parts.append(t.loupeFav()) }
-        if p.edited     { parts.append(t.loupeEdited()) }
-        if p.isDocument { parts.append(t.loupeDoc()) }
+        var known: [String] = []
+        if p.favorite   { known.append(t.a11yFavorite()) }
+        if p.edited     { known.append(t.a11yEdited()) }
+        if p.isDocument { known.append(t.a11yDocument()) }
+        var unknown: [String] = []
+        if p.editedUndetermined   { unknown.append(t.a11yEditUnknown()) }
+        if p.documentEvalDegraded { unknown.append(t.a11yDocumentUnknown()) }
+        let sep = t.a11ySeparator()
+        let state = cardSpokenState(isKeeper: keep, isDelete: del,
+                                    isProtected: p.isProtected, isUnverifiable: p.isUnverifiable)
+        switch state {
+        case .willKeep:
+            parts.append(t.a11yWillKeep(keeperWhyLabel(for: p, group: group, t: t)))
+            parts.append(contentsOf: known + unknown)
+        case .willDelete:
+            // A Folder Mode mark moves nothing by itself: it puts the file on
+            // the Trash review, which is a separate confirmation.
+            let why = t.deleteWhy(deleteWhyReason(for: p))
+            parts.append(model.isFolderReview ? t.a11yFolderMarked(why) : t.a11yWillDelete(why))
+            parts.append(contentsOf: known)
+        case .pleaseConfirm:
+            parts.append(t.a11yPleaseConfirm((unknown + known).joined(separator: sep)))
+        case .protected:
+            parts.append(t.a11yProtected(known.joined(separator: sep)))
+        case .undecided:
+            parts.append(exactSuggested ? t.a11yIdenticalNotCrossedOut() : t.a11yUndecided())
+        }
         if model.isFolderReview {
             if let format = model.reviewFormat(for: p.uuid) {
                 parts.append(t.folderFormatAccessibility(t.folderFormatLabel(format)))
@@ -2369,11 +2657,12 @@ struct GroupReview<Model: GroupReviewModel>: View {
             }
             if let details = model.reviewDetails(for: p.uuid, t: t) { parts.append(details) }
             if model.uniqueMetadataIDs.contains(p.uuid) { parts.append(t.folderUniqueMetadata()) }
-            if p.isUnverifiable { parts.append(t.folderUnverifiable()) }
+            // `.pleaseConfirm` already says it could not be classified.
+            if p.isUnverifiable && state != .pleaseConfirm { parts.append(t.folderUnverifiable()) }
         } else if let details = model.reviewDetails(for: p.uuid, t: t) {
             parts.append(details)
         }
-        return "\(fname) · \(parts.joined(separator: " · "))"
+        return parts.joined(separator: sep)
     }
 
     /// Badge row for a single frame card.
@@ -2690,18 +2979,21 @@ private extension View {
 /// Build a tooltip for the keeper card that explains WHY this frame was chosen.
 /// Calls SnapsiftCore's keeperReason() and maps to a localized label.
 private func keeperWhyTooltip(for photo: Photo, group: ReviewGroup, t: L10n) -> String {
-    let reason = keeperReason(photos: group.photos, keeperID: photo.uuid)
-    let whyLabel: String
-    switch reason {
-    case .favorite:       whyLabel = t.keeperWhyFavorite()
-    case .quality:        whyLabel = t.keeperWhyQuality()
-    case .originalCamera: whyLabel = t.keeperWhyOriginalCamera()
-    case .sharpness:      whyLabel = t.keeperWhySharpness()
-    case .format:         whyLabel = t.keeperWhyFormat()
-    case .size:           whyLabel = t.keeperWhySize()
-    case .earliest:       whyLabel = t.keeperWhyEarliest()
+    "\(t.tipKeeper()) · \(keeperWhyLabel(for: photo, group: group, t: t))"
+}
+
+/// The keeper reason alone — shared by the tooltip and the VoiceOver label, so
+/// the reason is no longer something only a hovering mouse can learn.
+private func keeperWhyLabel(for photo: Photo, group: ReviewGroup, t: L10n) -> String {
+    switch keeperReason(photos: group.photos, keeperID: photo.uuid) {
+    case .favorite:       return t.keeperWhyFavorite()
+    case .quality:        return t.keeperWhyQuality()
+    case .originalCamera: return t.keeperWhyOriginalCamera()
+    case .sharpness:      return t.keeperWhySharpness()
+    case .format:         return t.keeperWhyFormat()
+    case .size:           return t.keeperWhySize()
+    case .earliest:       return t.keeperWhyEarliest()
     }
-    return "\(t.tipKeeper()) · \(whyLabel)"
 }
 
 extension KeyPress {
