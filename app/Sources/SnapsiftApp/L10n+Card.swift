@@ -13,6 +13,16 @@ extension L10n {
         case .zhTW: return "留這張"
         }
     }
+    /// Menu / VoiceOver action on a photo snapsift could not classify: it can't
+    /// be crossed out, so the action is named for what it does — explain why.
+    func cardWhyNotCrossOut() -> String {
+        switch language {
+        case .en:   return "Why can't this be crossed out?"
+        case .ja:   return "外せない理由"
+        case .zhTW: return "為什麼不能劃掉？"
+        }
+    }
+
     func cardCrossOut() -> String {
         switch language {
         case .en:   return "Cross this one out"

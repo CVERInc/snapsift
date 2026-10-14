@@ -138,8 +138,11 @@ public enum PaneDim {
 /// appeared because of a focus stay inert until the double-click interval has
 /// passed; during it, clicks fall through to the card, which is what the
 /// second click was aimed at. Buttons shown by HOVER on a card that is not
-/// focused were visible before any click, so they are live at once.
+/// focused wait the same interval from the moment the pointer arrived: a
+/// pointer that enters at the card's corner and double-clicks at once would
+/// otherwise land its first click on a button that appeared under it.
 public func cardControlsHittable(isFocused: Bool, focusAge: TimeInterval,
+                                 hoverAge: TimeInterval,
                                  doubleClickInterval: TimeInterval) -> Bool {
-    !isFocused || focusAge >= doubleClickInterval
+    isFocused ? focusAge >= doubleClickInterval : hoverAge >= doubleClickInterval
 }

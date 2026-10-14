@@ -1050,8 +1050,9 @@ struct ContentView: View {
         guard let f = frame ?? focusedFrame else { return }
         guard let p = g.photos.first(where: { $0.uuid == f }) else { return }
         let isShift = press.shift
-        if isShift && p.isProtected {
-            // ⇧X path: force-reject a protected frame.
+        if isShift && p.isProtected && !p.isUnverifiable {
+            // ⇧X path: force-reject a protected frame. Unverifiable has no
+            // override (the model refuses it), so it falls to the hint below.
             // Already force-rejected → ⇧X toggles it back out. Un-marking
             // is the safe direction, so no confirmation (the destructive
             // dialog re-confirming a mark it's about to keep was a dead end).
@@ -2113,6 +2114,10 @@ struct GroupReview<Model: GroupReviewModel>: View {
     /// them appear, and the second click of a double-click must reach the
     /// card (preview), not a "cross out" button that slid in under it.
     @State private var armedFrame: String?
+    /// The card under the pointer, and the one whose hover-shown controls have
+    /// been on screen for a double-click interval (same rule as `armedFrame`).
+    @State private var hoveredFrame: String?
+    @State private var hoverArmedFrame: String?
     private static var doubleClickInterval: TimeInterval {
         #if os(macOS)
         return NSEvent.doubleClickInterval
@@ -2248,6 +2253,12 @@ struct GroupReview<Model: GroupReviewModel>: View {
             guard let f = focusedFrame else { return }
             try? await Task.sleep(nanoseconds: UInt64(Self.doubleClickInterval * 1_000_000_000))
             if !Task.isCancelled { armedFrame = f }
+        }
+        .task(id: hoveredFrame) {
+            hoverArmedFrame = nil
+            guard let h = hoveredFrame else { return }
+            try? await Task.sleep(nanoseconds: UInt64(Self.doubleClickInterval * 1_000_000_000))
+            if !Task.isCancelled { hoverArmedFrame = h }
         }
         // FIX C: confirmation alert before protected frames enter the deletion set.
         // The model is only updated when the user explicitly confirms — Cancel is a
@@ -2420,6 +2431,9 @@ struct GroupReview<Model: GroupReviewModel>: View {
         .cverFocusRing(focused)
         .contentShape(Rectangle())
         .cardHover()
+        .onHover { inside in
+            if inside { hoveredFrame = p.uuid } else if hoveredFrame == p.uuid { hoveredFrame = nil }
+        }
         // Click / tap = FOCUS this card. Nothing changes; the ring shows where
         // you are and the controls below appear. Double-click = preview (the
         // Photos / Finder convention). The double-tap is `simultaneous` so the
@@ -2447,6 +2461,7 @@ struct GroupReview<Model: GroupReviewModel>: View {
                 let live = cardControlsHittable(
                     isFocused: focused,
                     focusAge: armedFrame == p.uuid ? Self.doubleClickInterval : 0,
+                    hoverAge: hoverArmedFrame == p.uuid ? Self.doubleClickInterval : 0,
                     doubleClickInterval: Self.doubleClickInterval)
                 cardControls(showKeep: !keep, rejectVerb: rejectVerb, send: send)
                     // Inert ⇒ the click passes through to the card beneath.
@@ -2533,7 +2548,7 @@ struct GroupReview<Model: GroupReviewModel>: View {
         case .crossOut:            return t.cardCrossOut()
         case .undoCrossOut:        return t.cardUndoCrossOut()
         case .crossOutProtected:   return t.cardCrossOutProtected()
-        case .explainUnverifiable: return t.cardCrossOut()   // refuses, and says why
+        case .explainUnverifiable: return t.cardWhyNotCrossOut()   // refuses, and says why
         }
     }
 

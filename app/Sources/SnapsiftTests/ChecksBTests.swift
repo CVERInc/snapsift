@@ -117,19 +117,22 @@ func checkChecksB() async {
 
     print("checks-b (d2): a double-click never lands on a button the first click summoned")
     do {
-        let table: [(Bool, Double, Double, Bool)] = [
-            // focused, age since focus, double-click interval ⇒ hittable
-            (true,  0.0,  0.5, false),
-            (true,  0.49, 0.5, false),
-            (true,  0.5,  0.5, true),
-            (true,  2.0,  0.5, true),
-            (false, 0.0,  0.5, true),     // shown by hover: it was visible before the click
-            (true,  0.3,  0.35, false),   // the iOS window
-            (true,  0.35, 0.35, true),
+        let table: [(Bool, Double, Double, Double, Bool)] = [
+            // focused, age since focus, age since hover, double-click interval ⇒ hittable
+            (true,  0.0,  9.0,  0.5, false),  // just focused: a long hover does not arm it
+            (true,  0.49, 0.0,  0.5, false),
+            (true,  0.5,  0.0,  0.5, true),
+            (true,  2.0,  0.0,  0.5, true),
+            (false, 0.0,  0.0,  0.5, false),  // pointer just arrived at the corner
+            (false, 0.0,  0.49, 0.5, false),
+            (false, 0.0,  0.5,  0.5, true),   // hovered long enough: visible before the click
+            (true,  0.3,  0.0,  0.35, false), // the iOS window
+            (true,  0.35, 0.0,  0.35, true),
         ]
-        for (focused, age, interval, want) in table {
-            check(cardControlsHittable(isFocused: focused, focusAge: age, doubleClickInterval: interval) == want,
-                  "focused=\(focused) age=\(age) interval=\(interval) ⇒ \(want ? "live" : "inert")")
+        for (focused, age, hover, interval, want) in table {
+            check(cardControlsHittable(isFocused: focused, focusAge: age, hoverAge: hover,
+                                       doubleClickInterval: interval) == want,
+                  "focused=\(focused) focusAge=\(age) hoverAge=\(hover) interval=\(interval) ⇒ \(want ? "live" : "inert")")
         }
     }
 
