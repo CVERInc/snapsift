@@ -67,6 +67,16 @@ reserved for the first signed and notarized build.
   interrupted deletion always leaves a record.
 
 ### Fixed
+- **Snapsift's albums now follow what the latest scan concluded about the photos
+  it looked at.** Sorting used to only add: if you changed which copy to keep and
+  sorted again, the old candidate stayed in "Exact Duplicates" next to the new
+  one — the photo and its only other copy, in the album described as safe to
+  remove. A sort now takes a photo out of a Snapsift album when this scan
+  re-evaluated it and no longer puts it there, and the banner says how many.
+  Photos the scan did not look at — results of an earlier scan of another album,
+  or of another kind of scan — stay where they are; a Similar Sets scan takes
+  nothing out. Membership only: nothing is deleted, and albums you made yourself
+  are never touched.
 - ⌘ / ⌃ / ⌥ combined with a letter, a digit or ⌫ can no longer trigger the plain
   key's action (⌘⌫ with nothing marked used to cross out the focused photo).
   This includes the arrow keys in the list and the grid: ⌘↑, ⌥→ and the like now

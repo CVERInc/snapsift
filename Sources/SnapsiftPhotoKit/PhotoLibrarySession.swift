@@ -1979,6 +1979,10 @@ public final class PhotoLibrarySession {
             exactGroups: exactDupeGroupIDs,
             assetsByID: photoKitImages.assetsByID,
             extraNeedsLookAssets: pairedVideoUndeterminedAssets,
+            // Decides which albums this sort may take members OUT of: only
+            // the kinds that reached a verdict on them (Core `scanKindFeeds`
+            // — a similar-sets scan writes no album and removes nothing).
+            scanKind: AlbumScanKind(rawValue: lastScanKind.rawValue),
             titles: albumTitles
         )
         // A membership-only album write mutates no verdict-relevant state, but it
@@ -2012,6 +2016,10 @@ public final class PhotoLibrarySession {
             exactGroups: exactDupeGroupIDs,
             assetsByID: photoKitImages.assetsByID,
             extraNeedsLookAssets: pairedVideoUndeterminedAssets,
+            // Decides which albums this sort may take members OUT of: only
+            // the kinds that reached a verdict on them (Core `scanKindFeeds`
+            // — a similar-sets scan writes no album and removes nothing).
+            scanKind: AlbumScanKind(rawValue: lastScanKind.rawValue),
             titles: albumTitles
         )
         // A partial pass may still have changed Photos. Apply the same

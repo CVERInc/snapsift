@@ -2071,15 +2071,22 @@ struct L10n: Sendable {
         case .zhTW: return "整理進相簿完成 · \(summary)"
         }
     }
-    /// Frames taken OUT of one snapsift album because this scan put them in the
-    /// other one. Said out loud rather than done quietly: the user is looking at
-    /// these albums in Photos.app, and a photo that silently leaves "Exact
-    /// Duplicates" is a change to what they were about to act on.
+    /// Memberships taken OUT of snapsift's own albums because this sort no
+    /// longer puts the frame there. Said out loud rather than done quietly: the
+    /// user is looking at these albums in Photos.app, and a photo that silently
+    /// leaves "Exact Duplicates" is a change to what they were about to act on.
+    ///
+    /// The wording says "taken out", not "moved": since the albums became
+    /// authoritative per sort, most of these frames go to no other album at all
+    /// (the old keeper simply stops being a candidate), and the count is per
+    /// album left. It also says the photos are still there, because "taken
+    /// out" next to a number is exactly the phrase that makes a user of this
+    /// app stop breathing.
     private func albumsMovedBetweenBuckets(_ n: Int) -> String {
         switch language {
-        case .en:   return "\(n) moved to the album that now fits"
-        case .ja:   return "\(n)枚を今の分類に合うアルバムへ移動"
-        case .zhTW: return "有 \(n) 張移到現在該去的相簿"
+        case .en:   return "\(n) taken out of a Snapsift album \(n == 1 ? "it no longer fits" : "they no longer fit") (the photo\(n == 1 ? " stays" : "s stay") in your library)"
+        case .ja:   return "\(n)枚を今の分類に合わなくなった Snapsift アルバムから外しました（写真はライブラリに残ります）"
+        case .zhTW: return "有 \(n) 張從不再符合的 Snapsift 相簿移出（照片仍在圖庫裡）"
         }
     }
     private func albumsWrittenBursts(_ n: Int) -> String {

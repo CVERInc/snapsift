@@ -752,8 +752,8 @@ public func evaluateLibraryIdentity(sidecarPath: String?,
 ///
 /// The two buckets are mutually exclusive within a single write
 /// (`exactCandidates` filters on `isDeletable`, `needsLookCandidates` on
-/// `isUnverifiable`), but the album write itself is membership-only and never
-/// recomputes what it wrote last time. So a frame filed under "Exact
+/// `isUnverifiable`), but the album write USED TO be add-only and never
+/// recomputed what it wrote last time. So a frame filed under "Exact
 /// Duplicates" (which the UI and the README call safe to remove) on a run with
 /// Full Disk Access reappears under "Needs a look" on a run without it, and
 /// Photos.app — the surface this tool deliberately delegates the decision to —
@@ -772,24 +772,121 @@ public struct AlbumBucketPlan: Equatable {
     public let exactAdd: [String]
     /// Frames to add to "Snapsift · Needs a look".
     public let needsLookAdd: [String]
-    /// Frames to remove from "Snapsift · Exact Duplicates" — they belong in
-    /// Needs-a-look now.
+    /// Frames to take OUT of "Snapsift · Exact Duplicates": they belong in
+    /// Needs-a-look now, or this scan re-evaluated them and no longer files
+    /// them as exact (`albumMembershipRemovals`).
     public let exactRemove: Set<String>
-    /// Frames to remove from "Snapsift · Needs a look" — they are classifiable
-    /// again and belong in Exact Duplicates.
+    /// Frames to take OUT of "Snapsift · Needs a look": they are classifiable
+    /// again and belong in Exact Duplicates, or this scan re-evaluated them
+    /// and they are readable now.
     public let needsLookRemove: Set<String>
 }
 
+/// `exactWorkingSet` / `needsLookWorkingSet` — what THIS scan re-evaluated for
+/// each album (`albumWorkingSet`). Empty (the default) ⇒ the old add-only
+/// behaviour plus cross-bucket exclusivity.
 public func albumBucketPlan(exactCandidates: [String],
-                            needsLookCandidates: [String]) -> AlbumBucketPlan {
+                            needsLookCandidates: [String],
+                            exactWorkingSet: Set<String> = [],
+                            needsLookWorkingSet: Set<String> = []) -> AlbumBucketPlan {
     let needsLook = Set(needsLookCandidates)
     // Overlap is a bug upstream; resolve it in the protective direction here
     // rather than letting both albums claim the frame.
     let exact = exactCandidates.filter { !needsLook.contains($0) }
-    return AlbumBucketPlan(exactAdd: exact,
-                           needsLookAdd: needsLookCandidates,
-                           exactRemove: needsLook,
-                           needsLookRemove: Set(exact))
+    return AlbumBucketPlan(
+        exactAdd: exact,
+        needsLookAdd: needsLookCandidates,
+        exactRemove: needsLook.union(albumMembershipRemovals(workingSet: exactWorkingSet,
+                                                             candidates: exact)),
+        needsLookRemove: Set(exact).union(albumMembershipRemovals(workingSet: needsLookWorkingSet,
+                                                                  candidates: needsLookCandidates)))
+}
+
+// MARK: - Snapsift's own albums: authoritative over what the scan looked at
+
+/// A snapsift-owned album is authoritative per sort ONLY OVER WHAT THE SCAN
+/// LOOKED AT: a member comes out when this scan re-evaluated it (`workingSet`)
+/// and no longer puts it there. A member the scan never looked at stays
+/// exactly where it is. The writer removes only ids that are actually members
+/// (`AlbumWriter.removeAssets` intersects with the album), so this is the set
+/// of ids that MAY come out, never a set that is added anywhere.
+///
+/// Two failures, one on each side of this rule:
+///   • add-only (before 2026-10-13, check F1): {A keeper, B} sorted put B in
+///     "Exact Duplicates"; the owner chose B as keeper and sorted again, which
+///     added A and LEFT B — the album the README calls safe to remove held the
+///     photo and its only other copy.
+///   • authoritative over EVERYTHING (review P1-1 on the first fix): sorting
+///     after a scan of one small album, or after a scan kind that has no exact
+///     pass, took every other scan's results out of all five albums. They had
+///     not been judged; they had not been seen.
+///
+/// Removal is membership-only (`PHAssetCollectionChangeRequest.removeAssets`)
+/// and only from albums resolved by snapsift's own titles.
+public func albumMembershipRemovals(workingSet: Set<String>, candidates: [String]) -> Set<String> {
+    workingSet.subtracting(candidates)
+}
+
+/// The frames of ONE exact-duplicate group that may sit in the album labelled
+/// "safe to remove": not the keeper, and deletable (`Photo.isDeletable` — the
+/// same predicate the delete pipeline uses).
+///
+/// A group whose `keeperID` names no frame in it contributes NOTHING. Without
+/// that, "everything that is not the keeper" is every frame of the group, and
+/// the album would hold all copies of a photo — the one state it must never be
+/// in. Unknown keeper ⇒ nobody is a candidate.
+public func exactAlbumCandidates(photos: [Photo], keeperID: String) -> [String] {
+    guard isGroupMember(keeperID, of: photos) else { return [] }
+    return photos.filter { $0.uuid != keeperID && $0.isDeletable }.map(\.uuid)
+}
+
+/// Snapsift's five albums.
+public enum AlbumBucket: CaseIterable, Equatable {
+    case bursts, blurry, documents, exact, needsLook
+}
+
+/// The kind of scan that produced the groups being sorted. Raw values match
+/// `PhotoLibrarySession.ScanKind`, so the session converts by raw value, not by
+/// a switch that could quietly map two kinds onto one.
+public enum AlbumScanKind: String, CaseIterable {
+    case burst, lookAlikes, similarSets
+}
+
+/// Does a scan of this kind PRODUCE verdicts for this album?
+///
+/// Burst and look-alike scans build review groups and run the exact-duplicate
+/// pass over every one of them, so they feed all five. A similar-sets scan
+/// builds sets (browsed on macOS; reviewed and removed through
+/// `deleteReviewed(in:)` on a session without an enrichment port) and never
+/// writes an album: no review groups, no exact pass. It decides nothing about
+/// any of these albums, so a sort after it may add (the Live Photo videos it
+/// could not pair still go to Needs-a-look) and removes NOTHING. An unknown
+/// kind (nil) is treated the same way.
+public func scanKindFeeds(_ kind: AlbumScanKind?, _ bucket: AlbumBucket) -> Bool {
+    switch kind {
+    case .burst?, .lookAlikes?: return true
+    case .similarSets?, nil:    return false
+    }
+}
+
+/// The asset ids this scan re-evaluated FOR THIS ALBUM — the only members a
+/// sort may take out of it.
+///
+/// No scan kind keeps a record of every asset it examined: the full-library
+/// map is trimmed to group members the moment a scan ends. What survives, and
+/// what a verdict was actually reached about, is the frames of the current
+/// review groups — so that is the working set, for the kinds that feed the
+/// album (`scanKindFeeds`), and EMPTY for a kind that does not. The asset-only
+/// needs-look extras belong to that album's working set too (they are always
+/// candidates, so this never removes one; it only keeps the set truthful).
+public func albumWorkingSet(_ bucket: AlbumBucket,
+                            scanKind: AlbumScanKind?,
+                            groupPhotoIDs: [String],
+                            extraNeedsLookIDs: [String] = []) -> Set<String> {
+    guard scanKindFeeds(scanKind, bucket) else { return [] }
+    var ids = Set(groupPhotoIDs)
+    if bucket == .needsLook { ids.formUnion(extraNeedsLookIDs) }
+    return ids
 }
 
 // MARK: - Own-write token restamp
