@@ -7,8 +7,10 @@ import SnapsiftCore
 /// screenshotted, AirDropped back) that the time-burst scan can't see.
 ///
 /// Two-stage so it stays tractable on a six-figure library:
-///   1. dHash every thumbnail and group candidates with Core's BK-tree
-///      (cheap recall, sub-quadratic) — this avoids the O(n²) trap.
+///   1. dHash every thumbnail and group candidates with Core's `groupByHash`
+///      (cheap recall). On a library this size it uses multi-index hashing: a
+///      hash is compared only with the hashes that nearly share one of its
+///      four 16-bit chunks, not with every other hash — the O(n²) trap.
 ///   2. Confirm each candidate cluster with Apple's neural feature print
 ///      (VNGenerateImageFeaturePrint + computeDistance) for precision.
 /// Feature prints are only computed for assets that survive stage 1, so the

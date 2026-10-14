@@ -324,6 +324,7 @@ do {
     check(g.count == 1 && Set(g[0]) == Set(["a", "b", "c"]), "group near match transitive")
 }
 check(groupByHash([(1, "a"), (2, "b")], maxDistance: 0).isEmpty, "distance zero keeps distinct")
+checkHashGroupingEquivalence()
 
 print("Source picker (slice 2)")
 // AlbumItem.estimatedCount: -1 encodes NSNotFound so the UI can distinguish
