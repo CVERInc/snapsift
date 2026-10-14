@@ -3467,5 +3467,6 @@ checkFolderSessionMessages()
 
 await checkFolderLibrarySession()
 
+if skipped > 0 { print("\n– \(skipped) check(s) skipped: no Vision inference on this machine") }
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
 exit(failures == 0 ? 0 : 1)
