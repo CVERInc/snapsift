@@ -471,8 +471,8 @@ struct ContentView: View {
             if let msg = albumErrorMessage { Text(msg) }
         }
         // ⇧X force-reject confirmation: same dialog path as mouse "include protected".
-        .alert(t.deleteProtectedAlertTitle(), isPresented: $showForceRejectAlert) {
-            Button(t.deleteProtectedAlertConfirm(), role: .destructive) {
+        .alert(t.forceRejectAlertTitle(), isPresented: $showForceRejectAlert) {
+            Button(t.forceRejectAlertConfirm(), role: .destructive) {
                 if let target = forceRejectTarget {
                     model.forceReject(group: target.groupID, frameID: target.frameID)
                 }
@@ -2022,23 +2022,23 @@ struct GroupReview<Model: GroupReviewModel>: View {
                             Button {
                                 model.setIncludeProtected(group: group.id, value: false)
                             } label: {
-                                Label(t.includingProtected(group.protectedCount),
+                                Label(model.isFolderReview ? t.folderIncludingProtected(group.protectedCount) : t.includingProtected(group.protectedCount),
                                       systemImage: "lock.open.fill")
                             }
                             .buttonStyle(.bordered)
                             .tint(.reefAmber)
-                            .help(t.tipIncludeProtected())
+                            .help(model.isFolderReview ? t.folderTipIncludeProtected() : t.tipIncludeProtected())
                         } else {
                             // Toggling ON shows a confirmation alert before taking effect.
                             Button {
                                 showDeleteProtectedAlert = true
                             } label: {
-                                Label(t.includeProtected(group.protectedCount),
+                                Label(model.isFolderReview ? t.folderIncludeProtected(group.protectedCount) : t.includeProtected(group.protectedCount),
                                       systemImage: "lock.open")
                             }
                             .buttonStyle(.bordered)
                             .tint(Color.reefTextDim)
-                            .help(t.tipIncludeProtected())
+                            .help(model.isFolderReview ? t.folderTipIncludeProtected() : t.tipIncludeProtected())
                         }
                     }
                     // FIX 4: distinguish "armed with actual deletions" from
