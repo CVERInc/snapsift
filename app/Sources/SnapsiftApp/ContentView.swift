@@ -2425,7 +2425,16 @@ struct GroupReview<Model: GroupReviewModel>: View {
         // Photos / Finder convention). The double-tap is `simultaneous` so the
         // single tap is not held back waiting for it — harmless, because the
         // single tap is read-only (Core `cardVerbIsReadOnly`).
-        .onTapGesture { send(.focus) }
+        .onTapGesture {
+            #if os(iOS)
+            // iOS keeps main's touch behaviour: a tap focuses and opens the
+            // preview (there is no hover and no double-click convention).
+            send(.focus)
+            if offersPreview { send(.preview) }
+            #else
+            send(.focus)
+            #endif
+        }
         .simultaneousGesture(TapGesture(count: 2).onEnded { send(.preview) },
                              including: offersPreview ? .all : .none)
         // The controls are attached AFTER the gestures, so they are not inside
