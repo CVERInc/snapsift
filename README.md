@@ -58,20 +58,29 @@ leaves your Mac.
 Build it (no Xcode needed):
 
 ```bash
-cd app
+git clone https://github.com/CVERInc/snapsift
+cd snapsift/app
 ./scripts/build-app.sh          # → ~/Applications/snapsift.app, then double-click
 swift run SnapsiftTests         # run the Core test suite
 ```
 
 First-launch notes:
 
-- **Gatekeeper**: the app is unsigned for distribution purposes (built from
-  source on your machine, so macOS usually launches it directly; a downloaded
-  copy needs right-click → Open the first time). The build script does ad-hoc
-  sign the bundle, which carries no identity but is what lets the executable
-  launch at all on Apple Silicon after its embedded-framework path is patched;
-  the script verifies that with `codesign --verify --deep --strict` and refuses
-  to finish if it fails.
+- **Gatekeeper — source builds vs the official build**: an app you build
+  yourself with the command above is ad-hoc signed only (no developer
+  identity; macOS usually launches a locally built app directly, and a copy
+  you downloaded or moved from another Mac needs right-click → Open the first
+  time). The ad-hoc signature is what lets the executable launch at all on
+  Apple Silicon after its embedded-framework path is patched; the script
+  verifies it with `codesign --verify --deep --strict` and refuses to finish
+  if it fails. The maintainers' official binary is built from this same source
+  and additionally signed with a Developer ID, notarized and stapled, so it
+  opens without a warning — no such build has been published yet (1.0.0 is
+  reserved for it, see `CHANGELOG.md`).
+- **Updates**: a build from source never contacts any server and never checks
+  for updates. Only the official binary does (via
+  [Sparkle](https://sparkle-project.org)); what it sends, how to turn it off
+  and the maintainer release steps are in [`docs/UPDATES.md`](docs/UPDATES.md).
 - **Photos access**: on first scan, macOS asks for read/write access to your
   Photos library — required to enumerate, sort into albums, and delete into
   Recently Deleted.

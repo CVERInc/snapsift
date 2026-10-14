@@ -5,6 +5,14 @@ reserved for the first signed and notarized build.
 
 ## [Unreleased]
 
+### Release tooling
+- `scripts/release.sh` chains build → the signing pipeline → appcast in one
+  command, and a `publish` step copies the result to the hosting checkout.
+  The feed/download host comes from one variable, `SNAPSIFT_BASE_URL`.
+- The app bundle now carries `LICENSE.txt`, `Sparkle-LICENSE.txt` and
+  `THIRD_PARTY_NOTICES.txt` in `Contents/Resources/` (the notices file is also
+  at the repo root).
+
 ### Added
 - **Album names in Apple Photos review.** Review tiles and the pre-commit
   review show user album names in English, Japanese and Taiwan Traditional
