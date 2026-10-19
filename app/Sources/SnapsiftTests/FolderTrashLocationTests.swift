@@ -5,10 +5,11 @@ import SnapsiftCore
 private func trashLocationFacts(_ path: String?, ubiquitous: Bool? = nil,
                                 local: Bool? = true, readOnly: Bool? = false,
                                 mountedReadOnly: Bool? = false,
-                                fileSystem: String? = "apfs", root: Bool? = false) -> VolumeFacts {
+                                fileSystem: String? = "apfs", root: Bool? = false,
+                                storageGroup: String? = nil) -> VolumeFacts {
     VolumeFacts(isLocal: local, isReadOnly: readOnly, mntRdOnly: mountedReadOnly,
                 fileSystemType: fileSystem, isRootFileSystem: root,
-                path: path, isUbiquitousItem: ubiquitous)
+                path: path, isUbiquitousItem: ubiquitous, fileProviderStorageGroup: storageGroup)
 }
 
 func folderTrashLocationTests(_ check: (Bool, String) -> Void) {
@@ -45,6 +46,18 @@ func folderTrashLocationTests(_ check: (Bool, String) -> Void) {
           "Trash location refuses ubiquitous items even in a matching storage path")
     check(classifyTrashLocation(trashLocationFacts(device, ubiquitous: false)) == .removalSupported,
           "Trash location accepts an explicitly non-ubiquitous storage root")
+    check(classifyTrashLocation(trashLocationFacts(device, storageGroup: "group.com.apple.FileProvider.LocalStorage"))
+          == .removalSupported, "Trash location accepts the Files app's LocalStorage group identity")
+    check(classifyTrashLocation(trashLocationFacts(device, storageGroup: "group.com.example.provider"))
+          == .scanOnly(.systemTrashUnconfirmed), "Trash location refuses a readable third-party group identity")
+    check(classifyTrashLocation(trashLocationFacts(device, storageGroup: nil)) == .removalSupported,
+          "Unreadable group identity retains the path match; legacy providers remain subject to per-item result validation")
+    check(classifyTrashLocation(trashLocationFacts(device, readOnly: true,
+          storageGroup: "group.com.apple.FileProvider.LocalStorage")) == .scanOnly(.readOnly),
+          "LocalStorage identity does not bypass volume rules")
+    check(classifyTrashLocation(trashLocationFacts(device, ubiquitous: true,
+          storageGroup: "group.com.apple.FileProvider.LocalStorage")) == .scanOnly(.systemTrashUnconfirmed),
+          "LocalStorage identity does not bypass ubiquitous-item refusal")
     let rejected: [(String, VolumeFacts, VolumeCapabilityReason)] = [
         ("non-local", trashLocationFacts(device, local: false), .networkVolume),
         ("network filesystem", trashLocationFacts(device, fileSystem: "smbfs"), .networkVolume),
@@ -74,6 +87,46 @@ func folderTrashLocationTests(_ check: (Bool, String) -> Void) {
     check(!validateTrashLocation(sourceURL: source, resultingURL: nil), "Trash location rejects a missing result URL")
 }
 
+func folderTrashStorageGroupProbeTests(_ check: (Bool, String) -> Void) {
+    print("File Provider storage group metadata capture on all platforms")
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("snapsift-storage-group-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    do {
+        let storage = root.appendingPathComponent("Containers/Shared/AppGroup/fixture/File Provider Storage")
+        let picked = storage.appendingPathComponent("picked")
+        try FileManager.default.createDirectory(at: picked, withIntermediateDirectories: true)
+        let metadata = storage.deletingLastPathComponent()
+            .appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
+        for group in ["group.com.apple.FileProvider.LocalStorage", "group.com.example.provider"] {
+            let data = try PropertyListSerialization.data(fromPropertyList: ["MCMMetadataIdentifier": group],
+                                                         format: .binary, options: 0)
+            try data.write(to: metadata)
+            check(probeVolume(at: picked).facts.fileProviderStorageGroup == group,
+                  "Volume probe captures readable storage group: \(group)")
+        }
+        let invalidMetadata: [[String: Any]] = [["MCMMetadataIdentifier": 42], ["OtherKey": "unrelated"]]
+        for value in invalidMetadata {
+            try PropertyListSerialization.data(fromPropertyList: value, format: .xml, options: 0).write(to: metadata)
+            check(probeVolume(at: picked).facts.fileProviderStorageGroup == nil,
+                  "Volume probe leaves group nil without a string MCMMetadataIdentifier")
+        }
+        try Data("malformed plist".utf8).write(to: metadata)
+        check(probeVolume(at: picked).facts.fileProviderStorageGroup == nil,
+              "Volume probe leaves group nil for malformed metadata")
+        try FileManager.default.removeItem(at: metadata)
+        check(probeVolume(at: picked).facts.fileProviderStorageGroup == nil,
+              "Volume probe leaves group nil for missing metadata")
+        let nonStorage = root.appendingPathComponent("ordinary/picked")
+        try FileManager.default.createDirectory(at: nonStorage, withIntermediateDirectories: true)
+        let unrelatedMetadata = nonStorage.deletingLastPathComponent()
+            .appendingPathComponent(metadata.lastPathComponent)
+        try PropertyListSerialization.data(fromPropertyList: ["MCMMetadataIdentifier": "group.com.example.provider"],
+                                           format: .xml, options: 0).write(to: unrelatedMetadata)
+        check(probeVolume(at: nonStorage).facts.fileProviderStorageGroup == nil,
+              "Volume probe ignores metadata outside a File Provider storage root")
+    } catch { check(false, "storage group probe fixture: \(error)") }
+}
+
 @MainActor
 private final class TrashLocationFixture {
     let root: URL
@@ -85,12 +138,13 @@ private final class TrashLocationFixture {
     let groups: [ReviewGroup]
     var trashCalls: [URL] = []
     var moveCalls: [URL] = []
-    var outsideResult = false
+    var resultDirectory: URL?
     var unrelatedResult: URL?
+    var storageGroup: String?
 
-    init() throws {
+    init(appGroupID: String = "fixture") throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("snapsift-trash-location-\(UUID())")
-        storage = root.appendingPathComponent("Containers/Shared/AppGroup/fixture/File Provider Storage")
+        storage = root.appendingPathComponent("Containers/Shared/AppGroup/\(appGroupID)/File Provider Storage")
         confirmed = storage.appendingPathComponent("picked")
         unconfirmed = root.appendingPathComponent("Containers/Data/Application/fixture/Documents")
         trash = storage.appendingPathComponent(".Trash")
@@ -122,7 +176,7 @@ private final class TrashLocationFixture {
     func cleanup() { try? FileManager.default.removeItem(at: root) }
     func probe(_ url: URL) -> VolumeProbeResult {
         let p = probeVolume(at: url)
-        let facts = trashLocationFacts(url.path)
+        let facts = trashLocationFacts(url.path, storageGroup: storageGroup)
         return VolumeProbeResult(facts: facts, volumeKey: p.volumeKey, displayName: "Shared iOS volume",
                                  volumeURL: p.volumeURL, capability: classifyTrashLocation(facts))
     }
@@ -134,10 +188,11 @@ private final class TrashLocationFixture {
         var port = FolderTrashPort.confirmedLocation(trash: { url in
             self.trashCalls.append(url)
             if let unrelated = self.unrelatedResult { return unrelated }
-            let destination = (self.outsideResult ? self.root : self.trash).appendingPathComponent(url.lastPathComponent)
+            let destination = (self.resultDirectory ?? self.trash)
+                .appendingPathComponent(url.lastPathComponent)
             try FolderTrashPort.moveWithoutOverwrite(url, destination)
             return destination
-        }, locationFacts: { trashLocationFacts($0.path) })
+        }, locationFacts: { trashLocationFacts($0.path, storageGroup: self.storageGroup) })
         port.move = { from, to in
             self.moveCalls.append(from)
             try FolderTrashPort.moveWithoutOverwrite(from, to)
@@ -169,30 +224,69 @@ func folderTrashLocationPortTests(_ check: (Bool, String) -> Void) async {
               && f.trashCalls.isEmpty && (try store.records()).isEmpty,
               "commit withdraws an unconfirmed location with systemTrashUnconfirmed and no Trash effect")
     } catch { check(false, "Trash location refusal fixture: \(error)") }
+}
 
-    for unrelated in [false, true] {
+@MainActor
+func folderTrashLookAlikePortTests(_ check: (Bool, String) -> Void) async {
+    print("Legacy provider look-alike refusal and invalid result recovery")
+    do {
+        let f = try TrashLocationFixture(appGroupID: "third-party")
+        defer { f.cleanup() }
+        f.storageGroup = "group.com.example.provider"
+        let original = f.items[1].primary.url
         do {
-            let f = try TrashLocationFixture()
+            _ = try f.port.trash(original)
+            check(false, "readable third-party storage group should refuse")
+        } catch FolderHistoryError.trashUnavailable {
+            check(f.trashCalls.isEmpty && FileManager.default.fileExists(atPath: original.path),
+                  "readable third-party storage group refuses before the Trash effect")
+        }
+        let store = f.store()
+        let committer = FolderCommitter(history: store, trashPort: f.port, volumeProbe: f.probe)
+        var withdrawals: [FolderGroupWithdrawal] = []
+        let count = try await committer.commit(groups: [f.groups[0]], items: f.items, primaryHashes: [:],
+            callbacks: FolderCommitCallbacks(onGroupsWithdrawn: { withdrawals = $0 }))
+        check(try count == 0 && withdrawals.first?.reason == .scanOnly(f.items[1].volumeKey, .systemTrashUnconfirmed)
+              && f.trashCalls.isEmpty && f.moveCalls.isEmpty && (try store.records()).isEmpty
+              && FileManager.default.fileExists(atPath: original.path),
+              "committer withdraws readable third-party storage without effects or success history")
+    } catch { check(false, "readable third-party storage fixture: \(error)") }
+
+    for resultMode in ["provider-trash", "outside-root", "unrelated"] {
+        do {
+            let f = try TrashLocationFixture(appGroupID: "third-party")
             defer { f.cleanup() }
-            f.outsideResult = true
+            // No readable identity: the path match reaches the per-item result gate.
+            let resultDirectory = resultMode == "provider-trash"
+                ? f.storage.appendingPathComponent(".Trash-provider") : f.root
+            f.resultDirectory = resultDirectory
+            try FileManager.default.createDirectory(at: resultDirectory, withIntermediateDirectories: true)
             let other = f.root.appendingPathComponent("unrelated.jpg")
             try Data("unrelated file".utf8).write(to: other)
+            let unrelated = resultMode == "unrelated"
             if unrelated { f.unrelatedResult = other }
+            let original = f.items[1].primary.url
+            let originalBytes = try Data(contentsOf: original)
+            let keeper = f.items[0].primary.url
+            let keeperBytes = try Data(contentsOf: keeper)
             let store = f.store()
             let committer = FolderCommitter(history: store, trashPort: f.port, volumeProbe: f.probe)
             var failures: [FolderRemovalFailure] = []
             let count = try await committer.commit(groups: [f.groups[0]], items: f.items, primaryHashes: [:],
                 callbacks: FolderCommitCallbacks(onRemovalFailed: { failures.append($0) }))
-            check(try count == 0 && failures.count == 1 && (try store.records()).isEmpty,
-                  "outside-storage Trash result is a failed removal without success history (unrelated: \(unrelated))")
-            if case .invalidTrashResult? = failures.first?.reason {
-                check(true, "outside-storage result uses existing invalidTrashResult reporting")
-            } else { check(false, "outside-storage result should report invalidTrashResult") }
-            check(try FileManager.default.fileExists(atPath: f.items[1].primary.url.path)
+            check(try count == 0 && failures.count == 1 && (try store.records()).isEmpty
+                  && f.trashCalls == [original],
+                  "look-alike invalid Trash result fails without success history: \(resultMode)")
+            let expectedResult = unrelated ? other : resultDirectory.appendingPathComponent(original.lastPathComponent)
+            if case .invalidTrashResult(let result)? = failures.first?.reason {
+                check(result == expectedResult, "look-alike reports the invalidTrashResult URL: \(resultMode)")
+            } else { check(false, "look-alike result should report invalidTrashResult: \(resultMode)") }
+            check(try (try Data(contentsOf: original)) == originalBytes
+                  && (try Data(contentsOf: keeper)) == keeperBytes
                   && (try Data(contentsOf: other)) == Data("unrelated file".utf8)
-                  && f.moveCalls.count == (unrelated ? 0 : 1),
-                  "invalid result restores only the identified original and never moves an unrelated file")
-        } catch { check(false, "Trash location result fixture: \(error)") }
+                  && f.moveCalls == (unrelated ? [] : [expectedResult]),
+                  "look-alike invalid result restores only the original and leaves other files untouched: \(resultMode)")
+        } catch { check(false, "look-alike Trash result fixture (\(resultMode)): \(error)") }
     }
 }
 

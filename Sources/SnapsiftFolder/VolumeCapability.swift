@@ -11,6 +11,7 @@ public struct VolumeFacts: Equatable, Sendable {
     public let isRootFileSystem: Bool?
     public let path: String?
     public let isUbiquitousItem: Bool?
+    public let fileProviderStorageGroup: String?
 
     public init(isLocal: Bool? = nil,
                 isReadOnly: Bool? = nil,
@@ -18,7 +19,8 @@ public struct VolumeFacts: Equatable, Sendable {
                 fileSystemType: String? = nil,
                 isRootFileSystem: Bool? = nil,
                 path: String? = nil,
-                isUbiquitousItem: Bool? = nil) {
+                isUbiquitousItem: Bool? = nil,
+                fileProviderStorageGroup: String? = nil) {
         self.isLocal = isLocal
         self.isReadOnly = isReadOnly
         self.mntRdOnly = mntRdOnly
@@ -26,6 +28,7 @@ public struct VolumeFacts: Equatable, Sendable {
         self.isRootFileSystem = isRootFileSystem
         self.path = path
         self.isUbiquitousItem = isUbiquitousItem
+        self.fileProviderStorageGroup = fileProviderStorageGroup
     }
 }
 
@@ -83,8 +86,15 @@ public func classifyTrashLocation(_ facts: VolumeFacts) -> VolumeCapability {
           fileProviderStorageRoot(at: URL(fileURLWithPath: path)) != nil else {
         return .scanOnly(.systemTrashUnconfirmed)
     }
-    // Legacy third-party providers can share this AppGroup storage shape.
-    // S1 could not distinguish them; S2 device evidence must tighten this rule.
+    if let group = facts.fileProviderStorageGroup,
+       group != "group.com.apple.FileProvider.LocalStorage" {
+        return .scanOnly(.systemTrashUnconfirmed)
+    }
+    // When the identity cannot be read, a legacy third-party provider with the
+    // same storage shape is indistinguishable. The final authority is each
+    // trashItem result: validateTrashLocation requires this root's .Trash or
+    // removal fails. Rollback only attempts to restore the identified original;
+    // no unrelated item moves.
     return .removalSupported
 }
 
@@ -150,9 +160,10 @@ public struct VolumeProbeResult {
 }
 
 /// Reads Foundation volume properties and the mounted filesystem flags/type.
-/// Any unavailable signal stays nil, which makes the classifier return
-/// scan-only.
+/// Unavailable signals stay nil; missing required volume signals classify as
+/// scan-only. Storage group metadata is captured when readable on any platform.
 public func probeVolume(at url: URL) -> VolumeProbeResult {
+    let storageGroup = readFileProviderStorageGroup(at: url)
     let keys: Set<URLResourceKey> = [
         .volumeIsLocalKey,
         .volumeIsReadOnlyKey,
@@ -165,7 +176,7 @@ public func probeVolume(at url: URL) -> VolumeProbeResult {
     ]
 
     guard let values = try? url.resourceValues(forKeys: keys) else {
-        return VolumeProbeResult(facts: VolumeFacts(), volumeKey: nil,
+        return VolumeProbeResult(facts: VolumeFacts(fileProviderStorageGroup: storageGroup), volumeKey: nil,
                                  displayName: nil, volumeURL: nil)
     }
 
@@ -176,7 +187,7 @@ public func probeVolume(at url: URL) -> VolumeProbeResult {
     // which would make every startup-volume folder scan-only.
     guard let mountedFacts = readMountedFileSystem(at: url) else {
         return VolumeProbeResult(
-            facts: VolumeFacts(),
+            facts: VolumeFacts(fileProviderStorageGroup: storageGroup),
             volumeKey: makeVolumeKey(uuidString: values.volumeUUIDString,
                                      identifier: values.volumeIdentifier),
             displayName: values.volumeName,
@@ -191,7 +202,8 @@ public func probeVolume(at url: URL) -> VolumeProbeResult {
         fileSystemType: mountedFacts.fileSystemType,
         isRootFileSystem: values.volumeIsRootFileSystem,
         path: url.isFileURL ? url.standardizedFileURL.path : nil,
-        isUbiquitousItem: values.isUbiquitousItem
+        isUbiquitousItem: values.isUbiquitousItem,
+        fileProviderStorageGroup: storageGroup
     )
     return VolumeProbeResult(
         facts: facts,
@@ -200,6 +212,16 @@ public func probeVolume(at url: URL) -> VolumeProbeResult {
         displayName: values.volumeName,
         volumeURL: volumeURL
     )
+}
+
+private func readFileProviderStorageGroup(at url: URL) -> String? {
+    guard let root = fileProviderStorageRoot(at: url) else { return nil }
+    let metadataURL = root.deletingLastPathComponent()
+        .appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
+    guard let data = try? Data(contentsOf: metadataURL),
+          let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+          let metadata = plist as? [String: Any] else { return nil }
+    return metadata["MCMMetadataIdentifier"] as? String
 }
 
 private func makeVolumeKey(uuidString: String?, identifier: Any?) -> VolumeKey? {

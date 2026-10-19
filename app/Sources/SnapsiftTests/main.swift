@@ -2778,7 +2778,9 @@ do {
 }
 
 folderTrashLocationTests(check)
+folderTrashStorageGroupProbeTests(check)
 await folderTrashLocationPortTests(check)
+await folderTrashLookAlikePortTests(check)
 await folderTrashLocationSessionTests(check)
 folderAppIntegrationTests(check)
 folderReviewFormatTests(check)
