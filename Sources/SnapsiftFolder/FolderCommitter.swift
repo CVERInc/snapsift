@@ -103,10 +103,12 @@ public final class FolderCommitter {
         }
         let volumes = Dictionary(grouping: candidates, by: \.volumeKey).map { key, items in
             let probe = volumeProbe(items[0].primary.url)
+            let scanOnly = items.lazy.flatMap(\.members).map { self.volumeProbe($0.url).capability }
+                .first { $0 != .removalSupported }
             return FolderVolumeSummary(volumeKey: key, displayName: probe.displayName ?? key.rawValue,
                                        isStartupVolume: probe.facts.isRootFileSystem == true,
                                        itemCount: items.count, totalBytes: items.reduce(0) { $0 + $1.photo.size },
-                                       capability: probe.capability)
+                                       capability: scanOnly ?? probe.capability)
         }.sorted { $0.volumeKey.rawValue < $1.volumeKey.rawValue }
         return FolderPreCommitSummary(itemCount: candidates.count,
                                       totalBytes: candidates.reduce(0) { $0 + $1.photo.size },
@@ -298,7 +300,8 @@ public final class FolderCommitter {
                     && $0.modificationDate == member.modificationDate } == true
                 pending[index].members[memberIndex].trashURL = sameFile ? result : nil
                 if sameFile, !folderPathExists(member.originalURL) { moved.append(memberIndex) }
-                guard validateTrashResult(sourceVolumeKey: item.volumeKey, resultingURL: result),
+                guard trashPort.validateResult(member.originalURL, result),
+                      validateTrashResult(sourceVolumeKey: item.volumeKey, resultingURL: result),
                       sameFile, !folderPathExists(member.originalURL) else {
                     failure = .invalidTrashResult(result); break
                 }

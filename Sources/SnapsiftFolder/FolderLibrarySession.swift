@@ -69,9 +69,19 @@ public final class FolderLibrarySession {
     public var canScan: Bool { !isScanning && !isBusy && !showHistory && !folders.isEmpty }
     public var canReviewRemoval: Bool {
         guard !isScanning, !isBusy, !showHistory, let result else { return false }
-        let supported = Set(result.roots.filter { $0.volume.capability == .removalSupported }.compactMap { $0.volume.volumeKey })
+        let supported = result.roots.filter { $0.volume.capability == .removalSupported }
         return groups.contains { group in
-            group.deletionIDs.contains { itemsByID[$0].map { supported.contains($0.volumeKey) } == true }
+            group.deletionIDs.contains { id in
+                guard let item = itemsByID[id] else { return false }
+                return item.members.allSatisfy { member in
+                    supported.contains { root in
+                        let path = folderLocationComponents(member.url)
+                        let rootPath = folderLocationComponents(root.url)
+                        return root.volume.volumeKey == member.volumeKey
+                            && path.count > rootPath.count && path.starts(with: rootPath)
+                    }
+                }
+            }
         }
     }
     public var userMarkCount: Int { groups.reduce(0) { $0 + $1.rejected.subtracting($1.autoSeeded).count } }

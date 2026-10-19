@@ -7,6 +7,7 @@ import SnapsiftCore
 public struct FolderTrashPort {
     public var trash: (URL) throws -> URL?
     public var move: (URL, URL) throws -> Void
+    var validateResult: (URL, URL?) -> Bool = { _, _ in true }
 
     public init(trash: @escaping (URL) throws -> URL?,
                 move: @escaping (URL, URL) throws -> Void = FolderTrashPort.moveWithoutOverwrite) {
@@ -15,7 +16,16 @@ public struct FolderTrashPort {
     }
 
     public static var system: FolderTrashPort {
-        FolderTrashPort(trash: { url in
+        #if os(iOS)
+        return confirmedLocation(trash: { url in
+            // S1: plan/research/folder-mode-trash-volumes.md, iOS 2026-10-19:
+            // NSFileCoordinator around trashItem deadlocks; use plain trashItem.
+            var result: NSURL?
+            try FileManager.default.trashItem(at: url, resultingItemURL: &result)
+            return result as URL?
+        }, locationFacts: { probeVolume(at: $0).facts })
+        #else
+        return FolderTrashPort(trash: { url in
             #if os(macOS)
             var result: NSURL?
             try FileManager.default.trashItem(at: url, resultingItemURL: &result)
@@ -24,6 +34,19 @@ public struct FolderTrashPort {
             throw FolderHistoryError.trashUnavailable
             #endif
         })
+        #endif
+    }
+
+    static func confirmedLocation(trash: @escaping (URL) throws -> URL?,
+                                  locationFacts: @escaping (URL) -> VolumeFacts) -> FolderTrashPort {
+        var port = FolderTrashPort(trash: { url in
+            guard url.isFileURL, classifyTrashLocation(locationFacts(url)) == .removalSupported else {
+                throw FolderHistoryError.trashUnavailable
+            }
+            return try trash(url)
+        })
+        port.validateResult = validateTrashLocation
+        return port
     }
 
     /// Exclusive rename prevents overwriting even if a destination appears
@@ -223,6 +246,9 @@ public final class FolderHistoryStore {
             let known = record.members.allSatisfy { $0.trashURL != nil }
             let valid = record.members.allSatisfy { member in
                 guard let trash = member.trashURL, let live = try? FolderMember.read(at: trash) else { return false }
+                #if os(iOS)
+                guard validateTrashLocation(sourceURL: member.originalURL, resultingURL: trash) else { return false }
+                #endif
                 return validateTrashResult(sourceVolumeKey: record.volumeKey, resultingURL: trash)
                     && live.fileID == member.fileID && live.size == member.size
                     && live.modificationDate == member.modificationDate

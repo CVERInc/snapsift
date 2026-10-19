@@ -292,6 +292,12 @@ struct L10n: Sendable {
             case .ja: return "スキャンのみ — このボリュームは読み取り専用です。削除は無効です。"
             case .zhTW: return "僅供掃描，此磁碟區為唯讀，已停用移除功能。"
             }
+        case .systemTrashUnconfirmed:
+            switch language {
+            case .en: return "Scan only — system Trash support is unconfirmed for this location. Removal disabled."
+            case .ja: return "スキャンのみ — この場所のシステムのゴミ箱対応は未確認です。削除は無効です。"
+            case .zhTW: return "僅供掃描，此位置未確認支援系統垃圾桶，已停用移除功能。"
+            }
         case .unsupportedFilesystemType:
             switch language {
             case .en: return "Scan only — Trash support is unconfirmed for this filesystem. Removal disabled."

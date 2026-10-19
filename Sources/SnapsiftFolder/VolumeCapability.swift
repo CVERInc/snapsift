@@ -9,17 +9,23 @@ public struct VolumeFacts: Equatable, Sendable {
     public let mntRdOnly: Bool?
     public let fileSystemType: String?
     public let isRootFileSystem: Bool?
+    public let path: String?
+    public let isUbiquitousItem: Bool?
 
     public init(isLocal: Bool? = nil,
                 isReadOnly: Bool? = nil,
                 mntRdOnly: Bool? = nil,
                 fileSystemType: String? = nil,
-                isRootFileSystem: Bool? = nil) {
+                isRootFileSystem: Bool? = nil,
+                path: String? = nil,
+                isUbiquitousItem: Bool? = nil) {
         self.isLocal = isLocal
         self.isReadOnly = isReadOnly
         self.mntRdOnly = mntRdOnly
         self.fileSystemType = fileSystemType
         self.isRootFileSystem = isRootFileSystem
+        self.path = path
+        self.isUbiquitousItem = isUbiquitousItem
     }
 }
 
@@ -28,6 +34,7 @@ public enum VolumeCapabilityReason: Equatable, Sendable {
     case readOnly
     case unsupportedFilesystemType
     case signalsUnavailable
+    case systemTrashUnconfirmed
 }
 
 public enum VolumeCapability: Equatable, Sendable {
@@ -68,6 +75,39 @@ public func classifyVolume(_ facts: VolumeFacts) -> VolumeCapability {
     return .removalSupported
 }
 
+/// iOS Trash support is location-specific, even on one writable APFS volume.
+public func classifyTrashLocation(_ facts: VolumeFacts) -> VolumeCapability {
+    let volume = classifyVolume(facts)
+    guard volume == .removalSupported else { return volume }
+    guard facts.isUbiquitousItem != true, let path = facts.path, path.hasPrefix("/"),
+          fileProviderStorageRoot(at: URL(fileURLWithPath: path)) != nil else {
+        return .scanOnly(.systemTrashUnconfirmed)
+    }
+    // Legacy third-party providers can share this AppGroup storage shape.
+    // S1 could not distinguish them; S2 device evidence must tighten this rule.
+    return .removalSupported
+}
+
+func folderLocationComponents(_ url: URL) -> [String] {
+    var components = url.standardizedFileURL.pathComponents
+    if components.count > 1, components[1] == "private" { components.remove(at: 1) }
+    return components
+}
+
+func fileProviderStorageRoot(at url: URL) -> URL? {
+    guard url.isFileURL else { return nil }
+    let components = folderLocationComponents(url)
+    guard !components.contains("Mobile Documents"), components.count >= 6 else { return nil }
+    for index in 1...(components.count - 5) {
+        if Array(components[index..<(index + 3)]) == ["Containers", "Shared", "AppGroup"],
+           components[index + 4] == "File Provider Storage" {
+            // The storage root itself is pickable, as well as folders below it.
+            return URL(fileURLWithPath: NSString.path(withComponents: Array(components.prefix(index + 5))))
+        }
+    }
+    return nil
+}
+
 /// Opaque identity for a mounted volume, suitable for same-volume checks.
 public struct VolumeKey: Hashable, Codable, Sendable {
     public let rawValue: String
@@ -84,16 +124,28 @@ public struct VolumeProbeResult {
     public let displayName: String?
     public let volumeURL: URL?
 
-    public var capability: VolumeCapability { classifyVolume(facts) }
+    public let capability: VolumeCapability
 
     public init(facts: VolumeFacts,
                 volumeKey: VolumeKey?,
                 displayName: String?,
                 volumeURL: URL?) {
+        #if os(iOS)
+        let capability = classifyTrashLocation(facts)
+        #else
+        let capability = classifyVolume(facts)
+        #endif
+        self.init(facts: facts, volumeKey: volumeKey, displayName: displayName,
+                  volumeURL: volumeURL, capability: capability)
+    }
+
+    init(facts: VolumeFacts, volumeKey: VolumeKey?, displayName: String?,
+         volumeURL: URL?, capability: VolumeCapability) {
         self.facts = facts
         self.volumeKey = volumeKey
         self.displayName = displayName
         self.volumeURL = volumeURL
+        self.capability = capability
     }
 }
 
@@ -109,6 +161,7 @@ public func probeVolume(at url: URL) -> VolumeProbeResult {
         .volumeUUIDStringKey,
         .volumeIdentifierKey,
         .volumeNameKey,
+        .isUbiquitousItemKey,
     ]
 
     guard let values = try? url.resourceValues(forKeys: keys) else {
@@ -136,7 +189,9 @@ public func probeVolume(at url: URL) -> VolumeProbeResult {
         isReadOnly: values.volumeIsReadOnly,
         mntRdOnly: mountedFacts.isReadOnly,
         fileSystemType: mountedFacts.fileSystemType,
-        isRootFileSystem: values.volumeIsRootFileSystem
+        isRootFileSystem: values.volumeIsRootFileSystem,
+        path: url.isFileURL ? url.standardizedFileURL.path : nil,
+        isUbiquitousItem: values.isUbiquitousItem
     )
     return VolumeProbeResult(
         facts: facts,

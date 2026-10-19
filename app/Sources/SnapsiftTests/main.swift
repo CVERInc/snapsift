@@ -2777,6 +2777,9 @@ do {
     }
 }
 
+folderTrashLocationTests(check)
+await folderTrashLocationPortTests(check)
+await folderTrashLocationSessionTests(check)
 folderAppIntegrationTests(check)
 folderReviewFormatTests(check)
 reviewAlbumNamesTests(check)
