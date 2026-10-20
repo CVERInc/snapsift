@@ -11,6 +11,30 @@ struct RestoredScanSnapshot {
 }
 
 extension ScanSnapshot {
+    /// Missing albums leave the next-scan selection unchanged, as in schema 1.
+    /// Identifiers are restored verbatim, with no library lookup.
+    func restoredSource(albums: [AlbumItem]) -> ScanSource? {
+        if case .album(let id, _) = savedSource {
+            return albums.first { $0.id == id }.map { .album($0) }
+        }
+        return restoredReviewSource(albums: albums)
+    }
+
+    /// The review keeps naming its album even when that album no longer exists.
+    func restoredReviewSource(albums: [AlbumItem]) -> ScanSource {
+        switch savedSource {
+        case .wholeLibrary: return .wholeLibrary
+        case .album(let id, let title):
+            return .album(albums.first { $0.id == id }
+                ?? AlbumItem(id: id, title: title ?? "", estimatedCount: -1))
+        case .identifiers(let identifiers): return .identifiers(identifiers)
+        }
+    }
+
+    var restoredCaptureDates: DateInterval? {
+        captureDates.map { DateInterval(start: $0.start, end: $0.end) }
+    }
+
     func restored(liveFavorites: [String: Bool], editedNow: [String: Bool],
                          tokenCurrent: Bool) -> RestoredScanSnapshot {
         let snap = self

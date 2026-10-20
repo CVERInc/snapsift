@@ -155,6 +155,14 @@ public final class PhotoLibrarySession {
     public var vanishedMarkCount: Int? { willSet { onChange?() } }
     /// Where the next scan reads its working set from. Default = whole library.
     public var scanSource: ScanSource = .wholeLibrary { willSet { onChange?() } }
+    /// Half-open capture-date bound for the next scan. Nil means no date limit.
+    public var scanCaptureDates: DateInterval? = nil { willSet { onChange?() } }
+    /// Source of the current review state, independent of the next-scan picker.
+    public private(set) var reviewSource: ScanSource? { willSet { onChange?() } }
+    /// Frozen capture-date bound of the current review state, independent of
+    /// the next-scan selection. Nil means no date limit (or no review state).
+    public private(set) var reviewCaptureDates: DateInterval? { willSet { onChange?() } }
+    private var snapshotSource: ScanSnapshot.Source = .wholeLibrary
     /// User albums fetched once after authorization (title + estimated count).
     /// Empty until `loadAlbums()` is called.
     public private(set) var albums: [AlbumItem] = [] { willSet { onChange?() } }
@@ -292,12 +300,14 @@ public final class PhotoLibrarySession {
     /// are mutually exclusive here (and again in `refineWithFaces`).
     public func startScan(_ kind: ScanKind) {
         guard beginScan(kind) else { return }
+        let source = scanSource
+        let captureDates = scanCaptureDates
         scanTask = Task { [weak self] in
             guard let self else { return }
             switch kind {
-            case .burst:       await self.scan()
-            case .lookAlikes:  await self.scanLookAlikes()
-            case .similarSets: await self.scanSimilarSets()
+            case .burst:       await self.scan(source: source, captureDates: captureDates)
+            case .lookAlikes:  await self.scanLookAlikes(source: source, captureDates: captureDates)
+            case .similarSets: await self.scanSimilarSets(source: source, captureDates: captureDates)
             }
         }
     }
@@ -344,6 +354,10 @@ public final class PhotoLibrarySession {
         isScanning = false
         groups = []
         categories = []
+        hasScanned = false
+        reviewSource = nil
+        reviewCaptureDates = nil
+        snapshotSource = .wholeLibrary
         exactDupeGroupIDs = []
         progressFraction = nil
         // An aborted sidecar read returns an EMPTY map — caching that would
@@ -553,27 +567,38 @@ public final class PhotoLibrarySession {
         albums = fetchUserAlbums()
     }
 
-    private func scan() async {
-        progress = .fetching
-        defer { isScanning = false; progress = .idle; progressFraction = nil }
+    /// Count with precisely the fetch options used by the requested scan kind.
+    /// This is a fetch count; later analysis may exclude unclassifiable videos.
+    /// Returns nil for an unresolvable album or an empty identifier array.
+    public func count(for source: ScanSource, captureDates: DateInterval? = nil, kind: ScanKind = .burst) -> Int? {
+        countAssets(source: source, captureDates: captureDates,
+                    options: Self.scanFetchOptions(for: kind, includeVideo: includeVideo))
+    }
 
+    static func scanFetchOptions(for kind: ScanKind, includeVideo: Bool) -> PHFetchOptions {
         let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
-        opts.includeAllBurstAssets = true
+        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: kind != .similarSets)]
+        opts.includeAllBurstAssets = kind == .burst
         if !includeVideo {
             opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         }
-        // Scope to the chosen source (whole library or a single album). If the
-        // album can no longer be resolved (deleted since the picker showed it),
-        // bail early rather than silently falling back to the whole library —
-        // and BEFORE the state wipe below, so a scan that never ran leaves the
-        // previous session's review state untouched (same stance as cancel).
-        guard let result = fetchAssets(source: scanSource, options: opts) else {
-            // The defer wipes `progress` on return, so the album-gone message must
-            // travel via the one-shot notice or the user never sees why nothing ran.
+        return opts
+    }
+
+    private func scan(source: ScanSource, captureDates: DateInterval?) async {
+        progress = .fetching
+        defer { isScanning = false; progress = .idle; progressFraction = nil }
+
+        let opts = Self.scanFetchOptions(for: .burst, includeVideo: includeVideo)
+        // An unavailable scope must bail before wiping the prior review state.
+        guard let result = fetchAssets(source: source, captureDates: captureDates, options: opts) else {
+            // The existing unavailable-source notice also covers empty identifier sets.
             scanNotice = .albumGone
             return
         }
+        snapshotSource = ScanSnapshot.Source(source)
+        reviewSource = source
+        reviewCaptureDates = captureDates
 
         invalidateReviewAlbums()
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
@@ -896,23 +921,22 @@ public final class PhotoLibrarySession {
 
     /// L3 cross-time pass: dHash-candidate + neural feature-print confirmation
     /// over the chosen source. Heavier than the burst scan — shows progress.
-    private func scanLookAlikes() async {
+    private func scanLookAlikes(source: ScanSource, captureDates: DateInterval?) async {
         progress = .fetching
         defer { isScanning = false; progress = .idle; progressFraction = nil }
 
-        let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
-        if !includeVideo {
-            opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        }
+        let opts = Self.scanFetchOptions(for: .lookAlikes, includeVideo: includeVideo)
         // Bail BEFORE the state wipe (see scan()) — a scan that never ran must
         // leave the previous session's review state untouched.
-        guard let result = fetchAssets(source: scanSource, options: opts) else {
+        guard let result = fetchAssets(source: source, captureDates: captureDates, options: opts) else {
             // The defer wipes `progress` on return, so the album-gone message must
             // travel via the one-shot notice or the user never sees why nothing ran.
             scanNotice = .albumGone
             return
         }
+        snapshotSource = ScanSnapshot.Source(source)
+        reviewSource = source
+        reviewCaptureDates = captureDates
 
         invalidateReviewAlbums()
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
@@ -989,23 +1013,22 @@ public final class PhotoLibrarySession {
     /// each set from its Vision content tags (prettified by apfel if available).
     /// The macOS app browses sets; a session without an enrichment port flags
     /// their members so a shell can review them (`deleteReviewed(in:)`).
-    private func scanSimilarSets() async {
+    private func scanSimilarSets(source: ScanSource, captureDates: DateInterval?) async {
         progress = .fetching
         defer { isScanning = false; progress = .idle; progressFraction = nil }
 
-        let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        if !includeVideo {
-            opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        }
+        let opts = Self.scanFetchOptions(for: .similarSets, includeVideo: includeVideo)
         // Bail BEFORE the state wipe (see scan()) — a scan that never ran must
         // leave the previous session's review state untouched.
-        guard let result = fetchAssets(source: scanSource, options: opts) else {
+        guard let result = fetchAssets(source: source, captureDates: captureDates, options: opts) else {
             // The defer wipes `progress` on return, so the album-gone message must
             // travel via the one-shot notice or the user never sees why nothing ran.
             scanNotice = .albumGone
             return
         }
+        snapshotSource = ScanSnapshot.Source(source)
+        reviewSource = source
+        reviewCaptureDates = captureDates
 
         invalidateReviewAlbums()
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
@@ -1653,10 +1676,9 @@ public final class PhotoLibrarySession {
         ScanSnapshot(
             schema: ScanSnapshot.currentSchema,
             kind: lastScanKind.rawValue,
-            sourceID: {
-                if case .album(let item) = scanSource { return item.id }
-                return nil
-            }(),
+            sourceID: snapshotSource.albumID,
+            source: snapshotSource,
+            captureDates: reviewCaptureDates,
             timestamp: Date(),
             // Persist the SCAN's reference token verbatim, never a fresh "now"
             // read — see `scanChangeToken`. A debounced decision-save must not
@@ -1909,6 +1931,21 @@ public final class PhotoLibrarySession {
 
         let restored = snap.restored(liveFavorites: map.mapValues(\.isFavorite),
                                      editedNow: editedNowByID, tokenCurrent: tokenCurrent)
+        guard applyRestoredSnapshot(snap, restored: restored, assetsByID: map,
+                                    albums: albums, tokenCurrent: tokenCurrent) else { return false }
+        if !quiet {
+            scanNotice = PhotoLibraryChangeToken.isCurrent(snap.changeToken)
+                ? .restored(groups.isEmpty ? categories.count : groups.count)
+                : .restoredStale
+        }
+        return true
+    }
+
+    /// Publish an already-resolved snapshot without fetching from Photos.
+    @discardableResult
+    func applyRestoredSnapshot(_ snap: ScanSnapshot, restored: RestoredScanSnapshot,
+                               assetsByID: [String: PHAsset], albums: [AlbumItem],
+                               tokenCurrent: Bool) -> Bool {
         let restoredGroups = restored.groups
         let exactIDs = restored.exactIDs
         let restoredCats = restored.categories
@@ -1916,7 +1953,7 @@ public final class PhotoLibrarySession {
         let vanishedMarks = restored.vanishedMarks
         guard !restoredGroups.isEmpty || !restoredCats.isEmpty else { return false }
 
-        photoKitImages = makeImageProvider(assetsByID: map)
+        photoKitImages = makeImageProvider(assetsByID: assetsByID)
         groups = restoredGroups
         exactDupeGroupIDs = exactIDs
         categories = restoredCats
@@ -1938,19 +1975,15 @@ public final class PhotoLibrarySession {
         qualityAvailable = restoredGroups.contains { g in
             g.photos.contains { $0.quality > 0 || $0.size > 0 }
         }
-        // Point the source picker back at what this snapshot actually scanned
-        // (if that album still exists) so a rescan hits the same scope.
-        if let sourceID = snap.sourceID {
-            if let item = albums.first(where: { $0.id == sourceID }) {
-                scanSource = .album(item)
-            }
-        } else {
-            scanSource = .wholeLibrary
-        }
-        if !quiet {
-            scanNotice = PhotoLibraryChangeToken.isCurrent(snap.changeToken)
-                ? .restored(restoredGroups.isEmpty ? restoredCats.count : restoredGroups.count)
-                : .restoredStale
+        // Keep the saved scope even if the next-scan selection later changes.
+        // Restore both next-scan choices to the frozen scope when its source
+        // resolves. Missing albums leave both choices unchanged, as with schema 1.
+        snapshotSource = snap.savedSource
+        reviewSource = snap.restoredReviewSource(albums: albums)
+        reviewCaptureDates = snap.restoredCaptureDates
+        if let source = snap.restoredSource(albums: albums) {
+            scanSource = source
+            scanCaptureDates = snap.restoredCaptureDates
         }
         return true
     }

@@ -14,13 +14,48 @@ import SnapsiftCore
 /// deliberately NOT persisted: the protected-override is an informed-consent
 /// flag that must never outlive the session that confirmed it.
 struct ScanSnapshot: Codable {
-    /// Bump when the schema changes; loaders reject unknown versions.
-    static let currentSchema = 1
+    /// Schema 2 prevents older readers from mistaking a bounded source for the
+    /// whole library. This loader also accepts the original schema 1.
+    static let currentSchema = 2
 
-    init(schema: Int = currentSchema, kind: String, sourceID: String?, timestamp: Date,
+    init(schema: Int = currentSchema, kind: String, sourceID: String?, source: Source? = nil,
+                captureDates: DateInterval? = nil, timestamp: Date,
                 changeToken: Data?, groups: [Group], categories: [Category]) {
         self.schema = schema; self.kind = kind; self.sourceID = sourceID; self.timestamp = timestamp
+        self.source = source
+        self.captureDates = captureDates.map(CaptureDates.init)
         self.changeToken = changeToken; self.groups = groups; self.categories = categories
+    }
+
+    /// Album titles survive deletion; live metadata takes precedence on restore.
+    enum Source: Codable, Equatable {
+        case wholeLibrary
+        case album(id: String, title: String?)
+        case identifiers([String])
+
+        init(_ source: ScanSource) {
+            switch source {
+            case .wholeLibrary: self = .wholeLibrary
+            case .album(let item): self = .album(id: item.id, title: item.title)
+            case .identifiers(let identifiers): self = .identifiers(identifiers)
+            }
+        }
+
+        var albumID: String? {
+            if case .album(let id, _) = self { return id }
+            return nil
+        }
+    }
+
+    /// Explicit endpoints preserve the frozen half-open bound without calendar
+    /// interpretation. It is separate from the source so any combination persists.
+    struct CaptureDates: Codable, Equatable {
+        let start: Date
+        let end: Date
+
+        init(_ interval: DateInterval) {
+            start = interval.start; end = interval.end
+        }
     }
 
     struct Group: Codable {
@@ -47,8 +82,13 @@ struct ScanSnapshot: Codable {
     let schema: Int
     /// "burst" / "lookAlikes" / "similarSets" — informational.
     let kind: String
-    /// Album localIdentifier the scan was scoped to (nil = whole library).
+    /// Legacy schema-1 album localIdentifier (nil = whole library).
     let sourceID: String?
+    /// Schema 2 records every source. Optional so schema-1 snapshots still decode.
+    let source: Source?
+    /// Absent means no date bound, including all schema-1 snapshots.
+    let captureDates: CaptureDates?
+    var savedSource: Source { source ?? sourceID.map { .album(id: $0, title: nil) } ?? .wholeLibrary }
     let timestamp: Date
     /// Archived PHPersistentChangeToken at save time; lets the loader tell the
     /// user "the library changed since this scan" without blocking the restore.
@@ -133,7 +173,7 @@ final class ScanSnapshotStore: @unchecked Sendable {
     func loadOutcome() -> LoadOutcome {
         guard let data = try? Data(contentsOf: url) else { return .none }
         guard let snap = try? JSONDecoder().decode(ScanSnapshot.self, from: data),
-              snap.schema == ScanSnapshot.currentSchema else {
+              (snap.schema == 1 || snap.schema == ScanSnapshot.currentSchema) else {
             // Preserve the bytes for post-mortem instead of letting the next
             // save clobber them; the notice tells the user what happened.
             let aside = url.deletingPathExtension().appendingPathExtension("unreadable.json")

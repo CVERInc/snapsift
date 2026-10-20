@@ -1698,6 +1698,7 @@ struct ContentView: View {
         switch model.scanSource {
         case .wholeLibrary: return t.sourceWholeLibrary()
         case .album(let a): return a.title
+        case .identifiers: return model.scanSource.displayTitle
         }
     }
 
