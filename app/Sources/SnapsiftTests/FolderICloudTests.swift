@@ -65,10 +65,14 @@ private final class FakeFolderUbiquity: @unchecked Sendable {
 func checkFolderICloudPolicy() async {
     print("Folder iCloud policy, accounting and guarded eviction")
     await checkFolderICloudGates()
+    await checkFolderDownloadPersistence()
+    await checkFolderDownloadCancelledSession()
+    await checkFolderDownloadBookmarkRecovery()
     guard UTType.png.conforms(to: .image) else {
         print("  Not verified: Folder pipeline integration requires the LaunchServices UTType registry (unavailable in this sandbox)")
         return
     }
+    await checkFolderDownloadPipelineCancellation()
     do {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("snapsift-folder-cloud-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
@@ -175,6 +179,288 @@ func checkFolderICloudPolicy() async {
     } catch {
         check(false, "Folder iCloud fixture error: \(error)")
     }
+}
+
+private func downloadReceipt(_ cloud: FolderICloudAccess, store: FolderDownloadStore,
+                             port: FolderUbiquityPort) -> FolderScanResult {
+    FolderScanResult(downloadedFiles: cloud.downloadedFiles, ubiquityPort: port, downloadStore: store,
+        items: [], groups: [], exactGroupIDs: [], crossFolderDuplicates: [], roots: [], issues: [],
+        primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [],
+        imageProvider: FolderImageProvider(items: []), accesses: [])
+}
+
+/// Uses real file identities and atomic JSON writes, without a type registry,
+/// image decoder, iCloud account, simulator or application process.
+@MainActor
+private func checkFolderDownloadPersistence() async {
+    do {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/folder-downloads-\(UUID())")
+        let source = root.appendingPathComponent("source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bookmarks = FolderBookmarkStore(url: root.appendingPathComponent("folders.json"))
+        try bookmarks.add(source)
+        let storeURL = root.appendingPathComponent("downloads.json")
+        let store = FolderDownloadStore(url: storeURL, bookmarks: bookmarks)
+        check(store.downloadedFiles.isEmpty, "R5 persistence: missing store is empty")
+        try Data("corrupt".utf8).write(to: storeURL)
+        check(FolderDownloadStore(url: storeURL, bookmarks: bookmarks).downloadedFiles.isEmpty,
+              "R5 persistence: corrupt store is empty")
+        let roots = try store.prepare(roots: [source])
+        let local = source.appendingPathComponent("local.bin")
+        let names = ["remote", "changed", "replaced", "missing", "no-cloud", "fails"]
+        let files = names.map { source.appendingPathComponent("\($0).bin") }
+        for url in files + [local] { try Data("fixture".utf8).write(to: url) }
+        let fake = FakeFolderUbiquity()
+        fake.setCloud(Set(files + [local]), missing: Set(files))
+        let off = FolderICloudAccess(policy: .localOnly, port: fake.port, timeout: 0,
+                                    downloadStore: store, downloadRoots: roots)
+        _ = try off.prepareForScan(files[0])
+        check(store.downloadedFiles.isEmpty && fake.downloadCalls.isEmpty,
+              "R5 persistence: localOnly never downloads or persists a remote file")
+        let cloud = FolderICloudAccess(policy: .allowed, port: fake.port, timeout: 0,
+                                      downloadStore: store, downloadRoots: roots)
+        _ = try cloud.prepareForScan(local)
+        check(store.downloadedFiles.isEmpty, "R5 persistence: already-local ubiquitous file never recorded")
+        var expected: Set<URL> = []
+        for url in files {
+            _ = try cloud.prepareForScan(url)
+            expected.insert(url)
+            let reopened = FolderDownloadStore(url: storeURL, bookmarks: bookmarks)
+            check(Set(reopened.downloadedFiles.map(\.url)) == expected,
+                  "R5 incremental: disk has exact completed set before next download")
+        }
+        let receipt = downloadReceipt(cloud, store: store, port: fake.port)
+        check(receipt.downloadedURLs == Set(files), "R5 persistence: completed receipt and store share downloads")
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 123)],
+                                             ofItemAtPath: files[1].path)
+        try Data("replacement".utf8).write(to: files[2], options: .atomic)
+        try FileManager.default.removeItem(at: files[3])
+        fake.setCloud(Set(files).subtracting([files[4]]))
+        fake.evictionFailure = files[5]
+        let report = await store.evictDownloadedFiles(ubiquityPort: fake.port)
+        check(report.first { $0.url == files[1] }?.outcome == .changed
+              && report.first { $0.url == files[2] }?.outcome == .changed
+              && report.first { $0.url == files[4] }?.outcome == .noLongerUbiquitous
+              && fake.evictionCalls == [files[0]],
+              "R5 return: changed/replaced/non-cloud/missing files never reach eviction")
+        let failed = report.filter { if case .failed = $0.outcome { return true }; return false }
+        check(Set(failed.map(\.url)) == [files[3], files[5]]
+              && store.downloadedFiles.map(\.url) == [files[5]]
+              && FolderDownloadStore(url: storeURL, bookmarks: bookmarks).downloadedFiles.map(\.url) == [files[5]],
+              "R5 return: missing reports existing failure outcome but is pruned; API failure survives for retry")
+        fake.evictionFailure = nil
+        let retry = await receipt.evictDownloadedFiles()
+        check(retry.count == 1 && retry.first?.url == files[5] && retry.first?.outcome == .evicted
+              && store.downloadedFiles.isEmpty,
+              "R5 shared return: completed action retries only remaining receipt and clears persisted set")
+        let repeated = await receipt.evictDownloadedFiles()
+        check(repeated.isEmpty && fake.evictionCalls.count == 2,
+              "R5 shared return: repeated completed action never double-evicts")
+
+        let second = FolderICloudAccess(policy: .allowed, port: fake.port, timeout: 0,
+                                       downloadStore: store, downloadRoots: roots)
+        _ = try second.prepareForScan(files[0])
+        let stale = await receipt.evictDownloadedFiles()
+        check(stale.isEmpty && store.downloadedFiles.count == 1,
+              "R5 shared return: old completed result cannot consume a later download of the same identity")
+        let secondReceipt = downloadReceipt(second, store: store, port: fake.port)
+        let completed = await secondReceipt.evictDownloadedFiles()
+        let afterCompleted = await store.evictDownloadedFiles(ubiquityPort: fake.port)
+        check(completed.count == 1 && afterCompleted.isEmpty
+              && FolderDownloadStore(url: storeURL, bookmarks: bookmarks).downloadedFiles.isEmpty,
+              "R5 shared return: completed-first return clears disk and subsequent persisted return is empty")
+        let unconfigured = FolderICloudAccess(policy: .allowed, port: fake.port, timeout: 0)
+        _ = try unconfigured.prepareForScan(files[0])
+        check(unconfigured.downloadedFiles.map(\.url) == [files[0]] && store.downloadedFiles.isEmpty,
+              "R5 opt-in: unconfigured scan retains its in-memory receipt without touching the store")
+
+        let blocked = source.appendingPathComponent("not-a-directory")
+        try Data().write(to: blocked)
+        let unwritable = FolderDownloadStore(url: blocked.appendingPathComponent("downloads.json"), bookmarks: bookmarks)
+        var refused = false
+        do { _ = try unwritable.prepare(roots: [source]) } catch { refused = true }
+        check(refused && unwritable.persistenceError != nil,
+              "R5 persistence: unusable destination refuses preparation before downloading")
+
+        fake.setCloud([files[0]], missing: [files[0]])
+        let retryCloud = FolderICloudAccess(policy: .allowed, port: fake.port, timeout: 0,
+                                           downloadStore: store, downloadRoots: roots)
+        try FileManager.default.removeItem(at: storeURL)
+        try FileManager.default.createDirectory(at: storeURL, withIntermediateDirectories: false)
+        var writeFailed = false
+        do { _ = try retryCloud.prepareForScan(files[0]) } catch is FolderDownloadPersistenceError { writeFailed = true }
+        check(writeFailed && store.persistenceError != nil && store.downloadedFiles.map(\.url) == [files[0]],
+              "R5 persistence: interrupted write reports error and retains the in-memory download for recovery")
+        let callsBefore = fake.evictionCalls.count
+        let failedClear = await store.evictDownloadedFiles(ubiquityPort: fake.port)
+        let clearFailed: Bool
+        if case .failed = failedClear.first?.outcome { clearFailed = true } else { clearFailed = false }
+        check(clearFailed && store.downloadedFiles.count == 1 && fake.evictionCalls.count == callsBefore + 1,
+              "R5 persistence: failed receipt removal stays retryable after eviction")
+        try FileManager.default.removeItem(at: storeURL)
+        let recoveredClear = await store.evictDownloadedFiles(ubiquityPort: fake.port)
+        check(recoveredClear.first?.outcome == .evicted && store.downloadedFiles.isEmpty
+              && store.persistenceError == nil && fake.evictionCalls.count == callsBefore + 1,
+              "R5 persistence: retry clears disk without re-evicting an already nonlocal file")
+    } catch { check(false, "R5 persistence fixture error: \(error)") }
+}
+
+@MainActor
+private func checkFolderDownloadCancelledSession() async {
+    do {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/folder-download-cancel-\(UUID())")
+        let source = root.appendingPathComponent("source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = ["one", "two", "never"].map { source.appendingPathComponent("\($0).bin") }
+        for url in files { try Data("fixture".utf8).write(to: url) }
+        let bookmarks = FolderBookmarkStore(url: root.appendingPathComponent("folders.json"))
+        try bookmarks.add(source)
+        let history = FolderHistoryStore(historyURL: root.appendingPathComponent("history.json"),
+                                         intentURL: root.appendingPathComponent("intent.json"))
+        let storeURL = root.appendingPathComponent("downloads.json")
+        let store = FolderDownloadStore(url: storeURL, bookmarks: bookmarks)
+        let fake = FakeFolderUbiquity()
+        fake.setCloud(Set(files), missing: Set(files))
+        var gate: CheckedContinuation<Void, Never>?
+        let session = FolderLibrarySession(bookmarks: bookmarks, history: history, downloadStore: store, scan: { roots in
+            let cloud = FolderICloudAccess(policy: .allowed, port: fake.port, timeout: 0,
+                downloadStore: store, downloadRoots: try store.prepare(roots: roots))
+            for url in files.prefix(2) { _ = try cloud.prepareForScan(url) }
+            await withCheckedContinuation { gate = $0 }
+            try Task.checkCancellation()
+            _ = try cloud.prepareForScan(files[2])
+            return downloadReceipt(cloud, store: store, port: fake.port)
+        })
+        session.loadFolders()
+        session.startScan()
+        for _ in 0..<1_000 where gate == nil { await Task.yield() }
+        check(gate != nil && session.isScanning && Set(session.downloadedFiles.map(\.url)) == Set(files.prefix(2)),
+              "R5 cancel: exact completed downloads visible while session is still scanning")
+        session.cancelScan()
+        gate?.resume()
+        for _ in 0..<1_000 where session.isScanning { await Task.yield() }
+        check(!session.isScanning && session.result == nil && fake.downloadCalls == Array(files.prefix(2)),
+              "R5 cancel: cancelled session has no result and never downloads the remaining file")
+        let newBookmarks = FolderBookmarkStore(url: bookmarks.url)
+        let relaunchedStore = FolderDownloadStore(url: storeURL, bookmarks: newBookmarks)
+        let relaunched = FolderLibrarySession(bookmarks: newBookmarks, history: history, downloadStore: relaunchedStore)
+        check(Set(relaunched.downloadedFiles.map(\.url)) == Set(files.prefix(2)),
+              "R5 relaunch: new session and store recover exact cancelled-scan set without a result")
+        let report = await relaunchedStore.evictDownloadedFiles(ubiquityPort: fake.port)
+        check(report.count == 2 && report.allSatisfy { $0.outcome == .evicted }
+              && Set(fake.evictionCalls) == Set(files.prefix(2)) && relaunched.downloadedFiles.isEmpty
+              && FolderDownloadStore(url: storeURL, bookmarks: newBookmarks).downloadedFiles.isEmpty,
+              "R5 relaunch return: evicts exactly the recovered set and durably clears it")
+    } catch { check(false, "R5 cancelled session fixture error: \(error)") }
+}
+
+@MainActor
+private func checkFolderDownloadBookmarkRecovery() async {
+    do {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/folder-download-bookmark-\(UUID())")
+        var source = root.appendingPathComponent("source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var starts = 0, stops = 0
+        let bookmarks = FolderBookmarkStore(url: root.appendingPathComponent("folders.json"), makeAccess: { url in
+            try FolderAccess(url: url, startAccess: { _ in starts += 1; return true },
+                             stopAccess: { _ in stops += 1 })
+        }, resolveBookmark: { _ in (source, false) })
+        let bookmark = try bookmarks.add(source)
+        let file = source.appendingPathComponent("file.bin")
+        try Data("fixture".utf8).write(to: file)
+        let storeURL = root.appendingPathComponent("downloads.json")
+        let store = FolderDownloadStore(url: storeURL, bookmarks: bookmarks)
+        let fake = FakeFolderUbiquity()
+        fake.setCloud([file], missing: [file])
+        let cloud = FolderICloudAccess(policy: .allowed, port: fake.port, timeout: 0,
+            downloadStore: store, downloadRoots: try store.prepare(roots: [source]))
+        _ = try cloud.prepareForScan(file)
+        let moved = root.appendingPathComponent("moved")
+        try FileManager.default.moveItem(at: source, to: moved)
+        source = moved
+        let newFile = source.appendingPathComponent("file.bin")
+        fake.setCloud([newFile])
+        let recovered = FolderDownloadStore(url: storeURL, bookmarks: bookmarks)
+        check(recovered.downloadedFiles.map(\.url) == [newFile],
+              "R5 bookmarks: recovered relative path follows the existing folder bookmark resolver")
+        var scopedPort = fake.port
+        let evict = scopedPort.evict
+        var scopeHeld = false
+        scopedPort.evict = { member in scopeHeld = starts > stops; try evict(member) }
+        let report = await recovered.evictDownloadedFiles(ubiquityPort: scopedPort)
+        check(report.first?.outcome == .evicted && fake.evictionCalls == [newFile]
+              && scopeHeld && starts == stops,
+              "R5 bookmarks: same identity at resolved path evicts with balanced scope held throughout")
+        let again = FolderICloudAccess(policy: .allowed, port: fake.port, timeout: 0,
+            downloadStore: recovered, downloadRoots: try recovered.prepare(roots: [source]))
+        _ = try again.prepareForScan(newFile)
+        try bookmarks.remove(bookmark.id)
+        let unavailable = await recovered.evictDownloadedFiles(ubiquityPort: fake.port)
+        let failed: Bool
+        if case .failed = unavailable.first?.outcome { failed = true } else { failed = false }
+        check(failed && recovered.downloadedFiles.count == 1 && fake.evictionCalls.count == 1,
+              "R5 bookmarks: removed grant retains receipt and reports failure without bypassing access")
+    } catch { check(false, "R5 bookmark recovery fixture error: \(error)") }
+}
+
+@MainActor
+private func checkFolderDownloadPipelineCancellation() async {
+    do {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/folder-download-pipeline-\(UUID())")
+        let source = root.appendingPathComponent("source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let files = ["one.png", "two.png"].map { source.appendingPathComponent($0) }
+        for url in files { try writeCloudFixture(url) }
+        let bookmarks = FolderBookmarkStore(url: root.appendingPathComponent("folders.json"))
+        try bookmarks.add(source)
+        let storeURL = root.appendingPathComponent("downloads.json")
+        let store = FolderDownloadStore(url: storeURL, bookmarks: bookmarks)
+        let fake = FakeFolderUbiquity()
+        fake.setCloud(Set(files), missing: Set(files))
+        let reachedSecond = DispatchSemaphore(value: 0)
+        let resume = DispatchSemaphore(value: 0)
+        var port = fake.port
+        let start = port.startDownload
+        port.startDownload = { url in
+            if fake.downloadCalls.count == 1 {
+                reachedSecond.signal()
+                _ = resume.wait(timeout: .now() + 10)
+            } else { try start(url) }
+        }
+        let task = Task { try await FolderScanPipeline.scan(roots: [source], ubiquityPort: port, downloadStore: store) }
+        let reached = await Task.detached { reachedSecond.wait(timeout: .now() + 10) == .success }.value
+        let completed = Set(fake.downloadCalls)
+        check(reached && completed.count == 1
+              && Set(FolderDownloadStore(url: storeURL, bookmarks: bookmarks).downloadedFiles.map(\.url)) == completed,
+              "R5 pipeline: first download is durable while enumeration waits for the second")
+        task.cancel()
+        resume.signal()
+        var cancelled = false
+        do {
+            let result = try await task.value
+            result.accesses.forEach { $0.stop() }
+        } catch is CancellationError { cancelled = true }
+        check(cancelled && Set(store.downloadedFiles.map(\.url)) == completed,
+              "R5 pipeline: parent cancellation reaches enumeration and preserves only completed downloads")
+        let report = await store.evictDownloadedFiles(ubiquityPort: fake.port)
+        check(Set(report.map(\.url)) == completed && Set(fake.evictionCalls) == completed,
+              "R5 pipeline: cancelled scan downloads return without a completed result")
+        let result = try await FolderScanPipeline.scan(roots: [source], ubiquityPort: fake.port, downloadStore: store)
+        defer { result.accesses.forEach { $0.stop() } }
+        check(result.downloadedURLs == Set(files) && Set(store.downloadedFiles.map(\.url)) == Set(files),
+              "R5 pipeline: successful scan wires both download receipt and persistent store")
+        let returned = await result.evictDownloadedFiles()
+        check(returned.count == files.count && store.downloadedFiles.isEmpty,
+              "R5 pipeline: successful result return clears persisted downloads")
+    } catch { check(false, "R5 pipeline cancellation fixture error: \(error)") }
 }
 
 /// Exercises the exact enumeration gate and result eviction API independently
