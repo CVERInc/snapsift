@@ -2,9 +2,9 @@ import Foundation
 
 /// A same-volume result is insufficient on iOS: app containers share a volume.
 func validateTrashLocation(sourceURL: URL, resultingURL: URL?) -> Bool {
-    guard let root = fileProviderStorageRoot(at: sourceURL),
+    guard let root = trashRoot(at: sourceURL),
           let resultingURL, resultingURL.isFileURL else { return false }
-    let trash = folderLocationComponents(root.appendingPathComponent(".Trash"))
+    let trash = folderLocationComponents(root)
     let result = folderLocationComponents(resultingURL)
     return result.count > trash.count && result.starts(with: trash)
 }

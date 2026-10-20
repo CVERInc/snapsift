@@ -26,7 +26,7 @@ public struct FolderOriginalHasher: OriginalBytesHasher, Sendable {
         }
     }
 
-    private static func hash(_ member: FolderMember, ubiquityPort: FolderUbiquityPort) -> String? {
+    static func hash(_ member: FolderMember, ubiquityPort: FolderUbiquityPort = .system) -> String? {
         guard member.url.isFileURL, (try? ubiquityPort.state(member.url).isLocal) == true else { return nil }
         let descriptor = member.url.path.withCString { open($0, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) }
         guard descriptor >= 0 else { return nil }

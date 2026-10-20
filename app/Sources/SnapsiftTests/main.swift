@@ -2778,6 +2778,9 @@ do {
 }
 
 folderTrashLocationTests(check)
+await folderICloudTrashBookmarkTests(check)
+await folderTrashDirectRouteTests(check)
+await folderTrashRestoreIdentityTests(check)
 folderTrashStorageGroupProbeTests(check)
 await folderTrashLocationPortTests(check)
 await folderTrashLookAlikePortTests(check)

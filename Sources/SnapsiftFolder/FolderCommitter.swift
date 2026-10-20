@@ -288,20 +288,31 @@ public final class FolderCommitter {
             return (.liveCheck(.membersChanged(item.id)), false)
         }
         var moved: [Int] = []
+        var accessed: [Int: FolderResolvedItem] = [:]
+        defer { accessed.values.forEach { $0.stopAccessing() } }
         var failure: FolderRemovalFailureReason?
         var stop = false
         for memberIndex in pending[index].members.indices {
             let member = pending[index].members[memberIndex]
             do {
-                let result = try trashPort.trash(member.originalURL)
+                let outcome = try trashPort.trashRecording(member.originalURL)
+                let result = outcome.url
+                var trashed = member
+                trashed.trashURL = result
+                trashed.trashBookmark = outcome.bookmark
+                let usable = trashPort.usableTrash(trashed)
+                accessed[memberIndex] = usable?.item
+                let verifiedURL = usable?.item.url
                 // Never roll back an unrelated file returned by a faulty port.
-                let liveResult = result.flatMap { try? FolderMember.read(at: $0) }
+                let liveResult = usable?.live
                 let sameFile = liveResult.map { $0.fileID == member.fileID && $0.size == member.size
                     && $0.modificationDate == member.modificationDate } == true
-                pending[index].members[memberIndex].trashURL = sameFile ? result : nil
+                pending[index].members[memberIndex].trashURL = sameFile ? verifiedURL : nil
+                pending[index].members[memberIndex].trashBookmark = outcome.bookmark
                 if sameFile, !folderPathExists(member.originalURL) { moved.append(memberIndex) }
                 guard trashPort.validateResult(member.originalURL, result),
-                      validateTrashResult(sourceVolumeKey: item.volumeKey, resultingURL: result),
+                      trashPort.validateResult(member.originalURL, verifiedURL),
+                      validateTrashResult(sourceVolumeKey: item.volumeKey, resultingURL: verifiedURL),
                       sameFile, !folderPathExists(member.originalURL) else {
                     failure = .invalidTrashResult(result); break
                 }

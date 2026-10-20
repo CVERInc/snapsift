@@ -82,6 +82,10 @@ public func classifyVolume(_ facts: VolumeFacts) -> VolumeCapability {
 public func classifyTrashLocation(_ facts: VolumeFacts) -> VolumeCapability {
     let volume = classifyVolume(facts)
     guard volume == .removalSupported else { return volume }
+    if let path = facts.path, path.hasPrefix("/"),
+       iCloudDriveRoot(at: URL(fileURLWithPath: path)) != nil {
+        return facts.isUbiquitousItem != false ? .removalSupported : .scanOnly(.systemTrashUnconfirmed)
+    }
     guard facts.isUbiquitousItem != true, let path = facts.path, path.hasPrefix("/"),
           fileProviderStorageRoot(at: URL(fileURLWithPath: path)) != nil else {
         return .scanOnly(.systemTrashUnconfirmed)
@@ -116,6 +120,23 @@ func fileProviderStorageRoot(at url: URL) -> URL? {
         }
     }
     return nil
+}
+
+func iCloudDriveRoot(at url: URL) -> URL? {
+    guard url.isFileURL else { return nil }
+    let components = folderLocationComponents(url)
+    guard components.count >= 4 else { return nil }
+    for index in 1...(components.count - 3) {
+        if Array(components[index..<(index + 3)]) == ["Library", "Mobile Documents", "com~apple~CloudDocs"] {
+            return URL(fileURLWithPath: NSString.path(withComponents: Array(components.prefix(index + 3))))
+        }
+    }
+    return nil
+}
+
+func trashRoot(at url: URL) -> URL? {
+    if let storage = fileProviderStorageRoot(at: url) { return storage.appendingPathComponent(".Trash") }
+    return iCloudDriveRoot(at: url)?.deletingLastPathComponent().appendingPathComponent(".Trash")
 }
 
 /// Opaque identity for a mounted volume, suitable for same-volume checks.

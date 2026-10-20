@@ -29,7 +29,6 @@ func folderTrashLocationTests(_ check: (Bool, String) -> Void) {
     let unconfirmed = [
         "/var/mobile/Containers/Data/Application/fixture/Documents",
         "/var/mobile/Containers/Data/Application/fixture/tmp/photo.jpg",
-        "/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/picked",
         device + "-other/picked",
         device.replacingOccurrences(of: "/fixture/", with: "/fixture/extra/") + "/picked",
         device + "/../../elsewhere",
@@ -85,6 +84,34 @@ func folderTrashLocationTests(_ check: (Bool, String) -> Void) {
               "Trash result rejects a path outside this storage root's .Trash: \(path)")
     }
     check(!validateTrashLocation(sourceURL: source, resultingURL: nil), "Trash location rejects a missing result URL")
+    for home in ["/var/mobile", "/Users/fixture"] {
+        for prefix in ["", "/private"] {
+            let documents = prefix + home + "/Library/Mobile Documents"
+            let drive = documents + "/com~apple~CloudDocs"
+            for suffix in ["", "/picked", "/picked/photo.jpg"] {
+                for ubiquitous in [nil, true, false] as [Bool?] {
+                    check(classifyTrashLocation(trashLocationFacts(drive + suffix, ubiquitous: ubiquitous))
+                          == (ubiquitous == false ? .scanOnly(.systemTrashUnconfirmed) : .removalSupported),
+                          "iCloud Drive root/folder/member requires no contradictory ubiquitous fact")
+                }
+            }
+            for path in [documents, documents + "/iCloud~com~x~y/picked", drive + "-other/picked"] {
+                check(classifyTrashLocation(trashLocationFacts(path, ubiquitous: true)) == .scanOnly(.systemTrashUnconfirmed),
+                      "iCloud siblings and Mobile Documents stay scan-only")
+            }
+            check(classifyTrashLocation(trashLocationFacts(drive, ubiquitous: true, readOnly: true)) == .scanOnly(.readOnly),
+                  "iCloud Drive does not bypass volume rules")
+            let source = URL(fileURLWithPath: drive + "/picked/photo.jpg")
+            check(validateTrashLocation(sourceURL: source,
+                  resultingURL: URL(fileURLWithPath: home + "/Library/Mobile Documents/.Trash/photo.jpg")),
+                  "iCloud Trash accepts Mobile Documents/.Trash across /private aliases")
+            for path in [drive + "/.Trash/photo.jpg", documents + "/elsewhere/photo.jpg",
+                         documents + "/.Trash", documents + "/.Trash/../photo.jpg"] {
+                check(!validateTrashLocation(sourceURL: source, resultingURL: URL(fileURLWithPath: path)),
+                      "iCloud Trash rejects results outside the strict Mobile Documents/.Trash root")
+            }
+        }
+    }
 }
 
 func folderTrashStorageGroupProbeTests(_ check: (Bool, String) -> Void) {
@@ -344,4 +371,340 @@ func folderTrashLocationSessionTests(_ check: (Bool, String) -> Void) async {
                   "confirmed iOS location Put Back restores the original through the same port")
         } else { check(false, "confirmed iOS location Put Back should restore") }
     } catch { check(false, "mixed Trash location session fixture: \(error)") }
+}
+
+@MainActor
+private final class ICloudTrashFixture {
+    let root: URL
+    let source: URL
+    let trash: URL
+    let items: [FolderItem]
+    let group: ReviewGroup
+    var active: [URL: Int] = [:]
+    var starts = 0
+    var stops = 0
+    var events: [String] = []
+    var moves: [(URL, URL)] = []
+    var missingBookmark = false
+    var outsideRoot = false
+    var differentResult = true
+    var directReadable = false
+    var resolvedURL: URL?
+    var failTrashAt: Int?
+    var failMoveAt: Int?
+    var trashCount = 0
+    var scopedMoves = true
+
+    init(companion: Bool = false) throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("snapsift-icloud-trash-\(UUID())")
+        let documents = root.appendingPathComponent("Library/Mobile Documents")
+        source = documents.appendingPathComponent("com~apple~CloudDocs/picked")
+        trash = documents.appendingPathComponent(".Trash")
+        for url in [source, trash] {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+        var items: [FolderItem] = []
+        for name in ["keeper", "candidate"] {
+            let url = source.appendingPathComponent(name + ".jpg")
+            try Data(name.utf8).write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+                                                   ofItemAtPath: url.path)
+            let primary = try FolderMember.read(at: url)
+            var members = [primary]
+            if companion && name == "candidate" {
+                let movie = source.appendingPathComponent(name + ".mov")
+                try Data("companion".utf8).write(to: movie)
+                try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+                                                       ofItemAtPath: movie.path)
+                members.append(try FolderMember.read(at: movie))
+            }
+            let photo = Photo(uuid: url.path, filename: url.lastPathComponent, takenAt: 0,
+                              width: 16, height: 16, size: primary.size, uti: "public.jpeg")
+            items.append(FolderItem(photo: photo, primary: primary, members: members,
+                                    directoryURL: source, folderKey: source.path))
+        }
+        self.items = items
+        var group = ReviewGroup(photos: items.map(\.photo), keeperID: items[0].id)
+        group.rejected = [items[1].id]
+        self.group = group
+    }
+
+    func cleanup() { try? FileManager.default.removeItem(at: root) }
+    func destination(_ original: URL) -> URL { trash.appendingPathComponent(original.lastPathComponent) }
+    func probe(_ url: URL) -> VolumeProbeResult {
+        let p = probeVolume(at: url)
+        let facts = trashLocationFacts(url.path, ubiquitous: true)
+        return VolumeProbeResult(facts: facts, volumeKey: p.volumeKey, displayName: "iCloud Drive",
+                                 volumeURL: p.volumeURL, capability: classifyTrashLocation(facts))
+    }
+    func store() -> FolderHistoryStore {
+        FolderHistoryStore(historyURL: root.appendingPathComponent("history.json"),
+                           intentURL: root.appendingPathComponent("intent.json"))
+    }
+    var port: FolderTrashPort {
+        var port = FolderTrashPort.confirmedLocation(trash: { url in
+            self.events.append("trash:\(url.lastPathComponent)")
+            self.trashCount += 1
+            if self.failTrashAt == self.trashCount { throw FolderHistoryError.trashUnavailable }
+            let destination = self.destination(url)
+            try FolderTrashPort.moveWithoutOverwrite(url, destination)
+            return self.differentResult ? self.trash.appendingPathComponent("unreadable-" + url.lastPathComponent) : destination
+        }, locationFacts: { trashLocationFacts($0.path, ubiquitous: true) })
+        port.bookmark = { url in
+            self.events.append("bookmark:\(url.lastPathComponent)")
+            guard !self.missingBookmark, FileManager.default.fileExists(atPath: url.path) else { return nil }
+            return Data(url.path.utf8)
+        }
+        port.resolve = { data in
+            let original = URL(fileURLWithPath: String(decoding: data, as: UTF8.self))
+            let url = self.resolvedURL ?? (self.outsideRoot ? self.root.appendingPathComponent("outside.jpg") : self.destination(original))
+            self.starts += 1
+            self.active[url, default: 0] += 1
+            return FolderResolvedItem(url: url, stopAccessing: {
+                self.stops += 1
+                self.active[url, default: 0] -= 1
+            })
+        }
+        port.readMember = { url in
+            guard self.directReadable || self.active[url, default: 0] > 0 else { return nil }
+            return try? FolderMember.read(at: url)
+        }
+        port.move = { from, to in
+            self.moves.append((from, to))
+            self.scopedMoves = self.scopedMoves && (self.directReadable
+                || self.active[from, default: 0] > 0 || self.active[to, default: 0] > 0)
+            if self.failMoveAt == self.moves.count { throw FolderHistoryError.trashUnavailable }
+            try FolderTrashPort.moveWithoutOverwrite(from, to)
+        }
+        return port
+    }
+    func remove(into store: FolderHistoryStore) async throws -> Int {
+        try await FolderCommitter(history: store, trashPort: port, volumeProbe: probe)
+            .commit(groups: [group], items: items, primaryHashes: [:])
+    }
+    var accessBalanced: Bool { starts == stops && active.values.allSatisfy { $0 == 0 } }
+}
+
+@MainActor
+func folderICloudTrashBookmarkTests(_ check: (Bool, String) -> Void) async {
+    print("iCloud Trash bookmarks, scoped verification and Put Back")
+    for differentResult in [false, true] {
+        do {
+            let f = try ICloudTrashFixture()
+            defer { f.cleanup() }
+            f.differentResult = differentResult
+            let store = f.store()
+            let original = f.items[1].primary.url
+            let bytes = try Data(contentsOf: original)
+            let summary = FolderCommitter(history: store, trashPort: f.port, volumeProbe: f.probe)
+                .preCommitSummary(groups: [f.group], items: f.items)
+            check(summary.eligibleItemIDs == [f.items[1].id] && summary.volumes.first?.capability == .removalSupported,
+                  "iCloud Drive members report removalSupported")
+            let count = try await f.remove(into: store)
+            let records = try store.records()
+            check(count == 1 && records.count == 1, "unreadable iCloud Trash result succeeds through its original bookmark")
+            guard let record = records.first else { continue }
+            check(record.members[0].trashBookmark == Data(original.path.utf8)
+                  && record.members[0].trashURL == f.destination(original)
+                  && f.events == ["bookmark:candidate.jpg", "trash:candidate.jpg"] && f.accessBalanced,
+                  "bookmark is captured before Trash; history records the verified resolved URL and releases access")
+            check(try store.canPutBack(record, port: f.port) && store.entries(port: f.port).first?.putBackAvailable == true
+                  && f.accessBalanced, "history checks use scoped bookmark reads")
+            try store.writeIntent([record])
+            try FileManager.default.removeItem(at: store.historyURL)
+            let reconciled = try store.reconcileIntent(port: f.port)
+            check(reconciled.first?.state == .removed && f.accessBalanced,
+                  "pending intent reconciles unreadable Trash through the recorded bookmark")
+            if case .restored = try store.putBack(record.id, port: f.port) {
+                check(try Data(contentsOf: original) == bytes && f.moves.count == 1
+                      && f.moves[0].0 == f.destination(original) && f.moves[0].1 == original
+                      && f.scopedMoves && f.accessBalanced,
+                      "Put Back moves from the resolved URL to the exact original with its bytes and scoped access")
+            } else { check(false, "iCloud bookmark Put Back should restore") }
+            var old = try JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as! [String: Any]
+            var members = old["members"] as! [[String: Any]]
+            members[0].removeValue(forKey: "trashBookmark")
+            old["members"] = members
+            let decoded = try JSONDecoder().decode(FolderHistoryRecord.self,
+                from: JSONSerialization.data(withJSONObject: old))
+            check(decoded.members[0].trashBookmark == nil, "old history JSON decodes without trashBookmark")
+        } catch { check(false, "iCloud bookmark fixture: \(error)") }
+    }
+    for mode in ["outside", "missing", "identity"] {
+        do {
+            let f = try ICloudTrashFixture()
+            defer { f.cleanup() }
+            let store = f.store()
+            _ = try await f.remove(into: store)
+            var record = try store.records()[0]
+            if mode == "outside" { f.outsideRoot = true }
+            if mode == "missing" { record.members[0].trashBookmark = nil }
+            if mode == "identity" {
+                let replacement = f.trash.appendingPathComponent("replacement")
+                try Data("different".utf8).write(to: replacement)
+                try FileManager.default.removeItem(at: f.destination(f.items[1].primary.url))
+                try FileManager.default.moveItem(at: replacement, to: f.destination(f.items[1].primary.url))
+            }
+            try FolderHistoryStore.atomicWrite(JSONEncoder().encode([record]), store.historyURL)
+            check(!store.canPutBack(record, port: f.port), "invalid bookmark history is not restorable: \(mode)")
+            if case .unavailable = try store.putBack(record.id, port: f.port) {
+                check(f.moves.isEmpty && f.accessBalanced, "unrestorable bookmark refuses moves and releases access: \(mode)")
+            } else { check(false, "invalid bookmark must refuse Put Back: \(mode)") }
+        } catch { check(false, "iCloud bookmark refusal fixture: \(error)") }
+    }
+    for mode in ["outside", "missing", "trash-failure", "put-back-failure"] {
+        do {
+            let f = try ICloudTrashFixture(companion: true)
+            defer { f.cleanup() }
+            let store = f.store()
+            if mode == "outside" { f.outsideRoot = true }
+            if mode == "missing" { f.missingBookmark = true }
+            if mode == "trash-failure" { f.failTrashAt = 2 }
+            let count = try await f.remove(into: store)
+            if mode == "put-back-failure" {
+                let record = try store.records()[0]
+                f.failMoveAt = 2
+                if case .failed = try store.putBack(record.id, port: f.port) {
+                    check(try f.moves.count == 3 && f.moves[2].0 == f.items[1].primary.url
+                          && f.moves[2].1 == f.destination(f.items[1].primary.url)
+                          && store.canPutBack(try store.records()[0], port: f.port),
+                          "partial Put Back failure rolls back into the resolved Trash URL")
+                } else { check(false, "partial Put Back should fail and roll back") }
+            } else {
+                check(count == 0, "commit refuses an unusable result or partial Trash failure: \(mode)")
+                if mode == "trash-failure" {
+                    check(f.moves.count == 1 && f.moves[0].0 == f.destination(f.items[1].primary.url)
+                          && FileManager.default.fileExists(atPath: f.items[1].primary.url.path),
+                          "partial removal rolls back through the resolved access")
+                } else {
+                    check(try f.moves.isEmpty && !(try store.records()).contains { $0.state == .removed },
+                          "unusable bookmark never moves an unverified item or records successful removal")
+                }
+            }
+            check(f.accessBalanced && f.scopedMoves, "all access ends after successful or failed rollback: \(mode)")
+        } catch { check(false, "iCloud bookmark rollback fixture: \(error)") }
+    }
+}
+
+@MainActor
+func folderTrashDirectRouteTests(_ check: (Bool, String) -> Void) async {
+    print("Readable Trash URLs take priority over bookmarks")
+    for mode in ["restore", "trash-rollback", "put-back-rollback"] {
+        do {
+            let f = try ICloudTrashFixture(companion: true)
+            defer { f.cleanup() }
+            f.directReadable = true
+            f.differentResult = false
+            // Resolving this bookmark would fail the location gate.
+            f.outsideRoot = true
+            if mode == "trash-rollback" { f.failTrashAt = 2 }
+            let store = f.store()
+            let count = try await f.remove(into: store)
+            if mode == "trash-rollback" {
+                check(count == 0 && f.moves.count == 1 && f.starts == 0,
+                      "removal rollback uses readable trashURL without resolving its bookmark")
+                continue
+            }
+            let record = try store.records()[0]
+            check(store.canPutBack(record, port: f.port) && f.starts == 0,
+                  "history availability reads trashURL without resolving its bookmark")
+            try store.writeIntent([record])
+            try FileManager.default.removeItem(at: store.historyURL)
+            let recovered = try store.reconcileIntent(port: f.port)
+            check(recovered.first?.state == .removed && f.starts == 0,
+                  "history validity reads trashURL without resolving its bookmark")
+            if mode == "put-back-rollback" { f.failMoveAt = 2 }
+            let result = try store.putBack(record.id, port: f.port)
+            if mode == "restore", case .restored = result {
+                check(f.moves.count == 2 && f.starts == 0,
+                      "Put Back uses readable trashURL without resolving its bookmark")
+            } else if mode == "put-back-rollback", case .failed = result {
+                check(f.moves.count == 3 && f.moves[2].1 == record.members[0].trashURL && f.starts == 0,
+                      "Put Back rollback uses the direct Trash path without resolving its bookmark")
+            } else { check(false, "direct route result: \(mode)") }
+        } catch { check(false, "direct Trash route fixture: \(error)") }
+    }
+}
+
+@MainActor
+func folderTrashRestoreIdentityTests(_ check: (Bool, String) -> Void) async {
+    print("Restore identity and primary hash through both Trash routes")
+    for direct in [false, true] {
+        for mode in ["inode", "bytes", "matching", "unreadable-hash", "default", "companion-inode"] {
+            do {
+                let companion = mode == "companion-inode"
+                let f = try ICloudTrashFixture(companion: companion)
+                defer { f.cleanup() }
+                let store = f.store()
+                _ = try await f.remove(into: store)
+                let resolutionsBeforeRestore = f.starts
+                var record = try store.records()[0]
+                let memberIndex = companion ? 1 : 0
+                let member = record.members[memberIndex]
+                let originalTrash = member.trashURL!
+                let alternate = f.trash.appendingPathComponent("alternate-" + originalTrash.lastPathComponent)
+                let bytes = try Data(contentsOf: originalTrash)
+                if mode == "inode" || companion {
+                    try bytes.write(to: alternate)
+                } else {
+                    try FolderTrashPort.moveWithoutOverwrite(originalTrash, alternate)
+                    if mode == "bytes" || mode == "default" {
+                        let handle = try FileHandle(forWritingTo: alternate)
+                        try handle.write(contentsOf: Data(repeating: 120, count: bytes.count))
+                        try handle.close()
+                    }
+                }
+                try FileManager.default.setAttributes([.modificationDate: member.modificationDate],
+                                                       ofItemAtPath: alternate.path)
+                let live = try FolderMember.read(at: alternate)
+                check(live.size == member.size && live.modificationDate == member.modificationDate
+                      && ((live.fileID != member.fileID) == (mode == "inode" || companion)),
+                      "restore fixture isolates the changed inode or bytes: \(direct), \(mode)")
+                f.directReadable = direct
+                if direct { record.members[memberIndex].trashURL = alternate }
+                try FolderHistoryStore.atomicWrite(JSONEncoder().encode([record]), store.historyURL)
+                var port = f.port
+                let resolve = port.resolve
+                port.resolve = { data in
+                    let original = URL(fileURLWithPath: String(decoding: data, as: UTF8.self))
+                    f.resolvedURL = original == member.originalURL ? alternate : nil
+                    return resolve(data)
+                }
+                var hashURLs: [URL] = []
+                var scopedHash = true
+                if mode != "default" {
+                    port.verifyPrimary = { url, expected in
+                        hashURLs.append(url)
+                        scopedHash = scopedHash && (direct || f.active[url, default: 0] > 0)
+                        if mode == "unreadable-hash" { return false }
+                        return FolderTrashPort.verifyPrimaryHash(url, expected)
+                    }
+                }
+                let shouldRestore = mode == "matching" || mode == "default"
+                // Listing checks identity only; the primary hash is verified by Put Back itself.
+                let listable = mode != "inode" && !companion
+                check(store.canPutBack(record, port: port) == listable && hashURLs.isEmpty && f.accessBalanced,
+                      "history availability enforces restore identity without hashing: \(direct), \(mode)")
+                let result = try store.putBack(record.id, port: port)
+                if shouldRestore, case .restored = result {
+                    let expectedBytes = mode == "default" ? Data(repeating: 120, count: bytes.count) : bytes
+                    check(try f.moves.count == 1 && f.moves[0].0 == alternate && f.moves[0].1 == member.originalURL
+                          && Data(contentsOf: member.originalURL) == expectedBytes,
+                          "matching hash restores; non-iOS default does not re-hash: \(direct), \(mode)")
+                } else if !shouldRestore, case .unavailable = result {
+                    check(try f.moves.isEmpty && store.canPutBack(try store.records()[0], port: port) == listable
+                          && !FileManager.default.fileExists(atPath: member.originalURL.path),
+                          "mismatched or unreadable Trash item remains not restorable with no move: \(direct), \(mode)")
+                } else { check(false, "restore identity result: \(direct), \(mode)") }
+                let shouldHash = mode != "default" && mode != "inode" && !companion
+                check((!hashURLs.isEmpty) == shouldHash && hashURLs.allSatisfy { $0 == alternate }
+                      && scopedHash && f.scopedMoves && f.accessBalanced && (!direct || f.starts == resolutionsBeforeRestore),
+                      "hash and moves share the selected route and access; all members validate before any move")
+            } catch { check(false, "restore identity fixture (\(direct), \(mode)): \(error)") }
+        }
+    }
+    #if !os(iOS)
+    check(FolderTrashPort.system.verifyPrimary(URL(fileURLWithPath: "/missing-trash-fixture"), "mismatch"),
+          "non-iOS system port does not read or hash the primary")
+    #endif
 }

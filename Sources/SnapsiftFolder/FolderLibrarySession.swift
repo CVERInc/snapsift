@@ -233,7 +233,7 @@ public final class FolderLibrarySession {
         let accesses = historyAccesses()
         defer { accesses.forEach { $0.stop() } }
         do {
-            let booked = try history.reconcileIntent()
+            let booked = try history.reconcileIntent(port: trashPort)
             if reconciliationFailed { recoveryOutcome = nil }
             reconciliationFailed = false
             let outcome = FolderReconciliationOutcome.recovered(
@@ -338,7 +338,7 @@ public final class FolderLibrarySession {
         let accesses = historyAccesses()
         defer { accesses.forEach { $0.stop() } }
         do {
-            historyEntries = try history.entries()
+            historyEntries = try history.entries(port: trashPort)
             historyReadError = nil
         }
         catch {
