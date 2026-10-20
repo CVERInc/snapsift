@@ -25,16 +25,22 @@ public struct AlbumItem: Identifiable, Equatable {
 ///   `PHAsset.fetchAssets(in:options:)`. Existing filters (hidden=excluded,
 ///   trashed=excluded, media-type predicate, sort) all still apply — the only
 ///   change is the collection boundary.
+/// - `identifiers`: a fixed set of Photos local identifiers. Fetch order is
+///   determined by the options, never by the order of the identifiers.
+///
+/// Every source can be combined with a separate optional capture-date bound.
 ///
 /// Reading is strictly non-destructive: we only fetch membership of the
 /// collection and never add, remove, or move assets.
 public enum ScanSource: Equatable {
     case wholeLibrary
     case album(AlbumItem)
+    case identifiers([String])
 
     public var displayTitle: String {
         switch self {
-        case .wholeLibrary: return ""           // callers use their own label
+        case .wholeLibrary, .identifiers:
+            return ""                         // callers use their own label
         case .album(let a): return a.title
         }
     }
@@ -83,23 +89,18 @@ func fetchUserAlbums() -> [AlbumItem] {
 
 /// Build a `PHFetchResult<PHAsset>` for the given source and options.
 ///
-/// For `.wholeLibrary` this is `PHAsset.fetchAssets(with:options:)` — identical
-/// to the existing scan path.  For `.album(_)` it resolves the album and calls
-/// `PHAsset.fetchAssets(in:options:)`, scoping the result to that collection.
+/// With no capture-date bound, caller options are passed through unchanged.
+/// Otherwise the half-open bound (start inclusive, end exclusive) is added to
+/// a copy for every source, preserving every caller filter and setting.
 ///
-/// The `options` object is built by the caller (with sort descriptors, media-
-/// type predicate, `includeAllBurstAssets`, etc.) and passed through unchanged —
-/// this function never adds or removes filters.  It is therefore impossible for
-/// this layer to accidentally include hidden or trashed assets that the caller's
-/// predicate already excludes.
-///
-/// Returns `nil` when the album can no longer be resolved (deleted between when
-/// the picker showed it and when the scan ran) — callers must handle that as an
-/// early-exit.
-func fetchAssets(source: ScanSource, options: PHFetchOptions) -> PHFetchResult<PHAsset>? {
-    switch source {
+/// Returns `nil` for an unresolvable album or an empty identifier array; sessions
+/// treat either as nothing to scan and preserve the previous review state.
+func fetchAssets(source: ScanSource, captureDates: DateInterval? = nil,
+                 options: PHFetchOptions) -> PHFetchResult<PHAsset>? {
+    guard let request = ScanFetchRequest(source: source, captureDates: captureDates, options: options) else { return nil }
+    switch request.source {
     case .wholeLibrary:
-        return PHAsset.fetchAssets(with: options)
+        return PHAsset.fetchAssets(with: request.options)
 
     case .album(let item):
         let collections = PHAssetCollection.fetchAssetCollections(
@@ -107,6 +108,38 @@ func fetchAssets(source: ScanSource, options: PHFetchOptions) -> PHFetchResult<P
             options: nil
         )
         guard let collection = collections.firstObject else { return nil }
-        return PHAsset.fetchAssets(in: collection, options: options)
+        return PHAsset.fetchAssets(in: collection, options: request.options)
+
+    case .identifiers(let identifiers):
+        return PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: request.options)
     }
+}
+
+/// Prepare every source's options without accessing Photos. An empty identifier
+/// set is unavailable; a date bound that matches nothing is still a valid fetch.
+struct ScanFetchRequest {
+    let source: ScanSource
+    let options: PHFetchOptions
+
+    init?(source: ScanSource, captureDates: DateInterval?, options: PHFetchOptions) {
+        if case .identifiers(let ids) = source, ids.isEmpty { return nil }
+        self.source = source
+        self.options = captureDates.map { captureDateFetchOptions(interval: $0, options: options) } ?? options
+    }
+}
+
+/// Compose bounds without accessing Photos or mutating any caller-owned option.
+func captureDateFetchOptions(interval: DateInterval, options: PHFetchOptions) -> PHFetchOptions {
+    let scoped = options.copy() as! PHFetchOptions
+    let bounds = NSPredicate(format: "creationDate >= %@ AND creationDate < %@",
+                             interval.start as NSDate, interval.end as NSDate)
+    let predicates = options.predicate.map { [$0, bounds] } ?? [bounds]
+    scoped.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
+    return scoped
+}
+
+/// Count a source using the same filters as a scan, without enumerating assets.
+/// Returns `nil` for an unresolvable album or an empty identifier array.
+public func countAssets(source: ScanSource, captureDates: DateInterval? = nil, options: PHFetchOptions) -> Int? {
+    fetchAssets(source: source, captureDates: captureDates, options: options)?.count
 }

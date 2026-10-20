@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 import SnapsiftCore
 
 /// Immutable scan-time facts used by the folder committer's later live gate.
-public struct FolderMember: Equatable, Sendable {
+public struct FolderMember: Codable, Equatable, Sendable {
     public let url: URL
     public let fileID: UInt64
     public let volumeKey: VolumeKey
@@ -191,6 +191,8 @@ public enum FolderEnumerator {
                 }
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let error as FolderDownloadPersistenceError {
+                throw error
             } catch {
                 issues.append(FolderEnumerationIssue(url: entryURL, reason: .unreadable))
                 // Failed resource reads must not leave a sibling image eligible

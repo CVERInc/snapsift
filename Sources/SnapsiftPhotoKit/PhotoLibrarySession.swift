@@ -155,6 +155,14 @@ public final class PhotoLibrarySession {
     public var vanishedMarkCount: Int? { willSet { onChange?() } }
     /// Where the next scan reads its working set from. Default = whole library.
     public var scanSource: ScanSource = .wholeLibrary { willSet { onChange?() } }
+    /// Half-open capture-date bound for the next scan. Nil means no date limit.
+    public var scanCaptureDates: DateInterval? = nil { willSet { onChange?() } }
+    /// Source of the current review state, independent of the next-scan picker.
+    public private(set) var reviewSource: ScanSource? { willSet { onChange?() } }
+    /// Frozen capture-date bound of the current review state, independent of
+    /// the next-scan selection. Nil means no date limit (or no review state).
+    public private(set) var reviewCaptureDates: DateInterval? { willSet { onChange?() } }
+    private var snapshotSource: ScanSnapshot.Source = .wholeLibrary
     /// User albums fetched once after authorization (title + estimated count).
     /// Empty until `loadAlbums()` is called.
     public private(set) var albums: [AlbumItem] = [] { willSet { onChange?() } }
@@ -292,12 +300,14 @@ public final class PhotoLibrarySession {
     /// are mutually exclusive here (and again in `refineWithFaces`).
     public func startScan(_ kind: ScanKind) {
         guard beginScan(kind) else { return }
+        let source = scanSource
+        let captureDates = scanCaptureDates
         scanTask = Task { [weak self] in
             guard let self else { return }
             switch kind {
-            case .burst:       await self.scan()
-            case .lookAlikes:  await self.scanLookAlikes()
-            case .similarSets: await self.scanSimilarSets()
+            case .burst:       await self.scan(source: source, captureDates: captureDates)
+            case .lookAlikes:  await self.scanLookAlikes(source: source, captureDates: captureDates)
+            case .similarSets: await self.scanSimilarSets(source: source, captureDates: captureDates)
             }
         }
     }
@@ -338,14 +348,19 @@ public final class PhotoLibrarySession {
 
     /// Discard the half-built state of a cancelled scan and quietly restore the
     /// previous snapshot (if any) so cancelling never destroys prior work.
-    private func finishCancelledScan() {
-        // The scan method's defer hasn't run yet — clear the flag here so the
-        // snapshot restore below isn't blocked by its own !isScanning guard.
-        isScanning = false
+    private func finishCancelledScan() async {
         groups = []
         categories = []
+        hasScanned = false
+        reviewSource = nil
+        reviewCaptureDates = nil
+        snapshotSource = .wholeLibrary
         exactDupeGroupIDs = []
         progressFraction = nil
+        // Keep scans blocked until cleanup finishes; restore re-fetches its own
+        // group/category assets after the cancelled scan's working set is gone.
+        await releaseScanCaches()
+        isScanning = false
         // An aborted sidecar read returns an EMPTY map — caching that would
         // permanently disable quality ranking for the session. Forget it so
         // the next scan reads it properly.
@@ -358,9 +373,10 @@ public final class PhotoLibrarySession {
     }
 
     /// True (and cleans up) when the scan task was cancelled mid-pipeline.
-    private func bailIfCancelled() -> Bool {
+    /// Internal so tests can exercise cancellation without enumerating Photos.
+    func bailIfCancelled() async -> Bool {
         guard Task.isCancelled || abortFlag.isSet else { return false }
-        finishCancelledScan()
+        await finishCancelledScan()
         return true
     }
 
@@ -553,27 +569,38 @@ public final class PhotoLibrarySession {
         albums = fetchUserAlbums()
     }
 
-    private func scan() async {
-        progress = .fetching
-        defer { isScanning = false; progress = .idle; progressFraction = nil }
+    /// Count with precisely the fetch options used by the requested scan kind.
+    /// This is a fetch count; later analysis may exclude unclassifiable videos.
+    /// Returns nil for an unresolvable album or an empty identifier array.
+    public func count(for source: ScanSource, captureDates: DateInterval? = nil, kind: ScanKind = .burst) -> Int? {
+        countAssets(source: source, captureDates: captureDates,
+                    options: Self.scanFetchOptions(for: kind, includeVideo: includeVideo))
+    }
 
+    static func scanFetchOptions(for kind: ScanKind, includeVideo: Bool) -> PHFetchOptions {
         let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
-        opts.includeAllBurstAssets = true
+        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: kind != .similarSets)]
+        opts.includeAllBurstAssets = kind == .burst
         if !includeVideo {
             opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         }
-        // Scope to the chosen source (whole library or a single album). If the
-        // album can no longer be resolved (deleted since the picker showed it),
-        // bail early rather than silently falling back to the whole library —
-        // and BEFORE the state wipe below, so a scan that never ran leaves the
-        // previous session's review state untouched (same stance as cancel).
-        guard let result = fetchAssets(source: scanSource, options: opts) else {
-            // The defer wipes `progress` on return, so the album-gone message must
-            // travel via the one-shot notice or the user never sees why nothing ran.
+        return opts
+    }
+
+    private func scan(source: ScanSource, captureDates: DateInterval?) async {
+        progress = .fetching
+        defer { isScanning = false; progress = .idle; progressFraction = nil }
+
+        let opts = Self.scanFetchOptions(for: .burst, includeVideo: includeVideo)
+        // An unavailable scope must bail before wiping the prior review state.
+        guard let result = fetchAssets(source: source, captureDates: captureDates, options: opts) else {
+            // The existing unavailable-source notice also covers empty identifier sets.
             scanNotice = .albumGone
             return
         }
+        snapshotSource = ScanSnapshot.Source(source)
+        reviewSource = source
+        reviewCaptureDates = captureDates
 
         invalidateReviewAlbums()
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
@@ -609,13 +636,13 @@ public final class PhotoLibrarySession {
         // change nothing until relaunch, with no hint why quality is still off.
         // The re-probe costs one failed sqlite open per scan for a no-FDA user.
         await loadEnrichmentIfNeeded(assets: assets)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         // Chunked with yields: a 120K-asset map monopolises the main actor for
         // long enough that even the Cancel click can't be processed.
         var enriched: [Photo] = []
         enriched.reserveCapacity(assets.count)
         for chunk in stride(from: 0, to: assets.count, by: 2000) {
-            if bailIfCancelled() { return }
+            if await bailIfCancelled() { return }
             for a in assets[chunk..<min(chunk + 2000, assets.count)] {
                 enriched.append(makePhoto(from: a))
             }
@@ -642,7 +669,7 @@ public final class PhotoLibrarySession {
                 if let frac { self?.progressFraction = 0.15 + 0.45 * frac }
             }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         // Neural gate: a cluster only stays "confident" (→ pre-marks a deletion)
         // if Apple's feature print agrees it's near-identical. dHash is cheap
         // recall; this is the precise arbiter that keeps the scan from ever
@@ -660,7 +687,7 @@ public final class PhotoLibrarySession {
                 if total > 0 { self?.progressFraction = 0.6 + 0.2 * Double(done) / Double(total) }
             }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         var neuralConfident = Set<Int>()
         for (k, idx) in confidentIdx.enumerated() {
             if let fs = spreads[k], fs <= contentConfidentFeature { neuralConfident.insert(idx) }
@@ -670,12 +697,12 @@ public final class PhotoLibrarySession {
         // enriched photos so the keeper respects sharpness and documents are
         // protected. Index-aligned with `verified` so the confident flags line up.
         let resourcePhotos = await prepareAssetMetadata(verified.map(\.photos))
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         let flagged = await enrichFlags(resourcePhotos) { done, total in
             self.progress = .verifying(done, total)
             if total > 0 { self.progressFraction = 0.8 + 0.1 * Double(done) / Double(total) }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         var built = PhotoLibraryScanRules.reviewGroups(flagged, confident: neuralConfident)
 
         // Exact-duplicate pass: the ONLY source of pre-marked deletions. Runs
@@ -685,7 +712,7 @@ public final class PhotoLibrarySession {
         // shifting indices under the loop).
         let exact = await detectExactDuplicates(in: built, fracBase: 0.9, fracSpan: 0.06)
         built = await seedExactRejections(in: built, exact: exact, fracBase: 0.96, fracSpan: 0.04)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         groups = built
         exactDupeGroupIDs = exact
 
@@ -896,23 +923,22 @@ public final class PhotoLibrarySession {
 
     /// L3 cross-time pass: dHash-candidate + neural feature-print confirmation
     /// over the chosen source. Heavier than the burst scan — shows progress.
-    private func scanLookAlikes() async {
+    private func scanLookAlikes(source: ScanSource, captureDates: DateInterval?) async {
         progress = .fetching
         defer { isScanning = false; progress = .idle; progressFraction = nil }
 
-        let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
-        if !includeVideo {
-            opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        }
+        let opts = Self.scanFetchOptions(for: .lookAlikes, includeVideo: includeVideo)
         // Bail BEFORE the state wipe (see scan()) — a scan that never ran must
         // leave the previous session's review state untouched.
-        guard let result = fetchAssets(source: scanSource, options: opts) else {
+        guard let result = fetchAssets(source: source, captureDates: captureDates, options: opts) else {
             // The defer wipes `progress` on return, so the album-gone message must
             // travel via the one-shot notice or the user never sees why nothing ran.
             scanNotice = .albumGone
             return
         }
+        snapshotSource = ScanSnapshot.Source(source)
+        reviewSource = source
+        reviewCaptureDates = captureDates
 
         invalidateReviewAlbums()
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
@@ -940,7 +966,7 @@ public final class PhotoLibrarySession {
         photoKitImages = makeImageProvider(assetsByID: map)
 
         await loadEnrichmentIfNeeded(assets: assets)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
 
         let idGroups = await LookAlikeScanner.scan(itemIdentifiers: assets.map(\.localIdentifier), provider: imageProvider) { [weak self] msg, frac in
             Task { @MainActor in
@@ -948,7 +974,7 @@ public final class PhotoLibrarySession {
                 if let frac { self?.progressFraction = 0.05 + 0.65 * frac }
             }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
 
         let raw = idGroups.compactMap { ids -> [Photo]? in
             let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0) }
@@ -957,19 +983,19 @@ public final class PhotoLibrarySession {
         }
         // Document protection + sharpness ranking over the cluster members only.
         let resourcePhotos = await prepareAssetMetadata(raw)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         let enriched = await enrichFlags(resourcePhotos) { done, total in
             self.progress = .verifying(done, total)
             if total > 0 { self.progressFraction = 0.7 + 0.15 * Double(done) / Double(total) }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         var built = PhotoLibraryScanRules.reviewGroups(enriched)
 
         // Exact-duplicate pass: the ONLY source of pre-marked deletions.
         // Local array, single publish — same reasoning as scan().
         let exact = await detectExactDuplicates(in: built, fracBase: 0.85, fracSpan: 0.1)
         built = await seedExactRejections(in: built, exact: exact, fracBase: 0.95, fracSpan: 0.05)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         groups = built
         exactDupeGroupIDs = exact
 
@@ -989,23 +1015,22 @@ public final class PhotoLibrarySession {
     /// each set from its Vision content tags (prettified by apfel if available).
     /// The macOS app browses sets; a session without an enrichment port flags
     /// their members so a shell can review them (`deleteReviewed(in:)`).
-    private func scanSimilarSets() async {
+    private func scanSimilarSets(source: ScanSource, captureDates: DateInterval?) async {
         progress = .fetching
         defer { isScanning = false; progress = .idle; progressFraction = nil }
 
-        let opts = PHFetchOptions()
-        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        if !includeVideo {
-            opts.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        }
+        let opts = Self.scanFetchOptions(for: .similarSets, includeVideo: includeVideo)
         // Bail BEFORE the state wipe (see scan()) — a scan that never ran must
         // leave the previous session's review state untouched.
-        guard let result = fetchAssets(source: scanSource, options: opts) else {
+        guard let result = fetchAssets(source: source, captureDates: captureDates, options: opts) else {
             // The defer wipes `progress` on return, so the album-gone message must
             // travel via the one-shot notice or the user never sees why nothing ran.
             scanNotice = .albumGone
             return
         }
+        snapshotSource = ScanSnapshot.Source(source)
+        reviewSource = source
+        reviewCaptureDates = captureDates
 
         invalidateReviewAlbums()
         await LookAlikeScanner.clearCache()   // pixels may have changed since last scan
@@ -1034,7 +1059,7 @@ public final class PhotoLibrarySession {
         photoKitImages = makeImageProvider(assetsByID: map)
 
         await loadEnrichmentIfNeeded(assets: assets)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
 
         // Cluster the library at the "same scene, different moment" band — looser
         // than Look-alikes (which is now ≈identical only), so pose/angle changes
@@ -1048,7 +1073,7 @@ public final class PhotoLibrarySession {
                 if let frac { self?.progressFraction = 0.05 + 0.6 * frac }
             }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
 
         // Build the qualifying buckets first (cheap, main-actor), THEN name them
         // with bounded concurrency. Each name awaits a Vision classify plus a fresh
@@ -1058,7 +1083,7 @@ public final class PhotoLibrarySession {
         struct PendingSet { let photos: [Photo]; let rep: String? }
         var pending: [PendingSet] = []
         for ids in idGroups {
-            if bailIfCancelled() { return }
+            if await bailIfCancelled() { return }
             let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0) }
                 .sorted { $0.takenAt < $1.takenAt }
             guard photos.count >= 2 else { continue }
@@ -1066,9 +1091,9 @@ public final class PhotoLibrarySession {
         }
         if enrichmentPort == nil {
             let resourcePhotos = await prepareAssetMetadata(pending.map(\.photos))
-            if bailIfCancelled() { return }
+            if await bailIfCancelled() { return }
             let flagged = await flagSetMembers(resourcePhotos)
-            if bailIfCancelled() { return }
+            if await bailIfCancelled() { return }
             pending = flagged.map { PendingSet(photos: $0, rep: $0.first.map(\.uuid)) }
         }
         // Naming follows the member flag pass when one ran.
@@ -1102,7 +1127,7 @@ public final class PhotoLibrarySession {
                 add()
             }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         categories = zip(pending, names)
             .map { CategoryBucket(label: $0.1 ?? fallbackSetName, photos: $0.0.photos) }
             .sorted { $0.count > $1.count }
@@ -1653,10 +1678,9 @@ public final class PhotoLibrarySession {
         ScanSnapshot(
             schema: ScanSnapshot.currentSchema,
             kind: lastScanKind.rawValue,
-            sourceID: {
-                if case .album(let item) = scanSource { return item.id }
-                return nil
-            }(),
+            sourceID: snapshotSource.albumID,
+            source: snapshotSource,
+            captureDates: reviewCaptureDates,
             timestamp: Date(),
             // Persist the SCAN's reference token verbatim, never a fresh "now"
             // read — see `scanChangeToken`. A debounced decision-save must not
@@ -1827,6 +1851,7 @@ public final class PhotoLibrarySession {
         // for seconds — on .onAppear that beachballed every launch.
         enum RestoreLoad { case none, unreadable, ok(ScanSnapshot, [String: PHAsset]) }
         let snapshotStore = self.snapshotStore
+        let fetchSnapshotAssets = effects.fetchSnapshotAssets
         let loaded: RestoreLoad = await Task.detached(priority: .userInitiated) {
             switch snapshotStore.loadOutcome() {
             case .none: return .none
@@ -1835,15 +1860,7 @@ public final class PhotoLibrarySession {
                 let allIDs = Set(snap.groups.flatMap { $0.photos.map(\.uuid) }
                     + snap.categories.flatMap { $0.photos.map(\.uuid) })
                 guard !allIDs.isEmpty else { return .none }
-                // Must match the scan fetch: without includeAllBurstAssets the burst
-                // sub-frames don't resolve and their groups silently dissolve on
-                // restore (live-observed: 2755 → 2632 groups).
-                let fetchOpts = PHFetchOptions()
-                fetchOpts.includeAllBurstAssets = true
-                let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(allIDs), options: fetchOpts)
-                var map: [String: PHAsset] = [:]
-                map.reserveCapacity(fetched.count)
-                fetched.enumerateObjects { a, _, _ in map[a.localIdentifier] = a }
+                let map = fetchSnapshotAssets(Array(allIDs))
                 return .ok(snap, map)
             }
         }.value
@@ -1909,6 +1926,21 @@ public final class PhotoLibrarySession {
 
         let restored = snap.restored(liveFavorites: map.mapValues(\.isFavorite),
                                      editedNow: editedNowByID, tokenCurrent: tokenCurrent)
+        guard applyRestoredSnapshot(snap, restored: restored, assetsByID: map,
+                                    albums: albums, tokenCurrent: tokenCurrent) else { return false }
+        if !quiet {
+            scanNotice = PhotoLibraryChangeToken.isCurrent(snap.changeToken)
+                ? .restored(groups.isEmpty ? categories.count : groups.count)
+                : .restoredStale
+        }
+        return true
+    }
+
+    /// Publish an already-resolved snapshot without fetching from Photos.
+    @discardableResult
+    func applyRestoredSnapshot(_ snap: ScanSnapshot, restored: RestoredScanSnapshot,
+                               assetsByID: [String: PHAsset], albums: [AlbumItem],
+                               tokenCurrent: Bool) -> Bool {
         let restoredGroups = restored.groups
         let exactIDs = restored.exactIDs
         let restoredCats = restored.categories
@@ -1916,7 +1948,7 @@ public final class PhotoLibrarySession {
         let vanishedMarks = restored.vanishedMarks
         guard !restoredGroups.isEmpty || !restoredCats.isEmpty else { return false }
 
-        photoKitImages = makeImageProvider(assetsByID: map)
+        photoKitImages = makeImageProvider(assetsByID: assetsByID)
         groups = restoredGroups
         exactDupeGroupIDs = exactIDs
         categories = restoredCats
@@ -1938,19 +1970,15 @@ public final class PhotoLibrarySession {
         qualityAvailable = restoredGroups.contains { g in
             g.photos.contains { $0.quality > 0 || $0.size > 0 }
         }
-        // Point the source picker back at what this snapshot actually scanned
-        // (if that album still exists) so a rescan hits the same scope.
-        if let sourceID = snap.sourceID {
-            if let item = albums.first(where: { $0.id == sourceID }) {
-                scanSource = .album(item)
-            }
-        } else {
-            scanSource = .wholeLibrary
-        }
-        if !quiet {
-            scanNotice = PhotoLibraryChangeToken.isCurrent(snap.changeToken)
-                ? .restored(restoredGroups.isEmpty ? restoredCats.count : restoredGroups.count)
-                : .restoredStale
+        // Keep the saved scope even if the next-scan selection later changes.
+        // Restore both next-scan choices to the frozen scope when its source
+        // resolves. Missing albums leave both choices unchanged, as with schema 1.
+        snapshotSource = snap.savedSource
+        reviewSource = snap.restoredReviewSource(albums: albums)
+        reviewCaptureDates = snap.restoredCaptureDates
+        if let source = snap.restoredSource(albums: albums) {
+            scanSource = source
+            scanCaptureDates = snap.restoredCaptureDates
         }
         return true
     }
@@ -2265,6 +2293,17 @@ struct LibraryEffects {
     var liveIDs: @Sendable ([String]) async -> Set<String>
     /// Assets for the provider refresh after a commit.
     var fetchAssets: @MainActor ([String]) -> [String: PHAsset]
+    /// Snapshot fetch runs off the main actor. Match the scan fetch: without
+    /// includeAllBurstAssets, burst sub-frames vanish and restored groups dissolve.
+    var fetchSnapshotAssets: @Sendable ([String]) -> [String: PHAsset] = { ids in
+        let opts = PHFetchOptions()
+        opts.includeAllBurstAssets = true
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: opts)
+        var map: [String: PHAsset] = [:]
+        map.reserveCapacity(fetched.count)
+        fetched.enumerateObjects { asset, _, _ in map[asset.localIdentifier] = asset }
+        return map
+    }
     /// Wedge-proof per-asset edited lookup; nil = could not determine.
     var editedFallback: @Sendable (PHAsset) async -> Bool?
 

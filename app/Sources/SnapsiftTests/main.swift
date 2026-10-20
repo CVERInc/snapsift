@@ -2644,6 +2644,7 @@ await checkExactDuplicatePass()
 await checkImageProviderSeam()
 await checkPhotoICloudPolicy()
 await checkPhotoSetReview()
+await checkCancelledPhotoScanReleasesWorkingSet()
 await checkChecksA()
 await checkChecksB()
 await checkFolderICloudPolicy()
@@ -2958,7 +2959,7 @@ do {
 
 do {
     let photos = [ph(810, 0), ph(811, 1), ph(812, 2), ph(813, 3), ph(814, 4, editedUnknown: true)]
-    let snapshot = ScanSnapshot(kind: "lookAlikes", sourceID: "synthetic-album", timestamp: Date(),
+    let snapshot = ScanSnapshot(schema: 1, kind: "lookAlikes", sourceID: "synthetic-album", timestamp: Date(),
         changeToken: Data([1, 2, 3]),
         groups: [.init(photos: photos, keeperID: "U810",
                        rejected: ["U811", "U812", "U813", "U814"], autoSeeded: ["U811"],
@@ -3482,6 +3483,8 @@ private func checkFolderSessionMessages() {
 checkFolderSessionMessages()
 
 await checkFolderLibrarySession()
+
+await checkScanSources()
 
 if skipped > 0 { print("\n– \(skipped) check(s) skipped: no Vision inference on this machine") }
 print(failures == 0 ? "\n✅ all Swift Core tests passed" : "\n❌ \(failures) failure(s)")
