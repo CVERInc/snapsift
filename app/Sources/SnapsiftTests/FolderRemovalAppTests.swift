@@ -68,11 +68,12 @@ func folderRemovalAppTests(_ check: (Bool, String) -> Void) async {
         .itemUnavailable("item"), .memberMissing(url), .identityChanged(url), .sizeChanged(url),
         .modificationDateChanged(url), .volumeUnavailable(volume), .hashUnavailable("item"),
         .hashMismatch("item"), .membersChanged("item"),
-    ] + [VolumeCapabilityReason.networkVolume, .readOnly, .unsupportedFilesystemType, .signalsUnavailable, .systemTrashUnconfirmed]
+    ] + [VolumeCapabilityReason.networkVolume, .readOnly, .unsupportedFilesystemType, .signalsUnavailable,
+         .systemTrashUnconfirmed, .locationGrantNeeded]
         .map { .scanOnly(volume, $0) }
     let removalFailures: [FolderRemovalFailureReason] = [
         .trash("test detail"), .invalidTrashResult(nil), .invalidTrashResult(url), .journalWrite("test detail"),
-        .rollbackFailed([url], "test detail"),
+        .rollbackFailed([url], "test detail"), .locationGrantMissing(url),
     ] + withdrawals.map { .liveCheck($0) }
     for language in Language.allCases {
         let t = L10n(language)

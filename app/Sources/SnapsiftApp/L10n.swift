@@ -280,6 +280,8 @@ struct L10n: Sendable {
     }
     func folderScanOnly(_ reason: VolumeCapabilityReason) -> String {
         switch reason {
+        case .locationGrantNeeded:
+            return folderLocationGrantNeeded
         case .networkVolume:
             switch language {
             case .en: return "Scan only — network volumes do not have confirmed Trash support. Removal disabled."
@@ -764,6 +766,8 @@ struct L10n: Sendable {
     }
     func folderRemovalFailure(_ reason: FolderRemovalFailureReason) -> String {
         switch reason {
+        case .locationGrantMissing:
+            return folderLocationGrantNeeded
         case .liveCheck(let withdrawal): return folderWithdrawal(withdrawal)
         case .trash(let detail):
             switch language {
@@ -789,6 +793,14 @@ struct L10n: Sendable {
             case .ja: return "この項目は一部だけ移動し、戻せないファイルがあります。再試行前に記録された場所を確認してください。自動で元に戻せない場合があります。\n\(urls.map(\.path).joined(separator: "\n"))"
             case .zhTW: return "此項目僅部分移動，且部分檔案無法放回。請先確認記錄中的位置再重試，可能無法自動放回原處。\n\(urls.map(\.path).joined(separator: "\n"))"
             }
+        }
+    }
+
+    var folderLocationGrantNeeded: String {
+        switch language {
+        case .en: return "Allow access to this location's top level to move items to Trash or put them back."
+        case .ja: return "ゴミ箱への移動や復元には、この場所の最上位へのアクセスを許可してください。"
+        case .zhTW: return "需要允許存取此位置的最上層，才能移至垃圾桶或放回。"
         }
     }
     func folderHistoryUnavailable(_ reason: FolderHistoryUnavailableReason) -> String {

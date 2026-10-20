@@ -42,6 +42,7 @@ public enum FolderReconciliationOutcome {
 
 public enum FolderPutBackProblem {
     case unavailable(FolderHistoryUnavailableReason)
+    case locationGrantNeeded(URL)
     case conflict([URL])
     case parentMissing([URL])
     case failed(String)

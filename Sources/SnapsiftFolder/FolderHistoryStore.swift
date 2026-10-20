@@ -23,6 +23,8 @@ public struct FolderTrashPort {
     public var verifyPrimary: (URL, String) -> Bool = { _, _ in true }
     var readMember: (URL) -> FolderMember? = { try? FolderMember.read(at: $0) }
     var validateResult: (URL, URL?) -> Bool = { _, _ in true }
+    var grantLocation: (URL) -> URL? = { _ in nil }
+    var usesLocationCapabilities = false
 
     public init(trash: @escaping (URL) throws -> URL?,
                 move: @escaping (URL, URL) throws -> Void = FolderTrashPort.moveWithoutOverwrite) {
@@ -30,6 +32,8 @@ public struct FolderTrashPort {
         self.move = move
         #if os(iOS)
         verifyPrimary = Self.verifyPrimaryHash
+        grantLocation = folderGrantLocation
+        usesLocationCapabilities = true
         #endif
     }
 
@@ -72,7 +76,22 @@ public struct FolderTrashPort {
             return try trash(url)
         })
         port.validateResult = validateTrashLocation
+        port.usesLocationCapabilities = true
+        port.grantLocation = { url in
+            guard let root = folderGrantLocation(for: url) else { return nil }
+            let facts = locationFacts(url)
+            // A trashed original or an inaccessible root has no live facts.
+            // Recovery must still require its grant before inspecting Trash.
+            if facts.path != nil, classifyTrashLocation(facts) != .removalSupported { return nil }
+            return root
+        }
         return port
+    }
+
+    func capability(_ probe: VolumeProbeResult, at url: URL,
+                    grants: FolderLocationGrants) -> VolumeCapability {
+        guard probe.capability == .removalSupported, let root = grantLocation(url) else { return probe.capability }
+        return grants.status(root) == .declined ? .scanOnly(.locationGrantNeeded) : probe.capability
     }
 
     func trashRecording(_ url: URL) throws -> (url: URL?, bookmark: Data?) {
@@ -163,8 +182,8 @@ public struct FolderHistoryMember: Codable, Sendable {
     public var trashURL: URL?
     /// Opaque bookmark of the original item, taken just before trash. On iOS,
     /// this is the only way to reach an item trashed outside the picked scope
-    /// (iCloud Drive). About 1 KB per member (measured 1.07 KB on macOS; iOS
-    /// size pending measurement), encoded as base64 in the history JSON.
+    /// (iCloud Drive). Measured about 1.9 KB per member on iOS (2555 base64
+    /// characters), encoded as base64 in the history JSON.
     public var trashBookmark: Data?
     public let size: Int
     public let fileID: UInt64
@@ -213,11 +232,13 @@ public struct FolderHistoryEntry: Identifiable, Sendable {
     public var id: UUID { record.id }
     public let record: FolderHistoryRecord
     public let putBackAvailable: Bool
+    public let putBackNeedsGrant: URL?
 }
 
 public enum FolderPutBackResult {
     case restored
     case unavailable
+    case locationGrantNeeded(URL)
     case conflict([URL])
     case parentMissing([URL])
     case failed(String)
@@ -265,14 +286,30 @@ public final class FolderHistoryStore {
         try save(history, to: historyURL)
     }
 
-    public func entries(port: FolderTrashPort? = nil) throws -> [FolderHistoryEntry] {
-        try records().reversed().sorted { $0.timestamp > $1.timestamp }.map {
-            FolderHistoryEntry(record: $0, putBackAvailable: canPutBack($0, port: port))
+    public func entries(port: FolderTrashPort? = nil,
+                        grants: FolderLocationGrants = .none) throws -> [FolderHistoryEntry] {
+        let port = port ?? .system
+        return try records().reversed().sorted { $0.timestamp > $1.timestamp }.map { record in
+            let access = FolderLocationGrantAccess(grants: grants, port: port)
+            defer { access.stop() }
+            let missing = record.state == .removed ? access.missing(for: record.members.map(\.originalURL)) : nil
+            return FolderHistoryEntry(record: record,
+                                      putBackAvailable: missing == nil && canPutBackAccessed(record, port: port),
+                                      putBackNeedsGrant: missing)
         }
     }
 
-    public func canPutBack(_ record: FolderHistoryRecord, port: FolderTrashPort? = nil) -> Bool {
+    public func canPutBack(_ record: FolderHistoryRecord, port: FolderTrashPort? = nil,
+                           grants: FolderLocationGrants = .none) -> Bool {
         let port = port ?? .system
+        guard record.state == .removed else { return false }
+        let access = FolderLocationGrantAccess(grants: grants, port: port)
+        defer { access.stop() }
+        guard access.missing(for: record.members.map(\.originalURL)) == nil else { return false }
+        return canPutBackAccessed(record, port: port)
+    }
+
+    private func canPutBackAccessed(_ record: FolderHistoryRecord, port: FolderTrashPort) -> Bool {
         // Listing never re-hashes; Put Back verifies the primary before moving.
         guard let items = restorableItems(record, port: port, verifyPrimary: false) else { return false }
         defer { items.forEach { $0.stopAccessing() } }
@@ -302,14 +339,20 @@ public final class FolderHistoryStore {
     /// Never searches the Trash. A detached known volume leaves the journal
     /// pending; reconciling it as lost would discard its known recovery paths.
     @discardableResult
-    public func reconcileIntent(port: FolderTrashPort? = nil) throws -> [FolderHistoryRecord] {
+    public func reconcileIntent(port: FolderTrashPort? = nil,
+                                grants: FolderLocationGrants = .none) throws -> [FolderHistoryRecord] {
         let port = port ?? .system
-        try reconcilePutBackHistory(port: port)
+        try reconcilePutBackHistory(port: port, grants: grants)
         let pending = try pendingIntent()
         var booked: [FolderHistoryRecord] = []
         var deferred: [FolderHistoryRecord] = []
         let logged = Set(try records().map(\.id))
         for var record in pending where !logged.contains(record.id) {
+            let access = FolderLocationGrantAccess(grants: grants, port: port)
+            defer { access.stop() }
+            guard access.missing(for: record.members.map(\.originalURL)) == nil else {
+                deferred.append(record); continue
+            }
             let originals = record.members.map { originalMatches($0, volume: record.volumeKey) }
             if originals.allSatisfy({ $0 }) { continue }
             let mounted = record.members.contains { member in
@@ -345,13 +388,20 @@ public final class FolderHistoryStore {
 
     /// Parents must already exist. Recreating a user-removed directory could
     /// restore into an intentionally abandoned location or a changed mount.
-    public func putBack(_ id: UUID, port: FolderTrashPort? = nil) throws -> FolderPutBackResult {
+    public func putBack(_ id: UUID, port: FolderTrashPort? = nil,
+                        grants: FolderLocationGrants = .none) throws -> FolderPutBackResult {
         let port = port ?? .system
         var history = try records()
         guard let index = history.firstIndex(where: { $0.id == id }) else {
             throw FolderHistoryError.entryNotFound
         }
         var record = history[index]
+        guard record.state == .removed, !record.members.isEmpty else { return .unavailable }
+        let access = FolderLocationGrantAccess(grants: grants, port: port)
+        defer { access.stop() }
+        if let missing = access.missing(for: record.members.map(\.originalURL)) {
+            return .locationGrantNeeded(missing)
+        }
         guard let accessed = restorableItems(record, port: port, verifyPrimary: true) else { return .unavailable }
         // Keep the verified route and access through moves and partial-failure rollback.
         defer { accessed.forEach { $0.stopAccessing() } }
@@ -421,11 +471,14 @@ public final class FolderHistoryStore {
         }
     }
 
-    private func reconcilePutBackHistory(port: FolderTrashPort) throws {
+    private func reconcilePutBackHistory(port: FolderTrashPort, grants: FolderLocationGrants) throws {
         var history = try records()
         var changed = false
         for index in history.indices where history[index].state == .restoring {
             var record = history[index]
+            let access = FolderLocationGrantAccess(grants: grants, port: port)
+            defer { access.stop() }
+            guard access.missing(for: record.members.map(\.originalURL)) == nil else { continue }
             guard record.members.contains(where: { volumeMounted(at: $0.originalURL, key: record.volumeKey) }) else { continue }
             for memberIndex in record.members.indices {
                 record.members[memberIndex].restored = originalMatches(record.members[memberIndex], volume: record.volumeKey)
@@ -433,7 +486,7 @@ public final class FolderHistoryStore {
             if record.members.allSatisfy(\.restored) { record.state = .restored }
             else if record.members.allSatisfy({ !$0.restored }) {
                 record.state = .removed
-                if !canPutBack(record, port: port) { record.state = .rollbackFailed }
+                if !canPutBackAccessed(record, port: port) { record.state = .rollbackFailed }
             } else { record.state = .rollbackFailed }
             history[index] = record
             changed = true

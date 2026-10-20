@@ -38,6 +38,7 @@ public enum VolumeCapabilityReason: Equatable, Sendable {
     case unsupportedFilesystemType
     case signalsUnavailable
     case systemTrashUnconfirmed
+    case locationGrantNeeded
 }
 
 public enum VolumeCapability: Equatable, Sendable {
@@ -79,7 +80,8 @@ public func classifyVolume(_ facts: VolumeFacts) -> VolumeCapability {
 }
 
 /// iOS Trash support is location-specific, even on one writable APFS volume.
-public func classifyTrashLocation(_ facts: VolumeFacts) -> VolumeCapability {
+public func classifyTrashLocation(_ facts: VolumeFacts,
+                                  grantStatus: FolderLocationGrantStatus = .notAsked) -> VolumeCapability {
     let volume = classifyVolume(facts)
     guard volume == .removalSupported else { return volume }
     if let path = facts.path, path.hasPrefix("/"),
@@ -99,7 +101,7 @@ public func classifyTrashLocation(_ facts: VolumeFacts) -> VolumeCapability {
     // trashItem result: validateTrashLocation requires this root's .Trash or
     // removal fails. Rollback only attempts to restore the identified original;
     // no unrelated item moves.
-    return .removalSupported
+    return grantStatus == .declined ? .scanOnly(.locationGrantNeeded) : .removalSupported
 }
 
 func folderLocationComponents(_ url: URL) -> [String] {

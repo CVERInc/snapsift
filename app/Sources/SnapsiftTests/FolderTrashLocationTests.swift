@@ -211,6 +211,9 @@ private final class TrashLocationFixture {
         FolderHistoryStore(historyURL: root.appendingPathComponent("history.json"),
                            intentURL: root.appendingPathComponent("intent.json"))
     }
+    var grants: FolderLocationGrants {
+        FolderLocationGrants(status: { _ in .granted }, access: { FolderResolvedItem(url: $0) })
+    }
     var port: FolderTrashPort {
         var port = FolderTrashPort.confirmedLocation(trash: { url in
             self.trashCalls.append(url)
@@ -297,7 +300,7 @@ func folderTrashLookAlikePortTests(_ check: (Bool, String) -> Void) async {
             let keeper = f.items[0].primary.url
             let keeperBytes = try Data(contentsOf: keeper)
             let store = f.store()
-            let committer = FolderCommitter(history: store, trashPort: f.port, volumeProbe: f.probe)
+            let committer = FolderCommitter(history: store, trashPort: f.port, grants: f.grants, volumeProbe: f.probe)
             var failures: [FolderRemovalFailure] = []
             let count = try await committer.commit(groups: [f.groups[0]], items: f.items, primaryHashes: [:],
                 callbacks: FolderCommitCallbacks(onRemovalFailed: { failures.append($0) }))
@@ -330,7 +333,7 @@ func folderTrashLocationSessionTests(_ check: (Bool, String) -> Void) async {
         try FolderHistoryStore.atomicWrite(JSONEncoder().encode([f.confirmed, f.unconfirmed].map {
             FolderBookmark(data: Data($0.path.utf8))
         }), bookmarks.url)
-        let session = FolderLibrarySession(bookmarks: bookmarks, history: store, trashPort: f.port,
+        let session = FolderLibrarySession(bookmarks: bookmarks, history: store, trashPort: f.port, grants: f.grants,
             volumeProbe: f.probe, scan: { _ in
                 FolderScanResult(items: f.items, groups: f.groups, exactGroupIDs: [], crossFolderDuplicates: [],
                     roots: [FolderScannedRoot(url: f.confirmed, volume: f.probe(f.confirmed)),
@@ -366,7 +369,7 @@ func folderTrashLocationSessionTests(_ check: (Bool, String) -> Void) async {
         let records = try store.records()
         check(records.count == 1 && records[0].itemID == f.items[1].id,
               "confirmed iOS location records a valid same-storage Trash result")
-        if let record = records.first, case .restored = try store.putBack(record.id, port: f.port) {
+        if let record = records.first, case .restored = try store.putBack(record.id, port: f.port, grants: f.grants) {
             check(FileManager.default.fileExists(atPath: f.items[1].primary.url.path),
                   "confirmed iOS location Put Back restores the original through the same port")
         } else { check(false, "confirmed iOS location Put Back should restore") }
