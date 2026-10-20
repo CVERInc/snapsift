@@ -31,7 +31,8 @@ public enum LookAlikeScanner {
     /// same asset is never hashed or feature-printed twice in a pipeline.
     /// Cleared at the start of every new scan — pixels can change between scans
     /// (edits, rotation saves), so verdicts must never outlive the session.
-    private actor Cache {
+    // Internal so regression tests can seed retained observations without inference.
+    actor Cache {
         private var hashes: [String: UInt64] = [:]
         private var prints: [String: VNFeaturePrintObservation] = [:]
         // Negative results: assets whose thumbnail couldn't be read THIS scan.
@@ -51,7 +52,7 @@ public enum LookAlikeScanner {
         func markFailedPrint(_ id: String) { failedPrint.insert(id) }
         func clear() { hashes = [:]; prints = [:]; failedHash = []; failedPrint = [] }
     }
-    private static let cache = Cache()
+    static let cache = Cache()
 
     /// Must be called when a new scan begins (LibraryModel does this).
     public static func clearCache() async { await cache.clear() }
