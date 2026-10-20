@@ -68,6 +68,7 @@ func checkFolderICloudPolicy() async {
     await checkFolderDownloadPersistence()
     await checkFolderDownloadCancelledSession()
     await checkFolderDownloadBookmarkRecovery()
+    await checkFolderDownloadFolderRemovalAndReadd()
     await checkFolderDownloadBookmarkAccessCounts()
     guard UTType.png.conforms(to: .image) else {
         print("  Not verified: Folder pipeline integration requires the LaunchServices UTType registry (unavailable in this sandbox)")
@@ -619,4 +620,52 @@ private func checkFolderICloudGates() async {
     } catch {
         check(false, "Folder iCloud gate fixture error: \(error)")
     }
+}
+
+@MainActor
+private func checkFolderDownloadFolderRemovalAndReadd() async {
+    do {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/folder-download-folders-\(UUID())")
+        let source = root.appendingPathComponent("source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = source.appendingPathComponent("file.bin")
+        try Data("fixture".utf8).write(to: file)
+        var unavailable = false
+        let bookmarks = FolderBookmarkStore(url: root.appendingPathComponent("folders.json"), resolveBookmark: { _ in
+            if unavailable { throw FolderSourceError.bookmarkNotFound }
+            return (source, false)
+        })
+        try bookmarks.add(source)
+        let history = FolderHistoryStore(historyURL: root.appendingPathComponent("history.json"),
+                                         intentURL: root.appendingPathComponent("intent.json"))
+        let storeURL = root.appendingPathComponent("downloads.json")
+        let store = FolderDownloadStore(url: storeURL, bookmarks: bookmarks)
+        let fake = FakeFolderUbiquity()
+        fake.setCloud([file], missing: [file])
+        func download() throws {
+            let cloud = FolderICloudAccess(policy: .allowed, port: fake.port, timeout: 0,
+                downloadStore: store, downloadRoots: try store.prepare(roots: [source]))
+            _ = try cloud.prepareForScan(file)
+        }
+        try download()
+        let session = FolderLibrarySession(bookmarks: bookmarks, history: history, downloadStore: store)
+        session.loadFolders()
+        unavailable = true
+        session.loadFolders()
+        unavailable = false
+        session.addFolders([source])
+        let oldReport = await store.evictDownloadedFiles(ubiquityPort: fake.port)
+        check(session.folders.count == 1 && oldReport.map(\.outcome) == [.evicted]
+              && fake.evictionCalls == [file] && store.downloadedFiles.isEmpty,
+              "R5 folders: re-adding an unavailable folder keeps its receipts returnable under the new grant")
+        fake.setCloud([file], missing: [file])
+        try download()
+        session.removeFolder(session.folders[0].id)
+        check(session.folders.isEmpty && session.downloadedFiles.isEmpty
+              && FolderDownloadStore(url: storeURL, bookmarks: bookmarks).downloadedFiles.isEmpty
+              && fake.evictionCalls == [file],
+              "R5 folders: removing a folder durably drops its receipts with its result")
+    } catch { check(false, "R5 folder removal fixture error: \(error)") }
 }

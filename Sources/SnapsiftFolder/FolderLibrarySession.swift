@@ -114,8 +114,11 @@ public final class FolderLibrarySession {
             for url in urls {
                 let existing = folders.first { $0.url?.standardizedFileURL == url.standardizedFileURL }
                 if let existing, !existing.unavailable { continue }
-                try bookmarks.add(url)
-                if let existing { try bookmarks.remove(existing.id) }
+                let added = try bookmarks.add(url)
+                if let existing {
+                    try bookmarks.remove(existing.id)
+                    try downloadStore?.moveFolder(existing.id, to: added.id)
+                }
             }
         } catch { errorOutcome = .bookmark(error) }
         refreshFolders()
@@ -125,6 +128,7 @@ public final class FolderLibrarySession {
         guard !isScanning, !isBusy else { return }
         do {
             try bookmarks.remove(id)
+            try downloadStore?.forgetFolder(id)
             discardResult()
             refreshFolders()
         } catch { errorOutcome = .bookmark(error) }

@@ -90,6 +90,27 @@ public final class FolderDownloadStore: @unchecked Sendable {
         try save()
     }
 
+    /// Removing a folder drops its receipts, as it drops that folder's scan result.
+    func forgetFolder(_ folderID: UUID) throws {
+        try replaceEntries { $0.filter { $0.folderID != folderID } }
+    }
+
+    /// Re-adding an unavailable folder keeps its receipts under the new grant.
+    func moveFolder(_ oldID: UUID, to newID: UUID) throws {
+        try replaceEntries { entries in
+            entries.map { $0.folderID == oldID ? Entry(file: $0.file, folderID: newID, relativePath: $0.relativePath) : $0 }
+        }
+    }
+
+    private func replaceEntries(_ change: ([Entry]) -> [Entry]) throws {
+        lock.lock(); defer { lock.unlock() }
+        let previous = entries
+        entries = change(entries)
+        guard entries.count != previous.count || zip(entries, previous).contains(where: { $0.folderID != $1.folderID }) else { return }
+        do { try save() }
+        catch { entries = previous; throw error }
+    }
+
     /// Retains failed evictions for retry; removes evicted, changed, missing and
     /// no-longer-ubiquitous receipts. Reuses the scan's coordinated eviction gate.
     public func evictDownloadedFiles(ubiquityPort: FolderUbiquityPort = .system) async -> [FolderICloudEvictionResult] {
