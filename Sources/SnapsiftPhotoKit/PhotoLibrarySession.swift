@@ -338,14 +338,15 @@ public final class PhotoLibrarySession {
 
     /// Discard the half-built state of a cancelled scan and quietly restore the
     /// previous snapshot (if any) so cancelling never destroys prior work.
-    private func finishCancelledScan() {
-        // The scan method's defer hasn't run yet — clear the flag here so the
-        // snapshot restore below isn't blocked by its own !isScanning guard.
-        isScanning = false
+    private func finishCancelledScan() async {
         groups = []
         categories = []
         exactDupeGroupIDs = []
         progressFraction = nil
+        // Keep scans blocked until cleanup finishes; restore re-fetches its own
+        // group/category assets after the cancelled scan's working set is gone.
+        await releaseScanCaches()
+        isScanning = false
         // An aborted sidecar read returns an EMPTY map — caching that would
         // permanently disable quality ranking for the session. Forget it so
         // the next scan reads it properly.
@@ -358,9 +359,10 @@ public final class PhotoLibrarySession {
     }
 
     /// True (and cleans up) when the scan task was cancelled mid-pipeline.
-    private func bailIfCancelled() -> Bool {
+    /// Internal so tests can exercise cancellation without enumerating Photos.
+    func bailIfCancelled() async -> Bool {
         guard Task.isCancelled || abortFlag.isSet else { return false }
-        finishCancelledScan()
+        await finishCancelledScan()
         return true
     }
 
@@ -609,13 +611,13 @@ public final class PhotoLibrarySession {
         // change nothing until relaunch, with no hint why quality is still off.
         // The re-probe costs one failed sqlite open per scan for a no-FDA user.
         await loadEnrichmentIfNeeded(assets: assets)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         // Chunked with yields: a 120K-asset map monopolises the main actor for
         // long enough that even the Cancel click can't be processed.
         var enriched: [Photo] = []
         enriched.reserveCapacity(assets.count)
         for chunk in stride(from: 0, to: assets.count, by: 2000) {
-            if bailIfCancelled() { return }
+            if await bailIfCancelled() { return }
             for a in assets[chunk..<min(chunk + 2000, assets.count)] {
                 enriched.append(makePhoto(from: a))
             }
@@ -642,7 +644,7 @@ public final class PhotoLibrarySession {
                 if let frac { self?.progressFraction = 0.15 + 0.45 * frac }
             }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         // Neural gate: a cluster only stays "confident" (→ pre-marks a deletion)
         // if Apple's feature print agrees it's near-identical. dHash is cheap
         // recall; this is the precise arbiter that keeps the scan from ever
@@ -660,7 +662,7 @@ public final class PhotoLibrarySession {
                 if total > 0 { self?.progressFraction = 0.6 + 0.2 * Double(done) / Double(total) }
             }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         var neuralConfident = Set<Int>()
         for (k, idx) in confidentIdx.enumerated() {
             if let fs = spreads[k], fs <= contentConfidentFeature { neuralConfident.insert(idx) }
@@ -670,12 +672,12 @@ public final class PhotoLibrarySession {
         // enriched photos so the keeper respects sharpness and documents are
         // protected. Index-aligned with `verified` so the confident flags line up.
         let resourcePhotos = await prepareAssetMetadata(verified.map(\.photos))
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         let flagged = await enrichFlags(resourcePhotos) { done, total in
             self.progress = .verifying(done, total)
             if total > 0 { self.progressFraction = 0.8 + 0.1 * Double(done) / Double(total) }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         var built = PhotoLibraryScanRules.reviewGroups(flagged, confident: neuralConfident)
 
         // Exact-duplicate pass: the ONLY source of pre-marked deletions. Runs
@@ -685,7 +687,7 @@ public final class PhotoLibrarySession {
         // shifting indices under the loop).
         let exact = await detectExactDuplicates(in: built, fracBase: 0.9, fracSpan: 0.06)
         built = await seedExactRejections(in: built, exact: exact, fracBase: 0.96, fracSpan: 0.04)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         groups = built
         exactDupeGroupIDs = exact
 
@@ -940,7 +942,7 @@ public final class PhotoLibrarySession {
         photoKitImages = makeImageProvider(assetsByID: map)
 
         await loadEnrichmentIfNeeded(assets: assets)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
 
         let idGroups = await LookAlikeScanner.scan(itemIdentifiers: assets.map(\.localIdentifier), provider: imageProvider) { [weak self] msg, frac in
             Task { @MainActor in
@@ -948,7 +950,7 @@ public final class PhotoLibrarySession {
                 if let frac { self?.progressFraction = 0.05 + 0.65 * frac }
             }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
 
         let raw = idGroups.compactMap { ids -> [Photo]? in
             let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0) }
@@ -957,19 +959,19 @@ public final class PhotoLibrarySession {
         }
         // Document protection + sharpness ranking over the cluster members only.
         let resourcePhotos = await prepareAssetMetadata(raw)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         let enriched = await enrichFlags(resourcePhotos) { done, total in
             self.progress = .verifying(done, total)
             if total > 0 { self.progressFraction = 0.7 + 0.15 * Double(done) / Double(total) }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         var built = PhotoLibraryScanRules.reviewGroups(enriched)
 
         // Exact-duplicate pass: the ONLY source of pre-marked deletions.
         // Local array, single publish — same reasoning as scan().
         let exact = await detectExactDuplicates(in: built, fracBase: 0.85, fracSpan: 0.1)
         built = await seedExactRejections(in: built, exact: exact, fracBase: 0.95, fracSpan: 0.05)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         groups = built
         exactDupeGroupIDs = exact
 
@@ -1034,7 +1036,7 @@ public final class PhotoLibrarySession {
         photoKitImages = makeImageProvider(assetsByID: map)
 
         await loadEnrichmentIfNeeded(assets: assets)
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
 
         // Cluster the library at the "same scene, different moment" band — looser
         // than Look-alikes (which is now ≈identical only), so pose/angle changes
@@ -1048,7 +1050,7 @@ public final class PhotoLibrarySession {
                 if let frac { self?.progressFraction = 0.05 + 0.6 * frac }
             }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
 
         // Build the qualifying buckets first (cheap, main-actor), THEN name them
         // with bounded concurrency. Each name awaits a Vision classify plus a fresh
@@ -1058,7 +1060,7 @@ public final class PhotoLibrarySession {
         struct PendingSet { let photos: [Photo]; let rep: String? }
         var pending: [PendingSet] = []
         for ids in idGroups {
-            if bailIfCancelled() { return }
+            if await bailIfCancelled() { return }
             let photos = ids.compactMap { map[$0] }.map { makePhoto(from: $0) }
                 .sorted { $0.takenAt < $1.takenAt }
             guard photos.count >= 2 else { continue }
@@ -1066,9 +1068,9 @@ public final class PhotoLibrarySession {
         }
         if enrichmentPort == nil {
             let resourcePhotos = await prepareAssetMetadata(pending.map(\.photos))
-            if bailIfCancelled() { return }
+            if await bailIfCancelled() { return }
             let flagged = await flagSetMembers(resourcePhotos)
-            if bailIfCancelled() { return }
+            if await bailIfCancelled() { return }
             pending = flagged.map { PendingSet(photos: $0, rep: $0.first.map(\.uuid)) }
         }
         // Naming follows the member flag pass when one ran.
@@ -1102,7 +1104,7 @@ public final class PhotoLibrarySession {
                 add()
             }
         }
-        if bailIfCancelled() { return }
+        if await bailIfCancelled() { return }
         categories = zip(pending, names)
             .map { CategoryBucket(label: $0.1 ?? fallbackSetName, photos: $0.0.photos) }
             .sorted { $0.count > $1.count }
@@ -1827,6 +1829,7 @@ public final class PhotoLibrarySession {
         // for seconds — on .onAppear that beachballed every launch.
         enum RestoreLoad { case none, unreadable, ok(ScanSnapshot, [String: PHAsset]) }
         let snapshotStore = self.snapshotStore
+        let fetchSnapshotAssets = effects.fetchSnapshotAssets
         let loaded: RestoreLoad = await Task.detached(priority: .userInitiated) {
             switch snapshotStore.loadOutcome() {
             case .none: return .none
@@ -1835,15 +1838,7 @@ public final class PhotoLibrarySession {
                 let allIDs = Set(snap.groups.flatMap { $0.photos.map(\.uuid) }
                     + snap.categories.flatMap { $0.photos.map(\.uuid) })
                 guard !allIDs.isEmpty else { return .none }
-                // Must match the scan fetch: without includeAllBurstAssets the burst
-                // sub-frames don't resolve and their groups silently dissolve on
-                // restore (live-observed: 2755 → 2632 groups).
-                let fetchOpts = PHFetchOptions()
-                fetchOpts.includeAllBurstAssets = true
-                let fetched = PHAsset.fetchAssets(withLocalIdentifiers: Array(allIDs), options: fetchOpts)
-                var map: [String: PHAsset] = [:]
-                map.reserveCapacity(fetched.count)
-                fetched.enumerateObjects { a, _, _ in map[a.localIdentifier] = a }
+                let map = fetchSnapshotAssets(Array(allIDs))
                 return .ok(snap, map)
             }
         }.value
@@ -2265,6 +2260,17 @@ struct LibraryEffects {
     var liveIDs: @Sendable ([String]) async -> Set<String>
     /// Assets for the provider refresh after a commit.
     var fetchAssets: @MainActor ([String]) -> [String: PHAsset]
+    /// Snapshot fetch runs off the main actor. Match the scan fetch: without
+    /// includeAllBurstAssets, burst sub-frames vanish and restored groups dissolve.
+    var fetchSnapshotAssets: @Sendable ([String]) -> [String: PHAsset] = { ids in
+        let opts = PHFetchOptions()
+        opts.includeAllBurstAssets = true
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: opts)
+        var map: [String: PHAsset] = [:]
+        map.reserveCapacity(fetched.count)
+        fetched.enumerateObjects { asset, _, _ in map[asset.localIdentifier] = asset }
+        return map
+    }
     /// Wedge-proof per-asset edited lookup; nil = could not determine.
     var editedFallback: @Sendable (PHAsset) async -> Bool?
 
