@@ -68,6 +68,7 @@ func checkFolderICloudPolicy() async {
     await checkFolderDownloadPersistence()
     await checkFolderDownloadCancelledSession()
     await checkFolderDownloadBookmarkRecovery()
+    await checkFolderDownloadBookmarkAccessCounts()
     guard UTType.png.conforms(to: .image) else {
         print("  Not verified: Folder pipeline integration requires the LaunchServices UTType registry (unavailable in this sandbox)")
         return
@@ -407,6 +408,70 @@ private func checkFolderDownloadBookmarkRecovery() async {
         check(failed && recovered.downloadedFiles.count == 1 && fake.evictionCalls.count == 1,
               "R5 bookmarks: removed grant retains receipt and reports failure without bypassing access")
     } catch { check(false, "R5 bookmark recovery fixture error: \(error)") }
+}
+
+@MainActor
+private func checkFolderDownloadBookmarkAccessCounts() async {
+    do {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/folder-download-access-counts-\(UUID())")
+        let source = root.appendingPathComponent("source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var resolutions = 0, starts = 0, stops = 0
+        var unavailable = false
+        let bookmarks = FolderBookmarkStore(url: root.appendingPathComponent("folders.json"), makeAccess: { url in
+            try FolderAccess(url: url, startAccess: { _ in starts += 1; return true },
+                             stopAccess: { _ in stops += 1 })
+        }, resolveBookmark: { _ in
+            resolutions += 1
+            if unavailable { throw FolderSourceError.bookmarkNotFound }
+            return (source, false)
+        })
+        try bookmarks.add(source)
+        let store = FolderDownloadStore(url: root.appendingPathComponent("downloads.json"), bookmarks: bookmarks)
+        let files = (0..<8).map { source.appendingPathComponent("\($0).bin") }
+        for file in files { try Data("fixture".utf8).write(to: file) }
+        let fake = FakeFolderUbiquity()
+        fake.setCloud(Set(files), missing: Set(files))
+        let cloud = FolderICloudAccess(policy: .allowed, port: fake.port, timeout: 0,
+            downloadStore: store, downloadRoots: try store.prepare(roots: [source]))
+        for file in files.reversed() { _ = try cloud.prepareForScan(file) }
+        resolutions = 0; starts = 0; stops = 0
+        for call in 1...2 {
+            check(store.downloadedFiles.map(\.url) == files,
+                  "R5 bookmark counts: read preserves all downloads in URL order")
+            check(resolutions == call && starts == call && stops == call,
+                  "R5 bookmark counts: each read resolves and balances one scope for eight entries")
+        }
+        unavailable = true
+        resolutions = 0; starts = 0; stops = 0
+        check(store.downloadedFiles.map(\.url) == files && resolutions == 1,
+              "R5 bookmark counts: failed resolution is cached within a read and preserves fallback URLs")
+        let failed = await store.evictDownloadedFiles(ubiquityPort: fake.port)
+        check(resolutions == 2 && starts == 0 && stops == 0
+              && failed.map(\.url) == files && failed.allSatisfy {
+                  if case .failed = $0.outcome { return true }
+                  return false
+              } && fake.evictionCalls.isEmpty,
+              "R5 bookmark counts: failed resolution is attempted once per eviction and reports every entry")
+        unavailable = false
+        resolutions = 0; starts = 0; stops = 0
+        var scopedPort = fake.port
+        let evict = scopedPort.evict
+        var scopeHeld = true
+        scopedPort.evict = { member in
+            scopeHeld = scopeHeld && starts == 1 && stops == 0
+            try evict(member)
+        }
+        let report = await store.evictDownloadedFiles(ubiquityPort: scopedPort)
+        check(resolutions == 1 && starts == 1 && stops == 1 && scopeHeld
+              && report.map(\.url) == files && report.allSatisfy { $0.outcome == .evicted }
+              && fake.evictionCalls == files,
+              "R5 bookmark counts: retry resolves once and evicts the exact ordered set under a balanced scope")
+        check(store.downloadedFiles.isEmpty && resolutions == 1,
+              "R5 bookmark counts: empty store performs no bookmark access")
+    } catch { check(false, "R5 bookmark access count fixture error: \(error)") }
 }
 
 @MainActor

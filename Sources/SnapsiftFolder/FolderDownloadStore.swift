@@ -50,10 +50,11 @@ public final class FolderDownloadStore: @unchecked Sendable {
     /// always requires resolving the original folder bookmark again.
     public var downloadedFiles: [FolderDownloadedFile] {
         lock.lock(); defer { lock.unlock() }
+        var accesses: [UUID: Result<FolderAccess, Error>] = [:]
+        defer { for result in accesses.values { (try? result.get())?.stop() } }
         return entries.map { entry in
-            guard let resolved = try? bookmarks.access(entry.folderID) else { return entry.file }
-            defer { resolved.access.stop() }
-            return (try? entry.file(at: resolved.access.url)) ?? entry.file
+            guard let access = try? access(entry.folderID, cached: &accesses) else { return entry.file }
+            return (try? entry.file(at: access.url)) ?? entry.file
         }.sorted { $0.url.path < $1.url.path }
     }
 
@@ -97,6 +98,8 @@ public final class FolderDownloadStore: @unchecked Sendable {
 
     func evict(_ files: [FolderDownloadedFile]?, port: FolderUbiquityPort) -> [FolderICloudEvictionResult] {
         lock.lock(); defer { lock.unlock() }
+        var accesses: [UUID: Result<FolderAccess, Error>] = [:]
+        defer { for result in accesses.values { (try? result.get())?.stop() } }
         let selected = entries.filter { entry in
             files == nil || files!.contains { $0.receiptID == entry.file.receiptID }
         }.sorted { $0.file.url.path < $1.file.url.path }
@@ -104,9 +107,8 @@ public final class FolderDownloadStore: @unchecked Sendable {
         for entry in selected {
             var reportedURL = entry.file.url
             do {
-                let resolved = try bookmarks.access(entry.folderID)
-                defer { resolved.access.stop() }
-                let file = try entry.file(at: resolved.access.url)
+                let access = try access(entry.folderID, cached: &accesses)
+                let file = try entry.file(at: access.url)
                 reportedURL = file.url
                 let result = FolderICloudAccess.evict([file], port: port, skipNonlocal: true)[0]
                 var info = stat()
@@ -124,6 +126,13 @@ public final class FolderDownloadStore: @unchecked Sendable {
             }
         }
         return results
+    }
+
+    private func access(_ folderID: UUID, cached: inout [UUID: Result<FolderAccess, Error>]) throws -> FolderAccess {
+        if let result = cached[folderID] { return try result.get() }
+        let result = Result { try bookmarks.access(folderID).access }
+        cached[folderID] = result
+        return try result.get()
     }
 
     private func save() throws {
