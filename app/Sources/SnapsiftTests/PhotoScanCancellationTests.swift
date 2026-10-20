@@ -66,14 +66,20 @@ func checkCancelledPhotoScanReleasesWorkingSet() async {
         }
         session.groups = [ReviewGroup(photos: [ph(9, 0), ph(10, 1)], keeperID: "U9")]
         await LookAlikeScanner.clearCache()
-        do {
-            guard try await cancelTestFeaturePrint(cache: LookAlikeScanner.cache) else {
-                check(false, "cancel cleanup: Vision fixture produces a feature print")
+        // Without Vision inference (GitHub's macOS runners) the feature-print
+        // checks are skipped; the asset map and other caches are still checked.
+        if visionInferenceAvailable {
+            do {
+                guard try await cancelTestFeaturePrint(cache: LookAlikeScanner.cache) else {
+                    check(false, "cancel cleanup: Vision fixture produces a feature print")
+                    continue
+                }
+            } catch {
+                check(false, "cancel cleanup: Vision fixture produces a feature print (\(error))")
                 continue
             }
-        } catch {
-            check(false, "cancel cleanup: Vision fixture produces a feature print (\(error))")
-            continue
+        } else {
+            checkNeedsVision(false, "cancel cleanup: Vision fixture produces a feature print")
         }
         await LookAlikeScanner.cache.setHash(42, for: "scan-only")
         await LookAlikeScanner.cache.markFailedHash("unreadable")
@@ -83,14 +89,14 @@ func checkCancelledPhotoScanReleasesWorkingSet() async {
             && session.asset(for: "scan-only") === scanOnlyAsset
         let retainsPrint = await LookAlikeScanner.cache.featurePrint("scan-only") != nil
         check(retainsAsset, "cancel cleanup: fixture provider retains scan-only asset")
-        check(retainsPrint, "cancel cleanup: fixture cache retains Vision print")
-        guard retainsAsset, retainsPrint else { continue }
+        checkNeedsVision(retainsPrint, "cancel cleanup: fixture cache retains Vision print")
+        guard retainsAsset, retainsPrint || !visionInferenceAvailable else { continue }
         session.cancelScan()
         check(await session.bailIfCancelled(), "cancel cleanup: pipeline observes cancellation")
         check(scanOnlyAsset == nil && session.asset(for: "scan-only") == nil,
               "cancel cleanup: whole-library asset map released")
         let cachedPrintReleased = await LookAlikeScanner.cache.featurePrint("scan-only") == nil
-        check(cachedPrintReleased, "cancel cleanup: Vision feature-print cache entry released")
+        checkNeedsVision(cachedPrintReleased, "cancel cleanup: Vision feature-print cache entry released")
         let hash = await LookAlikeScanner.cache.hash("scan-only")
         let failedHash = await LookAlikeScanner.cache.didFailHash("unreadable")
         let failedPrint = await LookAlikeScanner.cache.didFailPrint("unreadable")
