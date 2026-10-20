@@ -37,6 +37,8 @@ public final class FolderLibrarySession {
     public var downloadedFiles: [FolderDownloadedFile] { downloadStore?.downloadedFiles ?? result?.downloadedFiles ?? [] }
     private let committer: FolderCommitter
     private let trashPort: FolderTrashPort
+    private let grants: FolderLocationGrants
+    private let volumeProbe: (URL) -> VolumeProbeResult
     private var loaded = false
     private var reconciledAtLaunch = false
     private var reconciliationFailed = false
@@ -50,6 +52,7 @@ public final class FolderLibrarySession {
     public init(bookmarks: FolderBookmarkStore, history: FolderHistoryStore,
                 downloadStore: FolderDownloadStore? = nil,
                 trashPort: FolderTrashPort? = nil,
+                grants: FolderLocationGrants = .none,
                 volumeProbe: @escaping (URL) -> VolumeProbeResult = probeVolume,
                 scan: (([URL]) async throws -> FolderScanResult)? = nil,
                 metadata: @escaping ([FolderItem]) async -> [String: LibraryMetadata] = { items in
@@ -62,7 +65,9 @@ public final class FolderLibrarySession {
         self.downloadStore = downloadStore
         let port = trashPort ?? .system
         self.trashPort = port
-        self.committer = FolderCommitter(history: history, trashPort: port, volumeProbe: volumeProbe)
+        self.grants = grants
+        self.volumeProbe = volumeProbe
+        self.committer = FolderCommitter(history: history, trashPort: port, grants: grants, volumeProbe: volumeProbe)
         // Custom scan closures must pass this same store to their pipeline.
         self.scan = scan ?? { try await FolderScanPipeline.scan(roots: $0, downloadStore: downloadStore) }
         self.metadata = metadata
@@ -74,14 +79,56 @@ public final class FolderLibrarySession {
     public var canScan: Bool { !isScanning && !isBusy && !showHistory && !folders.isEmpty }
     public var canReviewRemoval: Bool {
         guard !isScanning, !isBusy, !showHistory, let result else { return false }
-        let supported = Set(result.roots.filter { $0.volume.capability == .removalSupported }.compactMap { $0.volume.volumeKey })
+        let supported = result.roots.filter { $0.volume.capability == .removalSupported }
         return groups.contains { group in
-            group.deletionIDs.contains { itemsByID[$0].map { supported.contains($0.volumeKey) } == true }
+            group.deletionIDs.contains { id in
+                guard let item = itemsByID[id] else { return false }
+                return item.members.allSatisfy { member in
+                    (!trashPort.usesLocationCapabilities
+                     || trashPort.capability(volumeProbe(member.url), at: member.url, grants: grants) == .removalSupported)
+                    && supported.contains { root in
+                        let path = folderLocationComponents(member.url)
+                        let rootPath = folderLocationComponents(root.url)
+                        return root.volume.volumeKey == member.volumeKey
+                            && path.count > rootPath.count && path.starts(with: rootPath)
+                    }
+                }
+            }
         }
     }
     public var userMarkCount: Int { groups.reduce(0) { $0 + $1.rejected.subtracting($1.autoSeeded).count } }
     public var totalDeletions: Int { groups.reduce(0) { $0 + $1.deletionIDs.count } }
     public func item(for id: String) -> FolderItem? { itemsByID[id] }
+
+    /// Refreshes removal eligibility without enumerating or reading new items.
+    public func refreshLocationCapabilities() {
+        guard trashPort.usesLocationCapabilities else { return }
+        if var result {
+            result.roots = result.roots.map { root in
+                let probe = volumeProbe(root.url)
+                return FolderScannedRoot(url: root.url, volume: VolumeProbeResult(
+                    facts: probe.facts, volumeKey: probe.volumeKey, displayName: probe.displayName,
+                    volumeURL: probe.volumeURL, capability: trashPort.capability(probe, at: root.url, grants: grants)))
+            }
+            self.result = result
+            if let review = removalReview {
+                removalReview = FolderRemovalReview(
+                    summary: committer.preCommitSummary(groups: review.groups, items: result.items), groups: review.groups)
+            }
+        }
+        onChange?()
+    }
+
+    /// Probes and immediately releases each required location scope.
+    public func locationsNeedingGrant(for review: FolderRemovalReview) -> [URL] {
+        let roots = Set(review.groups.flatMap(\.deletionIDs).compactMap { itemsByID[$0] }
+            .flatMap(\.members).compactMap { trashPort.grantLocation($0.url) })
+        return roots.sorted { $0.path < $1.path }.filter { root in
+            let access = FolderLocationGrantAccess(grants: grants, port: trashPort)
+            defer { access.stop() }
+            return access.missing(for: [root]) != nil
+        }
+    }
     public var crossFolderMatches: [[String]] {
         (result?.crossFolderDuplicates ?? []).map { $0.itemIDs.filter { itemsByID[$0] != nil } }.filter { $0.count > 1 }
     }
@@ -166,6 +213,7 @@ public final class FolderLibrarySession {
                     throw CancellationError()
                 }
                 self.result = scanned
+                self.refreshLocationCapabilities()
                 self.uniqueMetadataIDs = folderUniqueMetadataIDs(metadata)
                 self.crossFolderItemIDs = Set(scanned.crossFolderDuplicates.flatMap(\.itemIDs))
                 self.itemsByID = Dictionary(uniqueKeysWithValues: scanned.items.map { ($0.id, $0) })
@@ -232,11 +280,13 @@ public final class FolderLibrarySession {
         let accesses = historyAccesses()
         defer { accesses.forEach { $0.stop() } }
         do {
-            let booked = try history.reconcileIntent()
+            let booked = try history.reconcileIntent(port: trashPort, grants: grants)
             if reconciliationFailed { recoveryOutcome = nil }
             reconciliationFailed = false
             let outcome = FolderReconciliationOutcome.recovered(
-                count: booked.count, unavailable: booked.filter { !history.canPutBack($0) }.count)
+                count: booked.count, unavailable: booked.filter {
+                    !history.canPutBack($0, port: trashPort, grants: grants)
+                }.count)
             if !booked.isEmpty { recoveryOutcome = outcome }
             return outcome
         } catch {
@@ -337,7 +387,7 @@ public final class FolderLibrarySession {
         let accesses = historyAccesses()
         defer { accesses.forEach { $0.stop() } }
         do {
-            historyEntries = try history.entries()
+            historyEntries = try history.entries(port: trashPort, grants: grants)
             historyReadError = nil
         }
         catch {
@@ -356,9 +406,10 @@ public final class FolderLibrarySession {
         notice = nil
         await Task.yield()
         do {
-            switch try history.putBack(entry.id, port: trashPort) {
+            switch try history.putBack(entry.id, port: trashPort, grants: grants) {
             case .restored: notice = .putBackDone
             case .unavailable: operationReport = [.putBack(.unavailable(folderHistoryUnavailableReason(entry.record)))]
+            case .locationGrantNeeded(let root): operationReport = [.putBack(.locationGrantNeeded(root))]
             case .conflict(let urls): operationReport = [.putBack(.conflict(urls))]
             case .parentMissing(let urls): operationReport = [.putBack(.parentMissing(urls))]
             case .failed(let detail): operationReport = [.putBack(.failed(detail))]

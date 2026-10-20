@@ -40,6 +40,7 @@ public struct FolderPreCommitSummary {
 public enum FolderRemovalFailureReason {
     case liveCheck(FolderWithdrawalReason)
     case trash(String)
+    case locationGrantMissing(URL)
     case invalidTrashResult(URL?)
     case journalWrite(String)
     case rollbackFailed([URL], String)
@@ -73,15 +74,18 @@ public struct FolderCommitCallbacks {
 public final class FolderCommitter {
     public let history: FolderHistoryStore
     private let trashPort: FolderTrashPort
+    private let grants: FolderLocationGrants
     private let volumeProbe: (URL) -> VolumeProbeResult
     private let orchestrator = CommitOrchestrator()
     private var isCommitting = false
 
     public init(history: FolderHistoryStore? = nil,
                 trashPort: FolderTrashPort? = nil,
+                grants: FolderLocationGrants = .none,
                 volumeProbe: @escaping (URL) -> VolumeProbeResult = probeVolume) {
         self.history = history ?? FolderHistoryStore()
         self.trashPort = trashPort ?? .system
+        self.grants = grants
         self.volumeProbe = volumeProbe
     }
 
@@ -103,10 +107,14 @@ public final class FolderCommitter {
         }
         let volumes = Dictionary(grouping: candidates, by: \.volumeKey).map { key, items in
             let probe = volumeProbe(items[0].primary.url)
+            let scanOnly = items.lazy.flatMap(\.members).map {
+                self.trashPort.capability(self.volumeProbe($0.url), at: $0.url, grants: self.grants)
+            }
+                .first { $0 != .removalSupported }
             return FolderVolumeSummary(volumeKey: key, displayName: probe.displayName ?? key.rawValue,
                                        isStartupVolume: probe.facts.isRootFileSystem == true,
                                        itemCount: items.count, totalBytes: items.reduce(0) { $0 + $1.photo.size },
-                                       capability: probe.capability)
+                                       capability: scanOnly ?? probe.capability)
         }.sorted { $0.volumeKey.rawValue < $1.volumeKey.rawValue }
         return FolderPreCommitSummary(itemCount: candidates.count,
                                       totalBytes: candidates.reduce(0) { $0 + $1.photo.size },
@@ -165,6 +173,8 @@ public final class FolderCommitter {
         var removed: Set<String> = []
         var persistenceFailed = false
         var latestItems: [String: FolderItem] = [:]
+        let grantAccess = FolderLocationGrantAccess(grants: grants, port: trashPort)
+        defer { grantAccess.stop() }
         let ports = CommitPorts<FolderItem, [FolderHistoryRecord]>(
             fetchLive: { ids in
                 latestItems = Dictionary(uniqueKeysWithValues: ids.compactMap { id in
@@ -209,7 +219,7 @@ public final class FolderCommitter {
             deleteReporting: { targets in
                 for (_, item) in targets {
                     guard let index = pending.firstIndex(where: { $0.itemID == item.id }) else { continue }
-                    let outcome = self.remove(item, index: index, pending: &pending)
+                    let outcome = self.remove(item, index: index, pending: &pending, grantAccess: grantAccess)
                     if let failure = outcome.failure {
                         callbacks.onRemovalFailed?(FolderRemovalFailure(itemID: item.id, reason: failure))
                     } else { removed.insert(item.id) }
@@ -232,7 +242,9 @@ public final class FolderCommitter {
         for member in item.members {
             let volume = volumeProbe(member.url)
             guard volume.volumeKey == member.volumeKey else { return .volumeUnavailable(member.volumeKey) }
-            if case .scanOnly(let reason) = volume.capability { return .scanOnly(member.volumeKey, reason) }
+            if case .scanOnly(let reason) = trashPort.capability(volume, at: member.url, grants: grants) {
+                return .scanOnly(member.volumeKey, reason)
+            }
         }
         return nil
     }
@@ -278,27 +290,43 @@ public final class FolderCommitter {
                           members: members, directoryURL: scanned.directoryURL, folderKey: scanned.folderKey)
     }
 
-    private func remove(_ item: FolderItem, index: Int, pending: inout [FolderHistoryRecord])
+    private func remove(_ item: FolderItem, index: Int, pending: inout [FolderHistoryRecord],
+                        grantAccess: FolderLocationGrantAccess)
         -> (failure: FolderRemovalFailureReason?, stop: Bool) {
         if let reason = liveFailure(item) { return (.liveCheck(reason), false) }
         guard let sidecars = try? sidecars(item),
               sidecars.allSatisfy({ sidecar in item.members.contains { $0.url == sidecar } }) else {
             return (.liveCheck(.membersChanged(item.id)), false)
         }
+        if let missing = grantAccess.missing(for: item.members.map(\.url)) {
+            return (.locationGrantMissing(missing), false)
+        }
         var moved: [Int] = []
+        var accessed: [Int: FolderResolvedItem] = [:]
+        defer { accessed.values.forEach { $0.stopAccessing() } }
         var failure: FolderRemovalFailureReason?
         var stop = false
         for memberIndex in pending[index].members.indices {
             let member = pending[index].members[memberIndex]
             do {
-                let result = try trashPort.trash(member.originalURL)
+                let outcome = try trashPort.trashRecording(member.originalURL)
+                let result = outcome.url
+                var trashed = member
+                trashed.trashURL = result
+                trashed.trashBookmark = outcome.bookmark
+                let usable = trashPort.usableTrash(trashed)
+                accessed[memberIndex] = usable?.item
+                let verifiedURL = usable?.item.url
                 // Never roll back an unrelated file returned by a faulty port.
-                let liveResult = result.flatMap { try? FolderMember.read(at: $0) }
+                let liveResult = usable?.live
                 let sameFile = liveResult.map { $0.fileID == member.fileID && $0.size == member.size
                     && $0.modificationDate == member.modificationDate } == true
-                pending[index].members[memberIndex].trashURL = sameFile ? result : nil
+                pending[index].members[memberIndex].trashURL = sameFile ? verifiedURL : nil
+                pending[index].members[memberIndex].trashBookmark = outcome.bookmark
                 if sameFile, !folderPathExists(member.originalURL) { moved.append(memberIndex) }
-                guard validateTrashResult(sourceVolumeKey: item.volumeKey, resultingURL: result),
+                guard trashPort.validateResult(member.originalURL, result),
+                      trashPort.validateResult(member.originalURL, verifiedURL),
+                      validateTrashResult(sourceVolumeKey: item.volumeKey, resultingURL: verifiedURL),
                       sameFile, !folderPathExists(member.originalURL) else {
                     failure = .invalidTrashResult(result); break
                 }

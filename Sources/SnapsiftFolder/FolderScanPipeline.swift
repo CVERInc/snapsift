@@ -48,7 +48,7 @@ public struct FolderScanResult {
     public let groups: [ReviewGroup]
     public let exactGroupIDs: Set<ReviewGroup.ID>
     public let crossFolderDuplicates: [FolderCrossFolderDuplicate]
-    public let roots: [FolderScannedRoot]
+    public internal(set) var roots: [FolderScannedRoot]
     public let issues: [FolderEnumerationIssue]
     public let primaryHashes: [String: String]
     public let uniqueMetadataWithheld: Int

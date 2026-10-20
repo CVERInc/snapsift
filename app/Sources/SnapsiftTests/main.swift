@@ -2778,6 +2778,18 @@ do {
     }
 }
 
+folderTrashLocationTests(check)
+folderLocationGrantClassificationTests(check)
+await folderLocationGrantCommitTests(check)
+await folderLocationGrantHistoryTests(check)
+await folderLocationGrantSessionTests(check)
+await folderICloudTrashBookmarkTests(check)
+await folderTrashDirectRouteTests(check)
+await folderTrashRestoreIdentityTests(check)
+folderTrashStorageGroupProbeTests(check)
+await folderTrashLocationPortTests(check)
+await folderTrashLookAlikePortTests(check)
+await folderTrashLocationSessionTests(check)
 folderAppIntegrationTests(check)
 folderReviewFormatTests(check)
 reviewAlbumNamesTests(check)
@@ -3453,6 +3465,7 @@ private func checkFolderSessionMessages() {
               "folder notice outcomes preserve scan, removal and Put Back messages in \(language.rawValue)")
         let putBack: [(FolderPutBackProblem, String)] = [
             (.unavailable(.trashMissing), t.folderHistoryUnavailable(.trashMissing)),
+            (.locationGrantNeeded(url), t.folderLocationGrantNeeded),
             (.conflict([url]), t.folderPutBackConflict([url])), (.parentMissing([url]), t.folderPutBackParentMissing([url])),
             (.failed("detail"), t.folderPutBackFailed("detail")),
             (.rollbackFailed([url], "detail"), t.folderPutBackPartial([url], detail: "detail")),

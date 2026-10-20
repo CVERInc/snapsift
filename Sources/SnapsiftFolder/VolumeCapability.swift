@@ -9,17 +9,26 @@ public struct VolumeFacts: Equatable, Sendable {
     public let mntRdOnly: Bool?
     public let fileSystemType: String?
     public let isRootFileSystem: Bool?
+    public let path: String?
+    public let isUbiquitousItem: Bool?
+    public let fileProviderStorageGroup: String?
 
     public init(isLocal: Bool? = nil,
                 isReadOnly: Bool? = nil,
                 mntRdOnly: Bool? = nil,
                 fileSystemType: String? = nil,
-                isRootFileSystem: Bool? = nil) {
+                isRootFileSystem: Bool? = nil,
+                path: String? = nil,
+                isUbiquitousItem: Bool? = nil,
+                fileProviderStorageGroup: String? = nil) {
         self.isLocal = isLocal
         self.isReadOnly = isReadOnly
         self.mntRdOnly = mntRdOnly
         self.fileSystemType = fileSystemType
         self.isRootFileSystem = isRootFileSystem
+        self.path = path
+        self.isUbiquitousItem = isUbiquitousItem
+        self.fileProviderStorageGroup = fileProviderStorageGroup
     }
 }
 
@@ -28,6 +37,8 @@ public enum VolumeCapabilityReason: Equatable, Sendable {
     case readOnly
     case unsupportedFilesystemType
     case signalsUnavailable
+    case systemTrashUnconfirmed
+    case locationGrantNeeded
 }
 
 public enum VolumeCapability: Equatable, Sendable {
@@ -68,6 +79,68 @@ public func classifyVolume(_ facts: VolumeFacts) -> VolumeCapability {
     return .removalSupported
 }
 
+/// iOS Trash support is location-specific, even on one writable APFS volume.
+public func classifyTrashLocation(_ facts: VolumeFacts,
+                                  grantStatus: FolderLocationGrantStatus = .notAsked) -> VolumeCapability {
+    let volume = classifyVolume(facts)
+    guard volume == .removalSupported else { return volume }
+    if let path = facts.path, path.hasPrefix("/"),
+       iCloudDriveRoot(at: URL(fileURLWithPath: path)) != nil {
+        return facts.isUbiquitousItem != false ? .removalSupported : .scanOnly(.systemTrashUnconfirmed)
+    }
+    guard facts.isUbiquitousItem != true, let path = facts.path, path.hasPrefix("/"),
+          fileProviderStorageRoot(at: URL(fileURLWithPath: path)) != nil else {
+        return .scanOnly(.systemTrashUnconfirmed)
+    }
+    if let group = facts.fileProviderStorageGroup,
+       group != "group.com.apple.FileProvider.LocalStorage" {
+        return .scanOnly(.systemTrashUnconfirmed)
+    }
+    // When the identity cannot be read, a legacy third-party provider with the
+    // same storage shape is indistinguishable. The final authority is each
+    // trashItem result: validateTrashLocation requires this root's .Trash or
+    // removal fails. Rollback only attempts to restore the identified original;
+    // no unrelated item moves.
+    return grantStatus == .declined ? .scanOnly(.locationGrantNeeded) : .removalSupported
+}
+
+func folderLocationComponents(_ url: URL) -> [String] {
+    var components = url.standardizedFileURL.pathComponents
+    if components.count > 1, components[1] == "private" { components.remove(at: 1) }
+    return components
+}
+
+func fileProviderStorageRoot(at url: URL) -> URL? {
+    guard url.isFileURL else { return nil }
+    let components = folderLocationComponents(url)
+    guard !components.contains("Mobile Documents"), components.count >= 6 else { return nil }
+    for index in 1...(components.count - 5) {
+        if Array(components[index..<(index + 3)]) == ["Containers", "Shared", "AppGroup"],
+           components[index + 4] == "File Provider Storage" {
+            // The storage root itself is pickable, as well as folders below it.
+            return URL(fileURLWithPath: NSString.path(withComponents: Array(components.prefix(index + 5))))
+        }
+    }
+    return nil
+}
+
+func iCloudDriveRoot(at url: URL) -> URL? {
+    guard url.isFileURL else { return nil }
+    let components = folderLocationComponents(url)
+    guard components.count >= 4 else { return nil }
+    for index in 1...(components.count - 3) {
+        if Array(components[index..<(index + 3)]) == ["Library", "Mobile Documents", "com~apple~CloudDocs"] {
+            return URL(fileURLWithPath: NSString.path(withComponents: Array(components.prefix(index + 3))))
+        }
+    }
+    return nil
+}
+
+func trashRoot(at url: URL) -> URL? {
+    if let storage = fileProviderStorageRoot(at: url) { return storage.appendingPathComponent(".Trash") }
+    return iCloudDriveRoot(at: url)?.deletingLastPathComponent().appendingPathComponent(".Trash")
+}
+
 /// Opaque identity for a mounted volume, suitable for same-volume checks.
 public struct VolumeKey: Hashable, Codable, Sendable {
     public let rawValue: String
@@ -84,23 +157,36 @@ public struct VolumeProbeResult {
     public let displayName: String?
     public let volumeURL: URL?
 
-    public var capability: VolumeCapability { classifyVolume(facts) }
+    public let capability: VolumeCapability
 
     public init(facts: VolumeFacts,
                 volumeKey: VolumeKey?,
                 displayName: String?,
                 volumeURL: URL?) {
+        #if os(iOS)
+        let capability = classifyTrashLocation(facts)
+        #else
+        let capability = classifyVolume(facts)
+        #endif
+        self.init(facts: facts, volumeKey: volumeKey, displayName: displayName,
+                  volumeURL: volumeURL, capability: capability)
+    }
+
+    init(facts: VolumeFacts, volumeKey: VolumeKey?, displayName: String?,
+         volumeURL: URL?, capability: VolumeCapability) {
         self.facts = facts
         self.volumeKey = volumeKey
         self.displayName = displayName
         self.volumeURL = volumeURL
+        self.capability = capability
     }
 }
 
 /// Reads Foundation volume properties and the mounted filesystem flags/type.
-/// Any unavailable signal stays nil, which makes the classifier return
-/// scan-only.
+/// Unavailable signals stay nil; missing required volume signals classify as
+/// scan-only. Storage group metadata is captured when readable on any platform.
 public func probeVolume(at url: URL) -> VolumeProbeResult {
+    let storageGroup = readFileProviderStorageGroup(at: url)
     let keys: Set<URLResourceKey> = [
         .volumeIsLocalKey,
         .volumeIsReadOnlyKey,
@@ -109,10 +195,11 @@ public func probeVolume(at url: URL) -> VolumeProbeResult {
         .volumeUUIDStringKey,
         .volumeIdentifierKey,
         .volumeNameKey,
+        .isUbiquitousItemKey,
     ]
 
     guard let values = try? url.resourceValues(forKeys: keys) else {
-        return VolumeProbeResult(facts: VolumeFacts(), volumeKey: nil,
+        return VolumeProbeResult(facts: VolumeFacts(fileProviderStorageGroup: storageGroup), volumeKey: nil,
                                  displayName: nil, volumeURL: nil)
     }
 
@@ -123,7 +210,7 @@ public func probeVolume(at url: URL) -> VolumeProbeResult {
     // which would make every startup-volume folder scan-only.
     guard let mountedFacts = readMountedFileSystem(at: url) else {
         return VolumeProbeResult(
-            facts: VolumeFacts(),
+            facts: VolumeFacts(fileProviderStorageGroup: storageGroup),
             volumeKey: makeVolumeKey(uuidString: values.volumeUUIDString,
                                      identifier: values.volumeIdentifier),
             displayName: values.volumeName,
@@ -136,7 +223,10 @@ public func probeVolume(at url: URL) -> VolumeProbeResult {
         isReadOnly: values.volumeIsReadOnly,
         mntRdOnly: mountedFacts.isReadOnly,
         fileSystemType: mountedFacts.fileSystemType,
-        isRootFileSystem: values.volumeIsRootFileSystem
+        isRootFileSystem: values.volumeIsRootFileSystem,
+        path: url.isFileURL ? url.standardizedFileURL.path : nil,
+        isUbiquitousItem: values.isUbiquitousItem,
+        fileProviderStorageGroup: storageGroup
     )
     return VolumeProbeResult(
         facts: facts,
@@ -145,6 +235,16 @@ public func probeVolume(at url: URL) -> VolumeProbeResult {
         displayName: values.volumeName,
         volumeURL: volumeURL
     )
+}
+
+private func readFileProviderStorageGroup(at url: URL) -> String? {
+    guard let root = fileProviderStorageRoot(at: url) else { return nil }
+    let metadataURL = root.deletingLastPathComponent()
+        .appendingPathComponent(".com.apple.mobile_container_manager.metadata.plist")
+    guard let data = try? Data(contentsOf: metadataURL),
+          let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+          let metadata = plist as? [String: Any] else { return nil }
+    return metadata["MCMMetadataIdentifier"] as? String
 }
 
 private func makeVolumeKey(uuidString: String?, identifier: Any?) -> VolumeKey? {

@@ -66,6 +66,7 @@ extension FolderPutBackProblem {
     func message(_ t: L10n) -> String {
         switch self {
         case .unavailable(let reason): return t.folderHistoryUnavailable(reason)
+        case .locationGrantNeeded: return t.folderLocationGrantNeeded
         case .conflict(let urls): return t.folderPutBackConflict(urls)
         case .parentMissing(let urls): return t.folderPutBackParentMissing(urls)
         case .failed(let detail): return t.folderPutBackFailed(detail)
