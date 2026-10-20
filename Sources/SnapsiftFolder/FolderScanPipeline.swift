@@ -34,12 +34,14 @@ public struct FolderScanResult {
     public internal(set) var downloadedFiles: [FolderDownloadedFile] = []
     public var downloadedURLs: Set<URL> { Set(downloadedFiles.map(\.url)) }
     var ubiquityPort: FolderUbiquityPort = .system
+    var downloadStore: FolderDownloadStore? = nil
 
     /// Evicts only this scan's recorded downloads, with per-file live gates.
     /// Keep the result/accesses alive until this call returns.
     public func evictDownloadedFiles() async -> [FolderICloudEvictionResult] {
         await Task.detached(priority: .utility) {
-            FolderICloudAccess.evict(downloadedFiles, port: ubiquityPort)
+            if let downloadStore { return downloadStore.evict(downloadedFiles, port: ubiquityPort) }
+            return FolderICloudAccess.evict(downloadedFiles, port: ubiquityPort)
         }.value
     }
     public let items: [FolderItem]
@@ -108,7 +110,8 @@ public func seedFolderExactRejections(
 @MainActor
 public enum FolderScanPipeline {
     public static func scan(roots: [URL], options: FolderScanOptions = FolderScanOptions(),
-                            ubiquityPort: FolderUbiquityPort = .system) async throws
+                            ubiquityPort: FolderUbiquityPort = .system,
+                            downloadStore: FolderDownloadStore? = nil) async throws
         -> FolderScanResult {
         let accesses = try roots.map { try FolderAccess(url: $0) }
         var succeeded = false
@@ -117,13 +120,23 @@ public enum FolderScanPipeline {
         var items: [FolderItem] = []
         var issues: [FolderEnumerationIssue] = []
         let cloud = FolderICloudAccess(policy: options.iCloudDownloadPolicy, port: ubiquityPort,
-                                      timeout: options.iCloudDownloadTimeout)
+                                      timeout: options.iCloudDownloadTimeout, downloadStore: downloadStore,
+                                      downloadRoots: try downloadStore?.prepare(roots: roots) ?? [:])
+        defer { if downloadStore != nil { _ = cloud.downloadedFiles } }
         for access in accesses {
             try Task.checkCancellation()
             let root = access.url
-            let enumeration = try await Task.detached(priority: .utility) {
+            let enumerationTask = Task.detached(priority: .utility) {
                 try FolderEnumerator.enumerate(root: root, cloud: cloud)
-            }.value
+            }
+            let enumeration: FolderEnumerationResult
+            if downloadStore != nil {
+                enumeration = try await withTaskCancellationHandler {
+                    try await enumerationTask.value
+                } onCancel: { enumerationTask.cancel() }
+            } else {
+                enumeration = try await enumerationTask.value
+            }
             scannedRoots.append(FolderScannedRoot(url: root, volume: probeVolume(at: root)))
             items.append(contentsOf: enumeration.items)
             issues.append(contentsOf: enumeration.issues)
@@ -210,8 +223,10 @@ public enum FolderScanPipeline {
         let finalPhotos = Dictionary(uniqueKeysWithValues: seeded.groups.flatMap { $0.photos }.map { ($0.uuid, $0) })
         items = items.map { $0.with(photo: finalPhotos[$0.id] ?? $0.photo) }
         await LookAlikeScanner.clearCache()
+        let downloadedFiles = cloud.downloadedFiles
+        if let error = downloadStore?.persistenceError { throw error }
         succeeded = true
-        return FolderScanResult(downloadedFiles: cloud.downloadedFiles, ubiquityPort: ubiquityPort,
+        return FolderScanResult(downloadedFiles: downloadedFiles, ubiquityPort: ubiquityPort, downloadStore: downloadStore,
                                 items: items, groups: seeded.groups, exactGroupIDs: exact,
                                 crossFolderDuplicates: cross, roots: scannedRoots, issues: issues,
                                 primaryHashes: digests, uniqueMetadataWithheld: seeded.uniqueMetadataWithheld,

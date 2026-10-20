@@ -33,6 +33,8 @@ public final class FolderLibrarySession {
     public var focusedFrame: String? { willSet { onChange?() } }
     public let bookmarks: FolderBookmarkStore
     public let history: FolderHistoryStore
+    public let downloadStore: FolderDownloadStore?
+    public var downloadedFiles: [FolderDownloadedFile] { downloadStore?.downloadedFiles ?? result?.downloadedFiles ?? [] }
     private let committer: FolderCommitter
     private let trashPort: FolderTrashPort
     private var loaded = false
@@ -46,9 +48,10 @@ public final class FolderLibrarySession {
 
     /// Apps must supply their own bookmark and history locations.
     public init(bookmarks: FolderBookmarkStore, history: FolderHistoryStore,
+                downloadStore: FolderDownloadStore? = nil,
                 trashPort: FolderTrashPort? = nil,
                 volumeProbe: @escaping (URL) -> VolumeProbeResult = probeVolume,
-                scan: @escaping ([URL]) async throws -> FolderScanResult = { try await FolderScanPipeline.scan(roots: $0) },
+                scan: (([URL]) async throws -> FolderScanResult)? = nil,
                 metadata: @escaping ([FolderItem]) async -> [String: LibraryMetadata] = { items in
                     await Task.detached(priority: .utility) {
                         await FolderMetadataProbe(items: items).metadata(for: items.map(\.id))
@@ -56,10 +59,12 @@ public final class FolderLibrarySession {
                 }) {
         self.bookmarks = bookmarks
         self.history = history
+        self.downloadStore = downloadStore
         let port = trashPort ?? .system
         self.trashPort = port
         self.committer = FolderCommitter(history: history, trashPort: port, volumeProbe: volumeProbe)
-        self.scan = scan
+        // Custom scan closures must pass this same store to their pipeline.
+        self.scan = scan ?? { try await FolderScanPipeline.scan(roots: $0, downloadStore: downloadStore) }
         self.metadata = metadata
     }
     // FolderAccess balances remaining scopes when the retained result releases.
@@ -109,8 +114,11 @@ public final class FolderLibrarySession {
             for url in urls {
                 let existing = folders.first { $0.url?.standardizedFileURL == url.standardizedFileURL }
                 if let existing, !existing.unavailable { continue }
-                try bookmarks.add(url)
-                if let existing { try bookmarks.remove(existing.id) }
+                let added = try bookmarks.add(url)
+                if let existing {
+                    try bookmarks.remove(existing.id)
+                    try downloadStore?.moveFolder(existing.id, to: added.id)
+                }
             }
         } catch { errorOutcome = .bookmark(error) }
         refreshFolders()
@@ -120,6 +128,7 @@ public final class FolderLibrarySession {
         guard !isScanning, !isBusy else { return }
         do {
             try bookmarks.remove(id)
+            try downloadStore?.forgetFolder(id)
             discardResult()
             refreshFolders()
         } catch { errorOutcome = .bookmark(error) }

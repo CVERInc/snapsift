@@ -60,11 +60,16 @@ public struct FolderUbiquityPort: @unchecked Sendable {
 
 private enum FolderEvictionError: Error { case changed }
 
-public struct FolderDownloadedFile: Sendable {
+public struct FolderDownloadedFile: Codable, Sendable {
     public let url: URL
     /// Resource-value size after the file becomes local; nil means unavailable.
     public let size: Int?
-    fileprivate let member: FolderMember
+    let member: FolderMember
+    let receiptID: UUID
+
+    init(url: URL, size: Int?, member: FolderMember, receiptID: UUID = UUID()) {
+        self.url = url; self.size = size; self.member = member; self.receiptID = receiptID
+    }
 }
 
 public struct FolderICloudEvictionResult: Sendable {
@@ -87,10 +92,15 @@ final class FolderICloudAccess: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [URL: FolderDownloadedFile] = [:]
     private var pending: Set<URL> = []
+    private let downloadStore: FolderDownloadStore?
+    private let downloadRoots: [URL: UUID]
 
-    init(policy: ICloudDownloadPolicy, port: FolderUbiquityPort, timeout: TimeInterval) {
+    init(policy: ICloudDownloadPolicy, port: FolderUbiquityPort, timeout: TimeInterval,
+         downloadStore: FolderDownloadStore? = nil, downloadRoots: [URL: UUID] = [:]) {
         self.policy = policy; self.port = port
         self.timeout = timeout.isFinite ? max(0, timeout) : 30
+        self.downloadStore = downloadStore
+        self.downloadRoots = downloadRoots
     }
 
     var downloadedFiles: [FolderDownloadedFile] {
@@ -98,17 +108,20 @@ final class FolderICloudAccess: @unchecked Sendable {
         // Include those completions in the final receipt even though their
         // photo item was skipped at enumeration's deadline.
         lock.lock(); let candidates = pending; lock.unlock()
-        for url in candidates { _ = recordIfLocal(url) }
+        for url in candidates { _ = try? recordIfLocal(url) }
         lock.lock(); defer { lock.unlock() }
         return records.values.sorted { $0.url.path < $1.url.path }
     }
 
-    private func recordIfLocal(_ url: URL) -> Bool {
+    private func recordIfLocal(_ url: URL) throws -> Bool {
         guard let state = try? port.state(url), state.isLocal,
               let member = try? FolderMember.read(at: url) else { return false }
         lock.lock(); defer { lock.unlock() }
         if records[url] == nil {
             records[url] = FolderDownloadedFile(url: url, size: state.fileSize, member: member)
+        }
+        if let downloadStore {
+            try downloadStore.record(records[url]!, roots: downloadRoots)
         }
         pending.remove(url)
         return true
@@ -134,8 +147,11 @@ final class FolderICloudAccess: @unchecked Sendable {
         lock.lock(); pending.insert(url); lock.unlock()
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
         repeat {
-            if Task.isCancelled { throw CancellationError() }
-            if recordIfLocal(url) { return true }
+            if Task.isCancelled {
+                if downloadStore != nil { _ = try recordIfLocal(url) }
+                throw CancellationError()
+            }
+            if try recordIfLocal(url) { return true }
             let remaining = deadline - ProcessInfo.processInfo.systemUptime
             // Foundation cannot cancel a started download. The final receipt
             // checks again; completions after that snapshot are not claimed.
@@ -149,13 +165,17 @@ final class FolderICloudAccess: @unchecked Sendable {
         try prepare(url, placeholder: placeholder) ? nil : FolderEnumerationIssue(url: url, reason: .notOnDevice)
     }
 
-    static func evict(_ files: [FolderDownloadedFile], port: FolderUbiquityPort) -> [FolderICloudEvictionResult] {
+    static func evict(_ files: [FolderDownloadedFile], port: FolderUbiquityPort,
+                      skipNonlocal: Bool = false) -> [FolderICloudEvictionResult] {
         files.map { file in
             let outcome: FolderICloudEvictionResult.Outcome
             do {
                 guard try FolderMember.read(at: file.url) == file.member else { throw FolderEvictionError.changed }
-                if try !port.state(file.url).isUbiquitousItem {
+                let state = try port.state(file.url)
+                if !state.isUbiquitousItem {
                     outcome = .noLongerUbiquitous
+                } else if skipNonlocal && state.downloadingStatus == .notDownloaded {
+                    outcome = .evicted
                 } else {
                     try port.evict(file.member)
                     outcome = .evicted
