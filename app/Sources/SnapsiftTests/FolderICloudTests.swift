@@ -74,6 +74,7 @@ func checkFolderICloudPolicy() async {
         print("  Not verified: Folder pipeline integration requires the LaunchServices UTType registry (unavailable in this sandbox)")
         return
     }
+    checkFolderPlaceholderReadFailures()
     await checkFolderDownloadPipelineCancellation()
     do {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("snapsift-folder-cloud-\(UUID())")
@@ -181,6 +182,70 @@ func checkFolderICloudPolicy() async {
     } catch {
         check(false, "Folder iCloud fixture error: \(error)")
     }
+}
+
+@MainActor
+private func checkFolderPlaceholderReadFailures() {
+    do {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/folder-placeholder-reads-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let document = root.appendingPathComponent(".project.sb3.icloud")
+        let text = root.appendingPathComponent(".notes.txt.icloud")
+        let photo = root.appendingPathComponent(".remote.png.icloud")
+        let companion = root.appendingPathComponent(".paired.XMP.icloud")
+        let paired = root.appendingPathComponent("paired.png")
+        for url in [document, text, photo, companion] { try Data("placeholder".utf8).write(to: url) }
+        try writeCloudFixture(paired)
+        let fake = FakeFolderUbiquity()
+        let placeholders: Set<URL> = [document, text, photo, companion]
+        fake.setCloud(placeholders, missing: placeholders)
+        var stateReads: Set<URL> = []
+        var failPhotoState = true
+        var port = fake.port
+        let state = port.state
+        port.state = { url in
+            stateReads.insert(url)
+            if failPhotoState && url == photo { throw CocoaError(.fileReadNoPermission) }
+            return try state(url)
+        }
+        let cloud = FolderICloudAccess(policy: .localOnly, port: port, timeout: 0)
+        var failedReads: Set<URL> = []
+        let failures = try FolderEnumerator.enumerate(root: root, cloud: cloud, readResourceValues: { url, keys in
+            if placeholders.contains(url) {
+                failedReads.insert(url)
+                throw CocoaError(.fileReadNoPermission)
+            }
+            return try url.resourceValues(forKeys: keys)
+        })
+        check(failures.items.isEmpty && failures.issues.count == 2
+              && Set(failures.issues.map(\.url)) == [photo, companion]
+              && failures.issues.allSatisfy { $0.reason == .unreadable }
+              && failedReads.isSuperset(of: [photo, companion]),
+              "folder placeholder reads: non-photos stay unreported; photo/companion failures report and withhold the pair")
+        check(!failedReads.contains(text),
+              "folder placeholder reads: known non-photo logical extensions are excluded before resource reads")
+        check(!stateReads.contains(document) && !stateReads.contains(text),
+              "folder placeholder reads: excluded non-photos never require an iCloud resource lookup")
+        check(!FolderEnumerator.shouldReportEnumerationError(at: document)
+              && !FolderEnumerator.shouldReportEnumerationError(at: text)
+              && FolderEnumerator.shouldReportEnumerationError(at: photo)
+              && FolderEnumerator.shouldReportEnumerationError(at: companion),
+              "folder enumeration errors: placeholder names preserve photo/companion scope without resource reads")
+
+        failPhotoState = false
+        stateReads.removeAll()
+        let unavailable = try FolderEnumerator.enumerate(root: root, cloud: cloud)
+        check(unavailable.items.isEmpty && unavailable.issues.count == 2
+              && Set(unavailable.issues.map(\.url)) == [root.appendingPathComponent("remote.png"),
+                                                         root.appendingPathComponent("paired.XMP")]
+              && unavailable.issues.allSatisfy { $0.reason == .notOnDevice }
+              && fake.downloadCalls.isEmpty,
+              "folder placeholder scope: readable metadata preserves logical notOnDevice reports and excludes non-photos")
+        check(!stateReads.contains(text),
+              "folder placeholder scope: excluded known non-photos never query iCloud even with readable metadata")
+    } catch { check(false, "Folder placeholder resource-read fixture error: \(error)") }
 }
 
 private func downloadReceipt(_ cloud: FolderICloudAccess, store: FolderDownloadStore,

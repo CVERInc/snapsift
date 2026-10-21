@@ -5,7 +5,7 @@ import ImageIO
 import UniformTypeIdentifiers
 import CryptoKit
 import SnapsiftCore
-import SnapsiftFolder
+@testable import SnapsiftFolder
 import SnapsiftVision
 
 private enum FixtureError: Error { case imageWrite, metadataWrite }
@@ -216,11 +216,120 @@ func checkFolderSource() async {
         check(ambiguous.items.isEmpty && ambiguous.issues.count == 1,
               "folder grouping: ambiguous companion ownership is reported, never split or guessed")
 
+        try checkFolderEnumerationReadFailures(root: root)
         try await checkFolderExactRules(root: root)
         try await checkFolderPipeline(root: root)
     } catch {
         check(false, "folder fixture setup/execution: \(error)")
     }
+}
+
+@MainActor
+private func checkFolderEnumerationReadFailures(root: URL) throws {
+    let cloud = FolderICloudAccess(policy: .localOnly, port: .system, timeout: 0)
+    let nonPhotos = try folder(root, "unreadable-non-photos")
+    let project = nonPhotos.appendingPathComponent("project.sb3")
+    let text = nonPhotos.appendingPathComponent("notes.txt")
+    let unknown = nonPhotos.appendingPathComponent("extensionless")
+    for url in [project, text, unknown] { try Data("document".utf8).write(to: url) }
+    var reads: Set<URL> = []
+    let excluded = try FolderEnumerator.enumerate(root: nonPhotos, cloud: cloud, readResourceValues: { url, _ in
+        reads.insert(url)
+        throw CocoaError(.fileReadNoPermission)
+    })
+    check(excluded.items.isEmpty && excluded.issues.isEmpty,
+          "folder scope: failed resource reads for non-photos produce no items or skipped/unreadable issues")
+    check(!reads.contains(text), "folder scope: known non-photo extensions are excluded before resource reads")
+    check(reads.contains(unknown), "folder scope: a failed unknown-extension fallback is exercised without reporting it")
+    check(!FolderEnumerator.shouldReportEnumerationError(at: project)
+          && !FolderEnumerator.shouldReportEnumerationError(at: text)
+          && !FolderEnumerator.shouldReportEnumerationError(at: unknown),
+          "folder enumeration errors: non-photo and unclassified file names are out of scope")
+
+    let photos = try folder(root, "unreadable-photo")
+    let photo = photos.appendingPathComponent("photo.jpg")
+    try writeFolderImage(photo)
+    var photoReads = 0
+    let unreadable = try FolderEnumerator.enumerate(root: photos, cloud: cloud, readResourceValues: { _, _ in
+        photoReads += 1
+        throw CocoaError(.fileReadNoPermission)
+    })
+    check(photoReads == 1 && unreadable.items.isEmpty && unreadable.issues.count == 1
+          && unreadable.issues[0].url == photo && unreadable.issues[0].reason == .unreadable,
+          "folder scope: a photo resource read failure still reports unreadable")
+    check(FolderEnumerator.shouldReportEnumerationError(at: photo),
+          "folder enumeration errors: photo names remain reportable")
+
+    let siblings = try folder(root, "unreadable-unrelated-sibling")
+    let still = siblings.appendingPathComponent("same.jpg")
+    let unrelated = siblings.appendingPathComponent("same.sb3")
+    try writeFolderImage(still)
+    try Data("project".utf8).write(to: unrelated)
+    let safe = try FolderEnumerator.enumerate(root: siblings, cloud: cloud, readResourceValues: { url, keys in
+        if url == unrelated { throw CocoaError(.fileReadNoPermission) }
+        return try url.resourceValues(forKeys: keys)
+    })
+    check(safe.issues.isEmpty && safe.items.count == 1 && safe.items[0].members.map(\.url) == [still],
+          "folder scope: an unreadable non-photo never becomes a member or withholds its same-stem photo")
+
+    for ext in ["XMP", "AAE", "MOV"] {
+        let paired = try folder(root, "unreadable-companion-\(ext)")
+        let image = paired.appendingPathComponent("paired.jpg")
+        let companion = paired.appendingPathComponent("paired.\(ext)")
+        try writeFolderImage(image)
+        try Data("companion".utf8).write(to: companion)
+        var companionReads = 0
+        let result = try FolderEnumerator.enumerate(root: paired, cloud: cloud, readResourceValues: { url, keys in
+            if url == companion {
+                companionReads += 1
+                throw CocoaError(.fileReadNoPermission)
+            }
+            return try url.resourceValues(forKeys: keys)
+        })
+        check(companionReads == 1 && result.items.isEmpty && result.issues.count == 1
+              && result.issues[0].url == companion && result.issues[0].reason == .unreadable,
+              "folder scope: unreadable \(ext) companion still withholds the whole photo")
+        check(FolderEnumerator.shouldReportEnumerationError(at: companion),
+              "folder enumeration errors: \(ext) companion names remain reportable")
+    }
+
+    let directories = try folder(root, "directory-with-non-photo-extension")
+    let directory = try folder(directories, "album.txt")
+    let nested = directory.appendingPathComponent("nested.jpg")
+    try writeFolderImage(nested)
+    let recursive = try FolderEnumerator.enumerate(root: directories, cloud: cloud)
+    check(recursive.items.map(\.primary.url) == [nested] && recursive.issues.isEmpty,
+          "folder scope: non-photo directory extensions never prevent recursion")
+    let directoryFailure = try FolderEnumerator.enumerate(root: directories, cloud: cloud, readResourceValues: { url, keys in
+        if url == directory { throw CocoaError(.fileReadNoPermission) }
+        return try url.resourceValues(forKeys: keys)
+    })
+    check(directoryFailure.issues.count == 1 && directoryFailure.issues[0].url == directory
+          && directoryFailure.issues[0].reason == .unreadable
+          && FolderEnumerator.shouldReportEnumerationError(at: directory),
+          "folder scope: unreadable directories remain reportable regardless of extension")
+    check(FolderEnumerator.shouldReportEnumerationError(
+        at: directories.appendingPathComponent("missing.txt", isDirectory: true)),
+          "folder enumeration errors: a directory URL remains reportable when its file kind is unavailable")
+
+    let fallbackRoot = try folder(root, "unknown-extension-image")
+    let fallback = fallbackRoot.appendingPathComponent("extensionless")
+    try writeFolderImage(fallback)
+    let typed = try FolderEnumerator.enumerate(root: fallbackRoot, cloud: cloud, readResourceValues: { _, keys in
+        // Borrow a real JPEG's resource type while keeping extensionless image bytes.
+        try photo.resourceValues(forKeys: keys)
+    })
+    check(typed.items.map(\.primary.url) == [fallback] && typed.issues.isEmpty,
+          "folder scope: unknown extensions retain the resource contentType image fallback")
+    let failingCloud = FolderICloudAccess(policy: .localOnly, port: FolderUbiquityPort(state: { _ in
+        throw CocoaError(.fileReadNoPermission)
+    }, startDownload: { _ in }, evict: { _ in }), timeout: 0)
+    let typedFailure = try FolderEnumerator.enumerate(root: fallbackRoot, cloud: failingCloud, readResourceValues: { _, keys in
+        try photo.resourceValues(forKeys: keys)
+    })
+    check(typedFailure.items.isEmpty && typedFailure.issues.count == 1
+          && typedFailure.issues[0].url == fallback && typedFailure.issues[0].reason == .unreadable,
+          "folder scope: images established by contentType still report later read failures")
 }
 
 @MainActor

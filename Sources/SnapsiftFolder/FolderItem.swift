@@ -137,7 +137,11 @@ public enum FolderEnumerator {
                                                            port: ubiquityPort, timeout: downloadTimeout))
     }
 
-    static func enumerate(root: URL, cloud: FolderICloudAccess) throws -> FolderEnumerationResult {
+    // Entry metadata is injectable; root validation and file identity stay real.
+    static func enumerate(root: URL, cloud: FolderICloudAccess,
+                          readResourceValues: (URL, Set<URLResourceKey>) throws -> URLResourceValues = {
+                              try $0.resourceValues(forKeys: $1)
+                          }) throws -> FolderEnumerationResult {
         guard root.isFileURL else { throw FolderSourceError.notLocalDirectory }
         let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey])
         guard rootValues.isDirectory == true,
@@ -148,10 +152,12 @@ public enum FolderEnumerator {
                                       .isPackageKey, .isHiddenKey, .contentTypeKey]
         var issues: [FolderEnumerationIssue] = []
         guard let enumerator = FileManager.default.enumerator(
-            at: root, includingPropertiesForKeys: keys,
+            at: root, includingPropertiesForKeys: [],
             options: [.skipsPackageDescendants],
             errorHandler: { url, _ in
-                issues.append(FolderEnumerationIssue(url: url, reason: .unreadable))
+                if shouldReportEnumerationError(at: url) {
+                    issues.append(FolderEnumerationIssue(url: url, reason: .unreadable))
+                }
                 return true
             }) else { throw FolderSourceError.notLocalDirectory }
         var buckets: [String: [URL]] = [:]
@@ -162,8 +168,18 @@ public enum FolderEnumerator {
         for case let entry as URL in enumerator {
             let entryURL = entry.standardizedFileURL
             if Task.isCancelled { throw CancellationError() }
+            let kind = fileKind(at: entryURL)
+            let namedURL = FolderICloudAccess.placeholderCandidate(for: entryURL) ?? entryURL
+            let namedType = UTType(filenameExtension: namedURL.pathExtension)
+            let namedImage = namedType?.conforms(to: .image) == true
+            let companion = isCompanion(namedURL)
+            // Do not prefetch resource values for unrelated regular files.
+            // Directories still need their hidden/package checks and traversal.
+            if kind == S_IFREG && namedType != nil && !namedImage && !companion { continue }
+            var reportUnreadable = namedImage || companion || kind == S_IFDIR
+                || (kind == nil && entryURL.hasDirectoryPath)
             do {
-                let values = try entryURL.resourceValues(forKeys: Set(keys))
+                let values = try readResourceValues(entryURL, Set(keys))
                 let placeholderURL = values.isSymbolicLink != true && values.isRegularFile == true
                     ? cloud.logicalURL(for: entryURL) : nil
                 let url = placeholderURL ?? entryURL
@@ -176,10 +192,12 @@ public enum FolderEnumerator {
                 guard values.isRegularFile == true else { continue }
                 // Extension UTType first also admits RAW companions whose
                 // bytes cannot be decoded (their JPEG primary supplies facts).
-                let type = UTType(filenameExtension: url.pathExtension) ?? values.contentType
+                let type = namedType ?? values.contentType
                 let isImage = type?.conforms(to: .image) == true
-                let companion = ["mov", "xmp", "aae"].contains(url.pathExtension.lowercased())
                 guard isImage || companion else { continue }
+                // An unknown extension may be established as an image by its
+                // resource type, but a failed lookup alone cannot establish scope.
+                reportUnreadable = true
                 guard seenURLs.insert(url).inserted else { continue }
                 if isImage { types[url] = type }
                 let key = url.deletingLastPathComponent().path + "/"
@@ -194,6 +212,7 @@ public enum FolderEnumerator {
             } catch let error as FolderDownloadPersistenceError {
                 throw error
             } catch {
+                guard reportUnreadable else { continue }
                 issues.append(FolderEnumerationIssue(url: entryURL, reason: .unreadable))
                 // Failed resource reads must not leave a sibling image eligible
                 // without its companion's edit/motion facts.
@@ -252,6 +271,24 @@ public enum FolderEnumerator {
         return FolderEnumerationResult(items: items.sorted {
             $0.photo.takenAt == $1.photo.takenAt ? $0.id < $1.id : $0.photo.takenAt < $1.photo.takenAt
         }, issues: issues)
+    }
+
+    static func shouldReportEnumerationError(at url: URL) -> Bool {
+        let kind = fileKind(at: url)
+        if kind == S_IFDIR || (kind == nil && url.hasDirectoryPath) { return true }
+        let logical = FolderICloudAccess.placeholderCandidate(for: url) ?? url
+        return UTType(filenameExtension: logical.pathExtension)?.conforms(to: .image) == true
+            || isCompanion(logical)
+    }
+
+    private static func fileKind(at url: URL) -> mode_t? {
+        var info = stat()
+        guard url.path.withCString({ lstat($0, &info) }) == 0 else { return nil }
+        return info.st_mode & S_IFMT
+    }
+
+    private static func isCompanion(_ url: URL) -> Bool {
+        ["mov", "xmp", "aae"].contains(url.pathExtension.lowercased())
     }
 
     private static func primaryPriority(_ type: UTType) -> Int {

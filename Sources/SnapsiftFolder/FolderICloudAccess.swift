@@ -132,9 +132,16 @@ final class FolderICloudAccess: @unchecked Sendable {
     /// A placeholder is metadata, never image bytes. Confirm ubiquity as well as
     /// the naming convention so similarly named ordinary hidden files stay hidden.
     func logicalURL(for url: URL) -> URL? {
-        let name = url.lastPathComponent
-        guard name.hasPrefix("."), name.hasSuffix(".icloud"), name.count > 8,
+        guard let logical = Self.placeholderCandidate(for: url),
               (try? port.state(url).isUbiquitousItem) == true else { return nil }
+        return logical
+    }
+
+    /// Name-only candidate for scope filtering; actual placeholders still need
+    /// the ubiquity confirmation in logicalURL(for:).
+    static func placeholderCandidate(for url: URL) -> URL? {
+        let name = url.lastPathComponent
+        guard name.hasPrefix("."), name.hasSuffix(".icloud"), name.count > 8 else { return nil }
         return url.deletingLastPathComponent().appendingPathComponent(String(name.dropFirst().dropLast(7)))
     }
 
