@@ -117,8 +117,20 @@ public struct FolderMetadataProbe: UniqueMetadataProbe {
         guard url.isFileURL, let type = fileSystemType(url), type == "apfs" || type == "hfs" else {
             return FolderMetadataSignals(hasTags: nil, hasComment: nil)
         }
+        let tags = plistHasContent(url, name: "com.apple.metadata:_kMDItemUserTags")
+        // Legacy Finder color labels can exist without the tags plist.
+        let label: Bool? = url.path.withCString { path in
+            var data = [UInt8](repeating: 0, count: 32)
+            let count = data.withUnsafeMutableBytes {
+                getxattr(path, "com.apple.FinderInfo", $0.baseAddress, 32, 0, XATTR_NOFOLLOW)
+            }
+            if count < 0 { return errno == ENOATTR ? false : nil }
+            guard count == 32 else { return nil }
+            let flags = UInt16(data[8]) << 8 | UInt16(data[9])
+            return flags & 0x000e != 0
+        }
         return FolderMetadataSignals(
-            hasTags: plistHasContent(url, name: "com.apple.metadata:_kMDItemUserTags"),
+            hasTags: tags == true || label == true ? true : (tags == nil || label == nil ? nil : false),
             hasComment: plistHasContent(url, name: "com.apple.metadata:kMDItemFinderComment"))
     }
 

@@ -229,16 +229,29 @@ private func checkFolderIOSMetadata(root: URL) throws {
     let directory = try folder(root, "ios-metadata")
     let plain = directory.appendingPathComponent("plain.jpg")
     let tagged = directory.appendingPathComponent("tagged.jpg")
+    let labeled = directory.appendingPathComponent("labeled.jpg")
+    let unlabeled = directory.appendingPathComponent("unlabeled.jpg")
     let commented = directory.appendingPathComponent("commented.jpg")
     let empty = directory.appendingPathComponent("empty.jpg")
     let unexpected = directory.appendingPathComponent("unexpected.jpg")
     let malformed = directory.appendingPathComponent("malformed.jpg")
     let missing = directory.appendingPathComponent("missing.jpg")
-    for url in [plain, tagged, commented, empty, unexpected, malformed] {
+    for url in [plain, tagged, labeled, unlabeled, commented, empty, unexpected, malformed] {
         try Data("metadata fixture".utf8).write(to: url)
     }
     let tagsKey = "com.apple.metadata:_kMDItemUserTags"
     let commentKey = "com.apple.metadata:kMDItemFinderComment"
+    for (url, color) in [(labeled, UInt8(0x0c)), (unlabeled, UInt8(0))] {
+        var data = Data(count: 32)
+        data[0] = 0x54
+        data[9] = color
+        let status = url.path.withCString { path in
+            data.withUnsafeBytes {
+                setxattr(path, "com.apple.FinderInfo", $0.baseAddress, data.count, 0, XATTR_NOFOLLOW)
+            }
+        }
+        guard status == 0 else { throw FixtureError.metadataWrite }
+    }
     try setFinderPlist(["Red\n0"], at: tagged, name: tagsKey)
     try setFinderPlist("A Finder comment", at: commented, name: commentKey)
     try setFinderPlist([String](), at: empty, name: tagsKey)
@@ -255,6 +268,7 @@ private func checkFolderIOSMetadata(root: URL) throws {
     }
     for type in ["apfs", "hfs"] {
         for (url, tags, comment) in [(plain, false, false), (tagged, true, false),
+                                     (labeled, true, false), (unlabeled, false, false),
                                      (commented, false, true), (empty, false, false)] {
             let signals = FolderMetadataProbe.readIOSSignals(at: url, fileSystemType: { _ in type })
             check(signals == FolderMetadataSignals(hasTags: tags, hasComment: comment),
@@ -267,7 +281,7 @@ private func checkFolderIOSMetadata(root: URL) throws {
         }
     }
     for type: String? in ["exfat", "msdos", "smbfs", "fskit", "unknown", nil] {
-        for url in [plain, tagged, commented] {
+        for url in [plain, tagged, labeled, commented] {
             let signals = FolderMetadataProbe.readIOSSignals(at: url, fileSystemType: { _ in type })
             check(signals == FolderMetadataSignals(hasTags: nil, hasComment: nil),
                   "folder iOS metadata: \(type ?? "unreadable") \(url.lastPathComponent) stays undetermined")
@@ -275,7 +289,7 @@ private func checkFolderIOSMetadata(root: URL) throws {
     }
     check(FolderMetadataProbe.readIOSSignals(at: missing)
           == FolderMetadataSignals(hasTags: nil, hasComment: nil),
-          "folder iOS metadata: a real statfs failure stays undetermined")
+          "folder iOS metadata: a missing file through the default lookup stays undetermined")
     let mounted = readMountedFileSystem(at: plain)?.fileSystemType
     check(mounted != nil, "folder iOS metadata: statfs reads the fixture's own volume")
     let expected = mounted == "apfs" || mounted == "hfs" ? false : nil
