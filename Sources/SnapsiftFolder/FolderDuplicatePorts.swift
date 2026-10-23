@@ -107,12 +107,21 @@ public struct FolderMetadataProbe: UniqueMetadataProbe {
             hasTags: tags,
             hasComment: plistHasContent(url, name: "com.apple.metadata:kMDItemFinderComment"))
         #else
-        // Finder's tag API is unavailable on iOS; never invent absence.
-        return FolderMetadataSignals(hasTags: nil, hasComment: nil)
+        // iOS may hide AppleDouble metadata, so only native-xattr volumes can establish absence.
+        return readIOSSignals(at: url)
         #endif
     }
 
-    #if os(macOS)
+    static func readIOSSignals(at url: URL,
+                               fileSystemType: (URL) -> String? = { readMountedFileSystem(at: $0)?.fileSystemType }) -> FolderMetadataSignals {
+        guard url.isFileURL, let type = fileSystemType(url), type == "apfs" || type == "hfs" else {
+            return FolderMetadataSignals(hasTags: nil, hasComment: nil)
+        }
+        return FolderMetadataSignals(
+            hasTags: plistHasContent(url, name: "com.apple.metadata:_kMDItemUserTags"),
+            hasComment: plistHasContent(url, name: "com.apple.metadata:kMDItemFinderComment"))
+    }
+
     private static func plistHasContent(_ url: URL, name: String) -> Bool? {
         guard url.isFileURL else { return nil }
         return url.path.withCString { path in
@@ -135,5 +144,4 @@ public struct FolderMetadataProbe: UniqueMetadataProbe {
             }
         }
     }
-    #endif
 }

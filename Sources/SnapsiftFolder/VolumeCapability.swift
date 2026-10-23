@@ -267,7 +267,7 @@ private func makeVolumeKey(uuidString: String?, identifier: Any?) -> VolumeKey? 
     return nil
 }
 
-private func readMountedFileSystem(at url: URL) -> (isReadOnly: Bool, fileSystemType: String)? {
+func readMountedFileSystem(at url: URL) -> (isReadOnly: Bool, fileSystemType: String)? {
     var info = statfs()
     let result = url.path.withCString { statfs($0, &info) }
     guard result == 0 else { return nil }
