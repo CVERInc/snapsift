@@ -5,6 +5,8 @@ import SnapsiftCore
 public enum ScanMode: String, Sendable, CaseIterable {
     case burst, lookAlikes, similarSets
 
+    /// Max dHash Hamming distance. For burst frames: generous enough to keep
+    /// real bursts (slight motion) together, tight enough to split unrelated shots.
     public var dHashDistance: Int {
         switch self {
         case .burst, .similarSets: return 14
@@ -13,6 +15,13 @@ public enum ScanMode: String, Sendable, CaseIterable {
     }
 
     /// Burst uses this for its confident gate; cross-time modes use it to group.
+    /// Burst: before a frame is *ever* pre-marked for deletion, the cluster must
+    /// also be neurally near-identical, not just dHash-close (dHash can't tell
+    /// "same framing, subject moved" from a true duplicate); a moved-subject pair
+    /// (≈0.2+) falls to "you decide". Tight on purpose — wrongly deleting a keeper
+    /// breaks trust, while missing a duplicate is harmless. Similar sets use the
+    /// "same scene, different moment" band, looser than look-alikes (≈identical
+    /// only), so pose/angle changes still group (cats ≈0.3 land here).
     public var featureDistance: Float {
         switch self {
         case .burst: return 0.10
@@ -36,9 +45,14 @@ public enum ScanMode: String, Sendable, CaseIterable {
 
     /// Separate stages preserve source progress and cancellation boundaries.
     public enum Burst {
+        // Clustering knobs (match the Python defaults).
         public static let gapSec = 3.0
         public static let sizeTol = 0.10
         public static let maxSpan = 30.0
+        /// A cluster whose internal spread is at most this is a confident,
+        /// near-identical burst (pre-marked for deletion). Tuned on real avalanche
+        /// bursts: median spread 3, p75 6 — so ≤6 captures ~86% of genuine
+        /// held-shutter bursts while pose/subject changes (≈12) fall to "you decide".
         public static let confidentSpread = 6
 
         /// Capture facts must be sorted by takenAt, as required by Core cluster.
