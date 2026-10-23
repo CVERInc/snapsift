@@ -206,22 +206,6 @@ public final class PhotoLibrarySession {
         reviewAlbums = [:]
     }
 
-    /// Max dHash Hamming distance for two burst frames to count as the same
-    /// scene. Generous enough to keep real bursts (slight motion) together,
-    /// tight enough to split unrelated shots.
-    var contentMaxDistance = 14
-    /// A cluster whose internal spread is at most this is a confident,
-    /// near-identical burst (pre-marked for deletion). Tuned on real avalanche
-    /// bursts: median spread 3, p75 6 — so ≤6 captures ~86% of genuine
-    /// held-shutter bursts while pose/subject changes (≈12) fall to "you decide".
-    var contentConfidentSpread = 6
-    /// Before a frame is *ever* pre-marked for deletion, the cluster must also be
-    /// neurally near-identical, not just dHash-close (dHash can't tell "same
-    /// framing, subject moved" from a true duplicate). A pre-marked deletion needs
-    /// max pairwise feature distance ≤ this; a moved-subject pair (≈0.2+) falls to
-    /// "you decide". Tight on purpose — wrongly deleting a keeper breaks trust,
-    /// while missing a duplicate is harmless.
-    var contentConfidentFeature: Float = 0.10
     public private(set) var refiningFaces = false { willSet { onChange?() } }
     /// True once a face-refinement pass has re-picked keepers.
     public private(set) var facesApplied = false { willSet { onChange?() } }
@@ -269,7 +253,7 @@ public final class PhotoLibrarySession {
 
     // MARK: - Scan lifecycle (cancel + restore)
 
-    public enum ScanKind: String { case burst, lookAlikes, similarSets }
+    public typealias ScanKind = ScanMode
 
     /// The driving task of the in-flight scan; cancelling it threads
     /// Task.isCancelled through every structured loop in the pipeline.
@@ -379,11 +363,6 @@ public final class PhotoLibrarySession {
         await finishCancelledScan()
         return true
     }
-
-    // Clustering knobs (match the Python defaults).
-    var gapSec = 3.0
-    var sizeTol = 0.10
-    var maxSpan = 30.0
 
     public let imageManager: PHCachingImageManager
     lazy var photoKitImages = makeImageProvider(assetsByID: [:])
@@ -651,7 +630,7 @@ public final class PhotoLibrarySession {
 
         progress = .clustering(enriched.count)
         progressFraction = 0.15
-        let clustered = cluster(enriched, gapSec: gapSec, sizeTol: sizeTol, maxSpan: maxSpan)
+        let clustered = ScanMode.Burst.candidates(enriched)
 
         // Always content-verify (no opt-out): a time-burst is only real if the
         // frames actually look alike, so two different shots taken seconds apart
@@ -660,9 +639,8 @@ public final class PhotoLibrarySession {
         // "you decide" (nothing pre-marked). Reliability over speed, always.
         progress = .verifying(0, clustered.count)
         let provider = imageProvider
-        let verified = await LookAlikeScanner.verifyByContent(
-            clustered, provider: provider,
-            maxDistance: contentMaxDistance
+        let verified = await ScanMode.Burst.verifyContent(
+            clustered, provider: provider
         ) { [weak self] msg, frac in
             Task { @MainActor in
                 self?.progress = PhotoLibraryProgress(msg)
@@ -670,28 +648,17 @@ public final class PhotoLibrarySession {
             }
         }
         if await bailIfCancelled() { return }
-        // Neural gate: a cluster only stays "confident" (→ pre-marks a deletion)
-        // if Apple's feature print agrees it's near-identical. dHash is cheap
-        // recall; this is the precise arbiter that keeps the scan from ever
-        // suggesting you delete a frame that's actually a different moment. Only
-        // dHash-confident clusters can pre-mark, so only those need the (pricier)
-        // neural check — run as one bounded-concurrency batch, not cluster-by-
-        // cluster, so unreadable-thumbnail timeouts overlap instead of summing.
-        let confidentIdx = verified.indices.filter { verified[$0].spread <= contentConfidentSpread }
-        let toCheck = confidentIdx.map { verified[$0].photos.map(\.uuid) }
-        let spreads = await LookAlikeScanner.featureSpreads(
-            toCheck, provider: provider
-        ) { [weak self] done, total, loaded in
+        let neuralConfident = await ScanMode.Burst.confidentIndices(
+            verified, provider: provider
+        ) { [weak self] msg, _ in
             Task { @MainActor in
-                self?.progress = .confirming(done, total, loaded: loaded)
-                if total > 0 { self?.progressFraction = 0.6 + 0.2 * Double(done) / Double(total) }
+                self?.progress = PhotoLibraryProgress(msg)
+                if case .confirming(let done, let total, _) = msg, total > 0 {
+                    self?.progressFraction = 0.6 + 0.2 * Double(done) / Double(total)
+                }
             }
         }
         if await bailIfCancelled() { return }
-        var neuralConfident = Set<Int>()
-        for (k, idx) in confidentIdx.enumerated() {
-            if let fs = spreads[k], fs <= contentConfidentFeature { neuralConfident.insert(idx) }
-        }
         // Fill pixel-based flags (document protection + sharpness ranking) over
         // just the verified cluster members, then build each group from the
         // enriched photos so the keeper respects sharpness and documents are
@@ -968,7 +935,7 @@ public final class PhotoLibrarySession {
         await loadEnrichmentIfNeeded(assets: assets)
         if await bailIfCancelled() { return }
 
-        let idGroups = await LookAlikeScanner.scan(itemIdentifiers: assets.map(\.localIdentifier), provider: imageProvider) { [weak self] msg, frac in
+        let idGroups = await ScanMode.lookAlikes.scan(itemIdentifiers: assets.map(\.localIdentifier), provider: imageProvider) { [weak self] msg, frac in
             Task { @MainActor in
                 self?.progress = PhotoLibraryProgress(msg)
                 if let frac { self?.progressFraction = 0.05 + 0.65 * frac }
@@ -1064,9 +1031,8 @@ public final class PhotoLibrarySession {
         // Cluster the library at the "same scene, different moment" band — looser
         // than Look-alikes (which is now ≈identical only), so pose/angle changes
         // still group (cats ≈0.3 feature distance land here, not in Look-alikes).
-        let idGroups = await LookAlikeScanner.scan(
-            itemIdentifiers: assets.map(\.localIdentifier), provider: imageProvider,
-            dHashDistance: 14, featureDistance: 0.45
+        let idGroups = await ScanMode.similarSets.scan(
+            itemIdentifiers: assets.map(\.localIdentifier), provider: imageProvider
         ) { [weak self] msg, frac in
             Task { @MainActor in
                 self?.progress = PhotoLibraryProgress(msg)

@@ -2642,6 +2642,7 @@ func checkCommitOrchestration() async {
 await checkCommitOrchestration()
 await checkExactDuplicatePass()
 await checkImageProviderSeam()
+await checkScanModes()
 await checkPhotoICloudPolicy()
 await checkPhotoSetReview()
 await checkCancelledPhotoScanReleasesWorkingSet()
