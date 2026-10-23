@@ -10,7 +10,7 @@ import SnapsiftVision
 
 private enum FixtureError: Error { case imageWrite, metadataWrite }
 
-private func writeFolderImage(_ url: URL, width: Int = 640, height: Int = 480,
+func writeFolderImage(_ url: URL, width: Int = 640, height: Int = 480,
                               variant: Bool = false, properties: [CFString: Any] = [:]) throws {
     let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
                         bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),

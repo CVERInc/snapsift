@@ -1,5 +1,6 @@
 import Foundation
 import SnapsiftCore
+import SnapsiftVision
 
 @MainActor
 public final class FolderLibrarySession {
@@ -15,6 +16,7 @@ public final class FolderLibrarySession {
 
     public private(set) var folders: [SelectedFolder] = [] { willSet { onChange?() } }
     public private(set) var review = FolderReviewState() { willSet { onChange?() } }
+    public private(set) var scanMode: ScanMode? { willSet { onChange?() } }
     public private(set) var result: FolderScanResult? { willSet { onChange?() } }
     public private(set) var uniqueMetadataIDs: Set<String> = [] { willSet { onChange?() } }
     public private(set) var crossFolderItemIDs: Set<String> = [] { willSet { onChange?() } }
@@ -45,6 +47,7 @@ public final class FolderLibrarySession {
     private var scanTask: Task<Void, Never>?
     private var itemsByID: [String: FolderItem] = [:]
 
+    private let modeScan: ([URL], ScanMode) async throws -> FolderScanResult
     private let scan: ([URL]) async throws -> FolderScanResult
     private let metadata: ([FolderItem]) async -> [String: LibraryMetadata]
 
@@ -55,6 +58,7 @@ public final class FolderLibrarySession {
                 grants: FolderLocationGrants = .none,
                 volumeProbe: @escaping (URL) -> VolumeProbeResult = probeVolume,
                 scan: (([URL]) async throws -> FolderScanResult)? = nil,
+                modeScan: (([URL], ScanMode) async throws -> FolderScanResult)? = nil,
                 metadata: @escaping ([FolderItem]) async -> [String: LibraryMetadata] = { items in
                     await Task.detached(priority: .utility) {
                         await FolderMetadataProbe(items: items).metadata(for: items.map(\.id))
@@ -70,6 +74,7 @@ public final class FolderLibrarySession {
         self.committer = FolderCommitter(history: history, trashPort: port, grants: grants, volumeProbe: volumeProbe)
         // Custom scan closures must pass this same store to their pipeline.
         self.scan = scan ?? { try await FolderScanPipeline.scan(roots: $0, downloadStore: downloadStore) }
+        self.modeScan = modeScan ?? { try await FolderScanPipeline.scan(roots: $0, mode: $1, downloadStore: downloadStore) }
         self.metadata = metadata
     }
     // FolderAccess balances remaining scopes when the retained result releases.
@@ -181,7 +186,11 @@ public final class FolderLibrarySession {
         } catch { errorOutcome = .bookmark(error) }
     }
 
-    public func startScan() {
+    public func startScan() { startScan(mode: nil) }
+
+    public func startScan(_ mode: ScanMode) { startScan(mode: mode) }
+
+    private func startScan(mode: ScanMode?) {
         guard canScan else { return }
         // Discard only Folder results and scopes; Photos storage is unreachable.
         discardResult()
@@ -204,7 +213,9 @@ public final class FolderLibrarySession {
                     self.folders[index].wasStale = self.folders[index].wasStale || root.wasStale
                     self.folders[index].unavailable = false
                 }
-                let scanned = try await self.scan(resolved.map(\.url))
+                let scanned: FolderScanResult
+                if let mode { scanned = try await self.modeScan(resolved.map(\.url), mode) }
+                else { scanned = try await self.scan(resolved.map(\.url)) }
                 let metadata = await self.metadata(scanned.items)
                 // A decoder may finish after cancellation. Do not retain its
                 // result or scopes and never install cancelled review decisions.
@@ -212,14 +223,21 @@ public final class FolderLibrarySession {
                     scanned.accesses.forEach { $0.stop() }
                     throw CancellationError()
                 }
+                self.scanMode = mode
                 self.result = scanned
                 self.refreshLocationCapabilities()
                 self.uniqueMetadataIDs = folderUniqueMetadataIDs(metadata)
                 self.crossFolderItemIDs = Set(scanned.crossFolderDuplicates.flatMap(\.itemIDs))
                 self.itemsByID = Dictionary(uniqueKeysWithValues: scanned.items.map { ($0.id, $0) })
-                self.review = FolderReviewState(groups: folderReviewGroups(
+                self.review = FolderReviewState(groups: mode == nil || mode == .lookAlikes ? folderReviewGroups(
                     scanned.groups, photos: scanned.items.map(\.photo),
-                    crossFolderMatches: scanned.crossFolderDuplicates.map(\.itemIDs)))
+                    crossFolderMatches: scanned.crossFolderDuplicates.map(\.itemIDs)) : scanned.groups.map { original in
+                        guard mode == .similarSets else { return original }
+                        var group = original
+                        group.rejected = []; group.autoSeeded = []; group.includeProtected = false
+                        group.confidentDupe = false
+                        return group
+                    })
                 self.hasScanned = true
                 self.selection = self.groups.first?.id
                 self.focusedFrame = self.groups.first?.keeperID
@@ -239,6 +257,7 @@ public final class FolderLibrarySession {
         guard !isScanning, !isBusy else { return }
         result?.accesses.forEach { $0.stop() }
         result = nil
+        scanMode = nil
         uniqueMetadataIDs = []
         crossFolderItemIDs = []
         itemsByID = [:]
