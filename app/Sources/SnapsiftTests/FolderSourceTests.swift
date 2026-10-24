@@ -454,7 +454,8 @@ private func checkFolderExactRules(root: URL) async throws {
                                                  metadataProbe: FolderMetadataProbe(items: items), documentCheck: { _ in false })
     check(tagged.groups[0].rejected.isEmpty && tagged.uniqueMetadataIDs == [same[1].id],
           "folder exact: actual Finder tag marks unique metadata and blocks the seed")
-    check(tagged.knownCarryingIDs == [same[1].id] && tagged.uniqueMetadataUndetermined == 0,
+    check(tagged.knownCarryingIDs == [same[1].id] && tagged.uniqueMetadataUndetermined == 0
+          && tagged.undeterminedIDs.isEmpty,
           "folder exact: a tagged copy over an untagged keeper is known to carry, not undetermined")
     try setFinderPlist(["Other tag\n2"], at: same[0].primary.url, name: "com.apple.metadata:_kMDItemUserTags")
     let bothTagged = await seedFolderExactRejections(in: [pair], exact: [pair.id], items: items,
@@ -466,14 +467,16 @@ private func checkFolderExactRules(root: URL) async throws {
                                                   metadataProbe: unknownProbe, documentCheck: { _ in false })
     check(unknown.groups[0].rejected.isEmpty && unknown.uniqueMetadataWithheld == 1 && unknown.uniqueMetadataIDs.isEmpty,
           "folder exact: unreadable metadata blocks pre-marking without inventing a badge")
-    check(unknown.knownCarryingIDs.isEmpty && unknown.uniqueMetadataUndetermined == 1,
+    check(unknown.knownCarryingIDs.isEmpty && unknown.uniqueMetadataUndetermined == 1
+          && unknown.undeterminedIDs == [same[1].id],
           "folder exact: an unreadable copy is undetermined and not known to carry")
     let missingKeeperFacts = FolderFixtureMetadata(facts: [same[1].id: plainFacts[same[1].id]!])
     let missingKeeper = await seedFolderExactRejections(in: [pair], exact: [pair.id], items: items,
                                                        metadataProbe: missingKeeperFacts, documentCheck: { _ in false })
     check(missingKeeper.groups[0].rejected.isEmpty, "folder exact: undetermined keeper metadata also withholds")
     check(missingKeeper.uniqueMetadataWithheld == 1 && missingKeeper.uniqueMetadataIDs == [same[1].id]
-          && missingKeeper.knownCarryingIDs.isEmpty && missingKeeper.uniqueMetadataUndetermined == 1,
+          && missingKeeper.knownCarryingIDs.isEmpty && missingKeeper.uniqueMetadataUndetermined == 1
+          && missingKeeper.undeterminedIDs == [same[1].id],
           "folder exact: an untagged copy over an unreadable keeper is listed but not known to carry")
 }
 

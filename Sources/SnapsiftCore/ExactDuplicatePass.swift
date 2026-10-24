@@ -20,6 +20,8 @@ public struct ExactRejectionResult {
     public let uniqueMetadataUndetermined: Int
     /// The withheld copies known to carry something the keeper lacks (disjoint from the undetermined ones).
     public let knownCarryingIDs: Set<String>
+    /// The withheld copies NOT known to carry anything (signals unreadable); with `knownCarryingIDs` they make up every withheld copy.
+    public let undeterminedIDs: Set<String>
 }
 
 /// Source-independent exact verification and suggestion rules. Pixel analysis
@@ -112,11 +114,13 @@ public enum ExactDuplicatePass {
         var undetermined = 0
         var metadataIDs: Set<String> = []
         var knownCarrying: Set<String> = []
+        var undeterminedIDs: Set<String> = []
         guard !exact.isEmpty else {
             return ExactRejectionResult(groups: built, uniqueMetadataWithheld: withheld,
                                         uniqueMetadataIDs: metadataIDs,
                                         uniqueMetadataUndetermined: undetermined,
-                                        knownCarryingIDs: knownCarrying)
+                                        knownCarryingIDs: knownCarrying,
+                                        undeterminedIDs: undeterminedIDs)
         }
         var built = built
         // Report progress: the hi-q document re-check below suspends up to 30 s
@@ -130,7 +134,8 @@ public enum ExactDuplicatePass {
                 return ExactRejectionResult(groups: built, uniqueMetadataWithheld: withheld,
                                             uniqueMetadataIDs: metadataIDs,
                                             uniqueMetadataUndetermined: undetermined,
-                                            knownCarryingIDs: knownCarrying)
+                                            knownCarryingIDs: knownCarrying,
+                                            undeterminedIDs: undeterminedIDs)
             }
             defer {
                 done += 1
@@ -164,6 +169,7 @@ public enum ExactDuplicatePass {
                     if !knownToCarryUniqueMetadata(candidate: metadata[p.uuid] ?? LibraryMetadata(),
                                                    keeper: keeperMeta) {
                         undetermined += 1
+                        undeterminedIDs.insert(p.uuid)
                         onMetadataUndetermined(p.uuid)
                     } else {
                         knownCarrying.insert(p.uuid)
@@ -191,6 +197,7 @@ public enum ExactDuplicatePass {
         return ExactRejectionResult(groups: built, uniqueMetadataWithheld: withheld,
                                     uniqueMetadataIDs: metadataIDs,
                                     uniqueMetadataUndetermined: undetermined,
-                                    knownCarryingIDs: knownCarrying)
+                                    knownCarryingIDs: knownCarrying,
+                                    undeterminedIDs: undeterminedIDs)
     }
 }

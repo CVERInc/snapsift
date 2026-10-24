@@ -157,6 +157,8 @@ public final class PhotoLibrarySession {
     public private(set) var uniqueMetadataIDs: Set<String> = [] { willSet { onChange?() } }
     /// The withheld frames known to carry something the keeper lacks. Session-only.
     public private(set) var knownCarryingIDs: Set<String> = [] { willSet { onChange?() } }
+    /// The withheld frames not known to carry anything (signals unreadable). Session-only.
+    public private(set) var undeterminedIDs: Set<String> = [] { willSet { onChange?() } }
     /// Deletions recovered from an interrupted commit's journal at launch.
     public var journalRecoveredCount: Int? { willSet { onChange?() } }
     /// Marks lost on restore because the photo itself is gone from the library.
@@ -601,6 +603,7 @@ public final class PhotoLibrarySession {
         uniqueMetadataUndetermined = 0
         uniqueMetadataIDs = []
         knownCarryingIDs = []
+        undeterminedIDs = []
         pairedVideoUndeterminedAssets = []
 
         var assets: [PHAsset] = []
@@ -928,6 +931,7 @@ public final class PhotoLibrarySession {
         uniqueMetadataUndetermined = 0
         uniqueMetadataIDs = []
         knownCarryingIDs = []
+        undeterminedIDs = []
         pairedVideoUndeterminedAssets = []
 
         var assets: [PHAsset] = []
@@ -1023,6 +1027,7 @@ public final class PhotoLibrarySession {
         uniqueMetadataUndetermined = 0
         uniqueMetadataIDs = []
         knownCarryingIDs = []
+        undeterminedIDs = []
         pairedVideoUndeterminedAssets = []
 
         var assets: [PHAsset] = []
@@ -1570,8 +1575,9 @@ public final class PhotoLibrarySession {
                 self.uniqueMetadataWithheld += 1
                 if fullyDetermined { self.uniqueMetadataIDs.insert(id) }
             },
-            onMetadataUndetermined: { _ in
+            onMetadataUndetermined: { id in
                 self.uniqueMetadataUndetermined += 1
+                self.undeterminedIDs.insert(id)
             },
             onKnownCarrying: { id in
                 self.knownCarryingIDs.insert(id)
