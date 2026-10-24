@@ -85,18 +85,22 @@ public final class FolderLibrarySession {
     public var canReviewRemoval: Bool {
         guard !isScanning, !isBusy, !showHistory, let result else { return false }
         let supported = result.roots.filter { $0.volume.capability == .removalSupported }
+            .map { (volumeKey: $0.volume.volumeKey, path: folderLocationComponents($0.url)) }
         return groups.contains { group in
             group.deletionIDs.contains { id in
                 guard let item = itemsByID[id] else { return false }
                 return item.members.allSatisfy { member in
-                    (!trashPort.usesLocationCapabilities
-                     || trashPort.capability(volumeProbe(member.url), at: member.url, grants: grants) == .removalSupported)
-                    && supported.contains { root in
+                    // The pure root check runs before the live probe, so a member under no
+                    // removal-supported root costs no filesystem read. The probe stays per
+                    // member: it reads item-level facts (path, ubiquity), which no folder or
+                    // volume key determines.
+                    supported.contains { root in
                         let path = folderLocationComponents(member.url)
-                        let rootPath = folderLocationComponents(root.url)
-                        return root.volume.volumeKey == member.volumeKey
-                            && path.count > rootPath.count && path.starts(with: rootPath)
+                        return root.volumeKey == member.volumeKey
+                            && path.count > root.path.count && path.starts(with: root.path)
                     }
+                    && (!trashPort.usesLocationCapabilities
+                        || trashPort.capability(volumeProbe(member.url), at: member.url, grants: grants) == .removalSupported)
                 }
             }
         }
