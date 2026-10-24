@@ -338,7 +338,7 @@ func folderTrashLocationSessionTests(_ check: (Bool, String) -> Void) async {
                 FolderScanResult(items: f.items, groups: f.groups, exactGroupIDs: [], crossFolderDuplicates: [],
                     roots: [FolderScannedRoot(url: f.confirmed, volume: f.probe(f.confirmed)),
                             FolderScannedRoot(url: f.unconfirmed, volume: f.probe(f.unconfirmed))],
-                    issues: [], primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [],
+                    issues: [], primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [], knownCarryingIDs: [],
                     imageProvider: FolderImageProvider(items: f.items), accesses: [])
             }, metadata: { _ in [:] })
         session.loadFolders()

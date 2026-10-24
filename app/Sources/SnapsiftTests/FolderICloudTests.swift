@@ -252,7 +252,7 @@ private func downloadReceipt(_ cloud: FolderICloudAccess, store: FolderDownloadS
                              port: FolderUbiquityPort) -> FolderScanResult {
     FolderScanResult(downloadedFiles: cloud.downloadedFiles, ubiquityPort: port, downloadStore: store,
         items: [], groups: [], exactGroupIDs: [], crossFolderDuplicates: [], roots: [], issues: [],
-        primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [],
+        primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [], knownCarryingIDs: [],
         imageProvider: FolderImageProvider(items: []), accesses: [])
 }
 
@@ -643,7 +643,7 @@ private func checkFolderICloudGates() async {
         _ = try on.prepareForScan(remote)
         let receipt = FolderScanResult(downloadedFiles: on.downloadedFiles, ubiquityPort: fake.port,
             items: [], groups: [], exactGroupIDs: [], crossFolderDuplicates: [], roots: [], issues: [],
-            primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [],
+            primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [], knownCarryingIDs: [],
             imageProvider: FolderImageProvider(items: []), accesses: [])
         let expected: Set<URL> = [remote, changed, replaced, fails, noCloud, logical]
         check(receipt.downloadedURLs == expected && Set(fake.downloadCalls) == expected && fake.downloadCalls.count == 6,

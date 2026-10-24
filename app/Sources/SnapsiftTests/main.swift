@@ -3203,7 +3203,7 @@ private final class FolderSessionFixture {
                 return FolderScanResult(items: self.items, groups: self.groups, exactGroupIDs: [],
                     crossFolderDuplicates: self.cross,
                     roots: [FolderScannedRoot(url: self.source, volume: probeVolume(at: self.source))],
-                    issues: [], primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [],
+                    issues: [], primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [], knownCarryingIDs: [],
                     imageProvider: FolderImageProvider(items: self.items), accesses: [access])
             }, metadata: { _ in
                 if self.pauseMetadata { await withCheckedContinuation { self.metadataGate = $0 } }

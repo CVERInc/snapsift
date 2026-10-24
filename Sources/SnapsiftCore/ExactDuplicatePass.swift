@@ -18,6 +18,8 @@ public struct ExactRejectionResult {
     /// keeper lacks (signals unreadable). `uniqueMetadataWithheld -
     /// uniqueMetadataUndetermined` copies are known to carry something.
     public let uniqueMetadataUndetermined: Int
+    /// The withheld copies known to carry something the keeper lacks (disjoint from the undetermined ones).
+    public let knownCarryingIDs: Set<String>
 }
 
 /// Source-independent exact verification and suggestion rules. Pixel analysis
@@ -103,15 +105,18 @@ public enum ExactDuplicatePass {
         isCancelled: () -> Bool = { false },
         progress: (Int, Int) -> Void = { _, _ in },
         onMetadataWithheld: (String, Bool) -> Void = { _, _ in },
-        onMetadataUndetermined: (String) -> Void = { _ in }
+        onMetadataUndetermined: (String) -> Void = { _ in },
+        onKnownCarrying: (String) -> Void = { _ in }
     ) async -> ExactRejectionResult {
         var withheld = 0
         var undetermined = 0
         var metadataIDs: Set<String> = []
+        var knownCarrying: Set<String> = []
         guard !exact.isEmpty else {
             return ExactRejectionResult(groups: built, uniqueMetadataWithheld: withheld,
                                         uniqueMetadataIDs: metadataIDs,
-                                        uniqueMetadataUndetermined: undetermined)
+                                        uniqueMetadataUndetermined: undetermined,
+                                        knownCarryingIDs: knownCarrying)
         }
         var built = built
         // Report progress: the hi-q document re-check below suspends up to 30 s
@@ -124,7 +129,8 @@ public enum ExactDuplicatePass {
             if Task.isCancelled || isCancelled() {   // caller bails + cleans up
                 return ExactRejectionResult(groups: built, uniqueMetadataWithheld: withheld,
                                             uniqueMetadataIDs: metadataIDs,
-                                            uniqueMetadataUndetermined: undetermined)
+                                            uniqueMetadataUndetermined: undetermined,
+                                            knownCarryingIDs: knownCarrying)
             }
             defer {
                 done += 1
@@ -159,6 +165,9 @@ public enum ExactDuplicatePass {
                                                    keeper: keeperMeta) {
                         undetermined += 1
                         onMetadataUndetermined(p.uuid)
+                    } else {
+                        knownCarrying.insert(p.uuid)
+                        onKnownCarrying(p.uuid)
                     }
                     continue
                 }
@@ -181,6 +190,7 @@ public enum ExactDuplicatePass {
         }
         return ExactRejectionResult(groups: built, uniqueMetadataWithheld: withheld,
                                     uniqueMetadataIDs: metadataIDs,
-                                    uniqueMetadataUndetermined: undetermined)
+                                    uniqueMetadataUndetermined: undetermined,
+                                    knownCarryingIDs: knownCarrying)
     }
 }

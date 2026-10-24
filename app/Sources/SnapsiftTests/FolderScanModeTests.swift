@@ -166,7 +166,7 @@ func checkFolderSetRemoval() async {
             func result() -> FolderScanResult {
                 FolderScanResult(items: items, groups: [group], exactGroupIDs: [], crossFolderDuplicates: [],
                     roots: [.init(url: source, volume: volume)], issues: [], primaryHashes: [:],
-                    uniqueMetadataWithheld: 0, uniqueMetadataIDs: [], imageProvider: FolderImageProvider(items: items), accesses: [])
+                    uniqueMetadataWithheld: 0, uniqueMetadataIDs: [], knownCarryingIDs: [], imageProvider: FolderImageProvider(items: items), accesses: [])
             }
             let port = FolderTrashPort(trash: { url in
                 let destination = trash.appendingPathComponent(url.lastPathComponent)
@@ -234,7 +234,7 @@ func checkFolderCrossFolderModeGroups() async {
                 FolderScanResult(items: items, groups: [], exactGroupIDs: [],
                     crossFolderDuplicates: [.init(primarySHA256: "identical", itemIDs: items.map(\.id),
                                                   folderKeys: Set(items.map(\.folderKey)))],
-                    roots: [], issues: [], primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [],
+                    roots: [], issues: [], primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [], knownCarryingIDs: [],
                     imageProvider: FolderImageProvider(items: items), accesses: [])
             }, metadata: { _ in [:] })
         session.loadFolders()

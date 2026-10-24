@@ -155,6 +155,8 @@ public final class PhotoLibrarySession {
     /// the pre-commit sheet can badge them even when the USER marked them by
     /// hand after the auto-seed declined to.
     public private(set) var uniqueMetadataIDs: Set<String> = [] { willSet { onChange?() } }
+    /// The withheld frames known to carry something the keeper lacks. Session-only.
+    public private(set) var knownCarryingIDs: Set<String> = [] { willSet { onChange?() } }
     /// Deletions recovered from an interrupted commit's journal at launch.
     public var journalRecoveredCount: Int? { willSet { onChange?() } }
     /// Marks lost on restore because the photo itself is gone from the library.
@@ -598,6 +600,7 @@ public final class PhotoLibrarySession {
         uniqueMetadataWithheld = 0
         uniqueMetadataUndetermined = 0
         uniqueMetadataIDs = []
+        knownCarryingIDs = []
         pairedVideoUndeterminedAssets = []
 
         var assets: [PHAsset] = []
@@ -924,6 +927,7 @@ public final class PhotoLibrarySession {
         uniqueMetadataWithheld = 0
         uniqueMetadataUndetermined = 0
         uniqueMetadataIDs = []
+        knownCarryingIDs = []
         pairedVideoUndeterminedAssets = []
 
         var assets: [PHAsset] = []
@@ -1018,6 +1022,7 @@ public final class PhotoLibrarySession {
         uniqueMetadataWithheld = 0
         uniqueMetadataUndetermined = 0
         uniqueMetadataIDs = []
+        knownCarryingIDs = []
         pairedVideoUndeterminedAssets = []
 
         var assets: [PHAsset] = []
@@ -1567,6 +1572,9 @@ public final class PhotoLibrarySession {
             },
             onMetadataUndetermined: { _ in
                 self.uniqueMetadataUndetermined += 1
+            },
+            onKnownCarrying: { id in
+                self.knownCarryingIDs.insert(id)
             })
         return result.groups
     }

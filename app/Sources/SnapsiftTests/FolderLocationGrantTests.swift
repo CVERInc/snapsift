@@ -139,7 +139,7 @@ private final class LocationGrantFixture {
                     && roots.map(folderLocationComponents) == self.folders.map(folderLocationComponents)
                 return FolderScanResult(items: self.items, groups: self.groups, exactGroupIDs: [],
                     crossFolderDuplicates: [], roots: roots.map { FolderScannedRoot(url: $0, volume: self.probe($0)) },
-                    issues: [], primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [],
+                    issues: [], primaryHashes: [:], uniqueMetadataWithheld: 0, uniqueMetadataIDs: [], knownCarryingIDs: [],
                     imageProvider: FolderImageProvider(items: self.items), accesses: [])
             }, metadata: { _ in [:] })
     }

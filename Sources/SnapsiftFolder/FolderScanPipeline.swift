@@ -53,6 +53,8 @@ public struct FolderScanResult {
     public let primaryHashes: [String: String]
     public let uniqueMetadataWithheld: Int
     public let uniqueMetadataIDs: Set<String>
+    /// The withheld copies known to carry something the keeper lacks.
+    public let knownCarryingIDs: Set<String>
     public let imageProvider: FolderImageProvider
     /// Retain while reviewing/using member URLs; stop when the session closes.
     public let accesses: [FolderAccess]
@@ -177,6 +179,7 @@ public enum FolderScanPipeline {
                                 crossFolderDuplicates: grouped.cross, roots: scannedRoots, issues: issues,
                                 primaryHashes: grouped.digests, uniqueMetadataWithheld: grouped.uniqueMetadataWithheld,
                                 uniqueMetadataIDs: grouped.uniqueMetadataIDs,
+                                knownCarryingIDs: grouped.knownCarryingIDs,
                                 imageProvider: provider, accesses: accesses)
     }
 
@@ -187,6 +190,7 @@ public enum FolderScanPipeline {
         let digests: [String: String]
         let uniqueMetadataWithheld: Int
         let uniqueMetadataIDs: Set<String>
+        let knownCarryingIDs: Set<String>
     }
 
     /// Enriched source facts and byte/metadata ports also admit deterministic fixtures.
@@ -284,10 +288,12 @@ public enum FolderScanPipeline {
         let finalGroups: [ReviewGroup]
         let uniqueMetadataWithheld: Int
         let uniqueMetadataIDs: Set<String>
+        let knownCarryingIDs: Set<String>
         if mode == .similarSets {
             finalGroups = built
             uniqueMetadataWithheld = 0
             uniqueMetadataIDs = []
+            knownCarryingIDs = []
         } else {
             let seeded = await seedFolderExactRejections(
                 in: built, exact: exact, items: items,
@@ -296,10 +302,11 @@ public enum FolderScanPipeline {
             finalGroups = seeded.groups
             uniqueMetadataWithheld = seeded.uniqueMetadataWithheld
             uniqueMetadataIDs = seeded.uniqueMetadataIDs
+            knownCarryingIDs = seeded.knownCarryingIDs
         }
         try Task.checkCancellation()
         return Grouping(groups: finalGroups, exact: exact, cross: cross, digests: digests,
-                        uniqueMetadataWithheld: uniqueMetadataWithheld, uniqueMetadataIDs: uniqueMetadataIDs)
+                        uniqueMetadataWithheld: uniqueMetadataWithheld, uniqueMetadataIDs: uniqueMetadataIDs, knownCarryingIDs: knownCarryingIDs)
     }
 
     private static func chronological(_ a: Photo, _ b: Photo) -> Bool {

@@ -54,13 +54,14 @@ func checkExactDuplicatePass() async {
                    LibraryMetadata(albumCount: 0, hasDescription: true)] {
         let result = await run(metadata: ["U1": plain, "U2": unique])
         check(result.0 == [pair.id] && result.1.groups[0].rejected.isEmpty
-              && result.1.uniqueMetadataWithheld == 1 && result.1.uniqueMetadataIDs == ["U2"],
+              && result.1.uniqueMetadataWithheld == 1 && result.1.uniqueMetadataIDs == ["U2"]
+              && result.1.knownCarryingIDs == ["U2"],
               "exact ports: unique metadata withholds the seed and keeps the exact badge")
     }
     for unknown in [LibraryMetadata(), LibraryMetadata(albumCount: 0), LibraryMetadata(hasDescription: false)] {
         let result = await run(metadata: ["U1": plain, "U2": unknown])
         check(result.1.groups[0].rejected.isEmpty && result.1.uniqueMetadataWithheld == 1
-              && result.1.uniqueMetadataIDs.isEmpty,
+              && result.1.uniqueMetadataIDs.isEmpty && result.1.knownCarryingIDs.isEmpty,
               "exact ports: undetermined metadata withholds without inventing a metadata badge")
     }
     // Reasons: the total splits into known-to-carry and undetermined.
@@ -74,9 +75,11 @@ func checkExactDuplicatePass() async {
                                  extra: [ph(2, 1)])
     check(carrying.uniqueMetadataWithheld == 1 && carrying.uniqueMetadataUndetermined == 0,
           "exact ports: a copy known to carry counts as known only")
+    check(carrying.knownCarryingIDs == ["U2"], "exact ports: a copy known to carry is listed in knownCarryingIDs")
     let unread = await reasons(["U1": plain, "U2": LibraryMetadata()], extra: [ph(2, 1)])
     check(unread.uniqueMetadataWithheld == 1 && unread.uniqueMetadataUndetermined == 1,
           "exact ports: an unreadable copy counts as undetermined only")
+    check(unread.knownCarryingIDs.isEmpty, "exact ports: an unreadable copy is not in knownCarryingIDs")
     let both = await reasons(["U1": plain,
                               "U2": LibraryMetadata(albumCount: 0, hasDescription: true),
                               "U3": LibraryMetadata(albumCount: 0, hasDescription: nil)],
@@ -84,19 +87,40 @@ func checkExactDuplicatePass() async {
     check(both.uniqueMetadataWithheld == 2 && both.uniqueMetadataUndetermined == 1
           && both.uniqueMetadataIDs == ["U2"],
           "exact ports: known and undetermined copies in one group split 1 / 1 and the total stays 2")
+    check(both.knownCarryingIDs == ["U2"], "exact ports: only the known copy of a mixed group is in knownCarryingIDs")
+    let captionedKeeperAlbumsUnread = await reasons(
+        ["U1": LibraryMetadata(albumCount: nil, hasDescription: true),
+         "U2": LibraryMetadata(albumCount: 1, hasDescription: true)], extra: [ph(2, 1)])
+    check(captionedKeeperAlbumsUnread.uniqueMetadataWithheld == 1 && captionedKeeperAlbumsUnread.uniqueMetadataUndetermined == 1
+          && captionedKeeperAlbumsUnread.uniqueMetadataIDs == ["U2"] && captionedKeeperAlbumsUnread.knownCarryingIDs.isEmpty,
+          "exact ports: both captioned, keeper albums unread: withheld, listed, undetermined, not known to carry")
+    let captionOverKeeper = await reasons(
+        ["U1": LibraryMetadata(albumCount: 1, hasDescription: false),
+         "U2": LibraryMetadata(albumCount: 1, hasDescription: true)], extra: [ph(2, 1)])
+    check(captionOverKeeper.knownCarryingIDs == ["U2"] && captionOverKeeper.uniqueMetadataUndetermined == 0
+          && captionOverKeeper.uniqueMetadataIDs == ["U2"],
+          "exact ports: captioned copy over an uncaptioned keeper is known to carry")
     let extraAlbumNoCaption = await reasons(
         ["U1": LibraryMetadata(albumCount: 0, hasDescription: nil),
          "U2": LibraryMetadata(albumCount: 3, hasDescription: nil),
          "U4": LibraryMetadata(), "U5": plain], extra: [ph(2, 1), u4, u5])
     check(extraAlbumNoCaption.uniqueMetadataWithheld == extraAlbumNoCaption.uniqueMetadataUndetermined + 1
           && extraAlbumNoCaption.uniqueMetadataWithheld == 3
-          && extraAlbumNoCaption.uniqueMetadataUndetermined == 2 && extraAlbumNoCaption.uniqueMetadataIDs == ["U5"],
+          && extraAlbumNoCaption.uniqueMetadataUndetermined == 2 && extraAlbumNoCaption.uniqueMetadataIDs == ["U5"]
+          && extraAlbumNoCaption.knownCarryingIDs == ["U2"]
+          && extraAlbumNoCaption.knownCarryingIDs.isDisjoint(with: extraAlbumNoCaption.uniqueMetadataIDs),
           "exact ports: extra album with unread caption counts once, as known; total == known + undetermined")
     var undeterminedIDs: [String] = []
     _ = await ExactDuplicatePass.seedExactRejections(
         in: [pair], exact: [pair.id], metadataProbe: FakeMetadata(["U1": plain]), documentCheck: { _ in false },
         onMetadataUndetermined: { undeterminedIDs.append($0) })
     check(undeterminedIDs == ["U2"], "exact ports: undetermined callback fires once per undetermined copy")
+    var carryingIDs: [String] = []
+    _ = await ExactDuplicatePass.seedExactRejections(
+        in: [pair], exact: [pair.id],
+        metadataProbe: FakeMetadata(["U1": plain, "U2": LibraryMetadata(albumCount: 1, hasDescription: false)]),
+        documentCheck: { _ in false }, onKnownCarrying: { carryingIDs.append($0) })
+    check(carryingIDs == ["U2"], "exact ports: known-carrying callback fires once per known copy")
     let unknownKeeper = await run(metadata: ["U2": plain])
     check(unknownKeeper.1.groups[0].rejected.isEmpty, "exact ports: unreadable keeper metadata also withholds")
     for (label, protected) in [("favorite", ph(2, 1, fav: true)), ("edited", ph(2, 1, edited: true)),
