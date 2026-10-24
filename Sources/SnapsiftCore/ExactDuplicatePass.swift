@@ -14,6 +14,10 @@ public struct ExactRejectionResult {
     public let groups: [ReviewGroup]
     public let uniqueMetadataWithheld: Int
     public let uniqueMetadataIDs: Set<String>
+    /// The subset of `uniqueMetadataWithheld` NOT known to carry anything the
+    /// keeper lacks (signals unreadable). `uniqueMetadataWithheld -
+    /// uniqueMetadataUndetermined` copies are known to carry something.
+    public let uniqueMetadataUndetermined: Int
 }
 
 /// Source-independent exact verification and suggestion rules. Pixel analysis
@@ -98,13 +102,16 @@ public enum ExactDuplicatePass {
         documentCheck: (String) async -> Bool?,
         isCancelled: () -> Bool = { false },
         progress: (Int, Int) -> Void = { _, _ in },
-        onMetadataWithheld: (String, Bool) -> Void = { _, _ in }
+        onMetadataWithheld: (String, Bool) -> Void = { _, _ in },
+        onMetadataUndetermined: (String) -> Void = { _ in }
     ) async -> ExactRejectionResult {
         var withheld = 0
+        var undetermined = 0
         var metadataIDs: Set<String> = []
         guard !exact.isEmpty else {
             return ExactRejectionResult(groups: built, uniqueMetadataWithheld: withheld,
-                                        uniqueMetadataIDs: metadataIDs)
+                                        uniqueMetadataIDs: metadataIDs,
+                                        uniqueMetadataUndetermined: undetermined)
         }
         var built = built
         // Report progress: the hi-q document re-check below suspends up to 30 s
@@ -116,7 +123,8 @@ public enum ExactDuplicatePass {
         for i in built.indices where exact.contains(built[i].id) {
             if Task.isCancelled || isCancelled() {   // caller bails + cleans up
                 return ExactRejectionResult(groups: built, uniqueMetadataWithheld: withheld,
-                                            uniqueMetadataIDs: metadataIDs)
+                                            uniqueMetadataIDs: metadataIDs,
+                                            uniqueMetadataUndetermined: undetermined)
             }
             defer {
                 done += 1
@@ -147,6 +155,11 @@ public enum ExactDuplicatePass {
                         metadataIDs.insert(p.uuid)
                     }
                     onMetadataWithheld(p.uuid, (metadata[p.uuid] ?? LibraryMetadata()).isFullyDetermined)
+                    if !knownToCarryUniqueMetadata(candidate: metadata[p.uuid] ?? LibraryMetadata(),
+                                                   keeper: keeperMeta) {
+                        undetermined += 1
+                        onMetadataUndetermined(p.uuid)
+                    }
                     continue
                 }
                 switch await documentCheck(p.uuid) {
@@ -167,6 +180,7 @@ public enum ExactDuplicatePass {
             built[i].autoSeeded = seeds
         }
         return ExactRejectionResult(groups: built, uniqueMetadataWithheld: withheld,
-                                    uniqueMetadataIDs: metadataIDs)
+                                    uniqueMetadataIDs: metadataIDs,
+                                    uniqueMetadataUndetermined: undetermined)
     }
 }

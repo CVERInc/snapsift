@@ -148,6 +148,9 @@ public final class PhotoLibrarySession {
     /// Exact-duplicate frames withheld from pre-marking because they carry (or
     /// might carry) album membership / a caption the keeper lacks.
     public var uniqueMetadataWithheld = 0 { willSet { onChange?() } }
+    /// The subset of `uniqueMetadataWithheld` not known to carry anything the
+    /// keeper lacks: their signals could not be read. Session-only.
+    public var uniqueMetadataUndetermined = 0 { willSet { onChange?() } }
     /// Frames known to carry album membership / a caption the keeper lacks, so
     /// the pre-commit sheet can badge them even when the USER marked them by
     /// hand after the auto-seed declined to.
@@ -593,6 +596,7 @@ public final class PhotoLibrarySession {
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
         uniqueMetadataWithheld = 0
+        uniqueMetadataUndetermined = 0
         uniqueMetadataIDs = []
         pairedVideoUndeterminedAssets = []
 
@@ -918,6 +922,7 @@ public final class PhotoLibrarySession {
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
         uniqueMetadataWithheld = 0
+        uniqueMetadataUndetermined = 0
         uniqueMetadataIDs = []
         pairedVideoUndeterminedAssets = []
 
@@ -1011,6 +1016,7 @@ public final class PhotoLibrarySession {
         displayRotation = [:]   // Pass 2a: rotations don't survive a rescan
         exactDupeGroupIDs = []  // stale exact verdicts never outlive a rescan
         uniqueMetadataWithheld = 0
+        uniqueMetadataUndetermined = 0
         uniqueMetadataIDs = []
         pairedVideoUndeterminedAssets = []
 
@@ -1558,6 +1564,9 @@ public final class PhotoLibrarySession {
             onMetadataWithheld: { id, fullyDetermined in
                 self.uniqueMetadataWithheld += 1
                 if fullyDetermined { self.uniqueMetadataIDs.insert(id) }
+            },
+            onMetadataUndetermined: { _ in
+                self.uniqueMetadataUndetermined += 1
             })
         return result.groups
     }

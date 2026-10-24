@@ -648,6 +648,22 @@ public func carriesUniqueMetadata(candidate: LibraryMetadata,
     return false
 }
 
+/// True exactly when what was READ shows the candidate carries something the
+/// keeper lacks: more albums (both counts read), or a caption the keeper does
+/// not carry. Unread signals never make a copy "known" — those copies are
+/// still withheld by `carriesUniqueMetadata`, but reported as undetermined.
+///
+/// A keeper whose description reads `nil` counts as lacking the caption: on
+/// iOS a keeper with no caption reads nil (its title cannot be read) yet
+/// certainly lacks the caption, so a captioned copy counts as known.
+public func knownToCarryUniqueMetadata(candidate: LibraryMetadata,
+                                       keeper: LibraryMetadata) -> Bool {
+    if let cAlbums = candidate.albumCount, let kAlbums = keeper.albumCount,
+       cAlbums > kAlbums { return true }
+    if candidate.hasDescription == true && keeper.hasDescription != true { return true }
+    return false
+}
+
 // MARK: - Snapsift's own organizational albums (never count as "user data")
 
 /// Count only the ALBUMS THE USER actually filed this photo into — excluding

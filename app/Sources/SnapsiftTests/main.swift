@@ -1937,6 +1937,29 @@ do {
     // "undetermined ⇒ carries" checks fail.
 }
 
+print("Exact duplicates: known to carry unique metadata")
+do {
+    typealias M = LibraryMetadata
+    func known(_ c: M, _ k: M) -> Bool { knownToCarryUniqueMetadata(candidate: c, keeper: k) }
+    check(known(M(albumCount: 3, hasDescription: nil), M(albumCount: 0, hasDescription: nil)),
+          "known: 3 albums vs 0, descriptions unread")
+    check(known(M(albumCount: 0, hasDescription: true), M(albumCount: 0, hasDescription: nil)),
+          "known: caption vs a keeper whose caption reads nil")
+    check(known(M(albumCount: nil, hasDescription: true), M(albumCount: nil, hasDescription: false)),
+          "known: caption vs an uncaptioned keeper even with albums unread")
+    check(!known(M(albumCount: 1, hasDescription: true), M(albumCount: 1, hasDescription: true)),
+          "not known: both captioned, equal albums")
+    check(!known(M(), M()), "not known: everything unread")
+    check(!known(M(albumCount: 0, hasDescription: false), M()),
+          "not known: fully-read candidate vs unreadable keeper")
+    check(!known(M(albumCount: 2, hasDescription: nil), M(albumCount: nil, hasDescription: nil)),
+          "not known: candidate albums vs keeper albums unread")
+    check(!known(M(albumCount: nil, hasDescription: nil), M(albumCount: 0, hasDescription: false)),
+          "not known: candidate unread")
+    check(!known(M(albumCount: 0, hasDescription: false), M(albumCount: 1, hasDescription: true)),
+          "not known: copy carrying less than the keeper")
+}
+
 print("Unclassifiable photos are never delete candidates, even with the per-group override (needs-a-look ruling, 2026-09-16)")
 do {
     let keep = ph(1, 0, quality: 0.9)
