@@ -37,7 +37,7 @@ public final class PhotoLibrarySession {
     public let history: PhotoLibraryHistoryStore
     private let snapshotStore: ScanSnapshotStore
     private let enrichmentPort: (any PhotoLibraryEnrichmentPort)?
-    private let descriptionSource: (@Sendable ([String]) async -> [String: Bool]?)?
+    let descriptionSource: (@Sendable ([String]) async -> [String: Bool]?)?
     private var albumTitles: PhotoLibraryAlbumTitles
     private var namingLanguage = "en-US"
     private var fallbackSetName = "Similar set"

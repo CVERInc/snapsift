@@ -58,8 +58,8 @@ func checkPhotoCaptionDescriptions() async {
         [("C", "hello"), ("N", nil), ("E", ""), ("W", " \n ")]
     }
     let facts = await photoCaptionDescriptions(for: ["C", "N", "E", "W", "X"], read: read)
-    check(facts == ["C": true, "N": false, "E": false, "W": false],
-          "caption batch: captioned true, none/empty/whitespace false, omitted id absent")
+    check(facts == ["C": true],
+          "caption batch: only a captioned id has a fact; none/empty/whitespace/omitted stay absent")
     let failed = await photoCaptionDescriptions(for: ["C"], read: { _ in nil })
     check(failed == nil, "caption batch: a failed read is nil, never false")
 
@@ -94,15 +94,24 @@ func checkPhotoCaptionDescriptions() async {
             in: [pair], exact: exact, metadataProbe: CaptionFactsProbe(described: described),
             documentCheck: { _ in false })
     }
-    let bare = await run(await photoCaptionDescriptions(for: ["U1", "U2"], read: { ids in ids.map { ($0, nil) } }))
-    check(bare.groups[0].rejected == ["U2"] && bare.groups[0].autoSeeded == ["U2"],
-          "caption exact pass: copies without captions pre-mark the non-keeper")
-    let captioned = await run(await photoCaptionDescriptions(for: ["U1", "U2"], read: { _ in
+    let neitherCaptioned = await run(await photoCaptionDescriptions(for: ["U1", "U2"], read: { ids in
+        ids.map { ($0, nil) } }))
+    check(neitherCaptioned.groups[0].rejected.isEmpty && neitherCaptioned.uniqueMetadataIDs.isEmpty
+          && neitherCaptioned.uniqueMetadataWithheld == 1,
+          "caption exact pass: uncaptioned copies are undetermined and withhold the pre-mark")
+    let nonKeeperCaptioned = await run(await photoCaptionDescriptions(for: ["U1", "U2"], read: { _ in
         [("U1", nil), ("U2", "keep me")] }))
-    check(captioned.groups[0].rejected.isEmpty && captioned.uniqueMetadataIDs == ["U2"],
-          "caption exact pass: a caption on the non-keeper withholds the pre-mark and lists it")
+    check(nonKeeperCaptioned.groups[0].rejected.isEmpty && nonKeeperCaptioned.uniqueMetadataIDs == ["U2"],
+          "caption exact pass: a caption on the non-keeper alone withholds the pre-mark and lists it")
+    let bothCaptioned = await run(await photoCaptionDescriptions(for: ["U1", "U2"], read: { _ in
+        [("U1", "a"), ("U2", "b")] }))
+    check(bothCaptioned.groups[0].rejected == ["U2"] && bothCaptioned.groups[0].autoSeeded == ["U2"],
+          "caption exact pass: fully determined copies pre-mark the non-keeper")
     let unreadable = await run(await photoCaptionDescriptions(for: ["U1", "U2"], read: { _ in nil }))
     check(unreadable.groups[0].rejected.isEmpty && unreadable.uniqueMetadataWithheld == 1
           && unreadable.uniqueMetadataIDs.isEmpty,
           "caption exact pass: a failed read withholds without listing a metadata badge")
+    let sessionNoSource = session(port: nil, source: source)
+    check(sessionNoSource.descriptionSource != nil && session(port: nil, source: nil).descriptionSource == nil,
+          "caption session: descriptionSource reflects the injected source")
 }

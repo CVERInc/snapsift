@@ -1,9 +1,8 @@
 import Foundation
 import Photos
 
-/// A Photos caption describes its asset when it holds anything beyond whitespace
-/// (the macOS sidecar's trimmed title/description rule). nil, "" and
-/// whitespace-only captions describe nothing.
+/// A Photos caption describes its asset when it holds anything beyond
+/// whitespace and newlines. nil, "" and whitespace-only captions describe nothing.
 public func photoCaptionDescribesAsset(_ caption: String?) -> Bool {
     guard let caption else { return false }
     return !caption.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -11,16 +10,21 @@ public func photoCaptionDescribesAsset(_ caption: String?) -> Bool {
 
 /// Turns one batch read into description facts. `read` returns the
 /// `(id, caption)` entries it could read, or nil when the read failed.
-/// An id the read did not return stays absent and a failed read yields nil:
-/// undetermined facts carry unique metadata, so a failure is never reported
-/// as "no caption".
+/// Only a captioned entry yields a fact (`true`). An uncaptioned entry, an id
+/// the read did not return and a failed read (nil) all leave the fact
+/// undetermined: undetermined facts carry unique metadata, so none of them is
+/// reported as "no description".
 public func photoCaptionDescriptions(
     for ids: [String],
     read: ([String]) async -> [(id: String, caption: String?)]?
 ) async -> [String: Bool]? {
     guard let entries = await read(ids) else { return nil }
     var facts: [String: Bool] = [:]
-    for entry in entries { facts[entry.id] = photoCaptionDescribesAsset(entry.caption) }
+    for entry in entries where photoCaptionDescribesAsset(entry.caption) {
+        // PhotoKit exposes a caption but no title, and `hasDescription` also
+        // covers a title, so an uncaptioned copy cannot be called undescribed.
+        facts[entry.id] = true
+    }
     return facts
 }
 
@@ -39,6 +43,7 @@ public func photoKitCaptionDescriptions(for ids: [String]) async -> [String: Boo
             // Prefetch measured ~2.3 ms vs ~3 ms per 2-3-id batch on the simulator.
             let options = PHFetchOptions()
             options.prefetchAssetExtendedMetadata = true
+            options.includeAllBurstAssets = true
             let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: options)
             var entries: [(id: String, caption: String?)] = []
             fetched.enumerateObjects { asset, _, _ in
