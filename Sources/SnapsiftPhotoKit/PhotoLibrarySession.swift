@@ -37,6 +37,7 @@ public final class PhotoLibrarySession {
     public let history: PhotoLibraryHistoryStore
     private let snapshotStore: ScanSnapshotStore
     private let enrichmentPort: (any PhotoLibraryEnrichmentPort)?
+    let descriptionSource: (@Sendable ([String]) async -> [String: Bool]?)?
     private var albumTitles: PhotoLibraryAlbumTitles
     private var namingLanguage = "en-US"
     private var fallbackSetName = "Similar set"
@@ -71,12 +72,14 @@ public final class PhotoLibrarySession {
     /// Storage is required so separate apps never share snapshots or deletion records.
     public init(storage: PhotoLibraryStorage, albumTitles: PhotoLibraryAlbumTitles,
                 enrichment: (any PhotoLibraryEnrichmentPort)? = nil,
+                descriptionSource: (@Sendable ([String]) async -> [String: Bool]?)? = nil,
                 imageManager: PHCachingImageManager = PHCachingImageManager()) {
         self.storage = storage
         self.history = PhotoLibraryHistoryStore(storage: storage)
         self.snapshotStore = ScanSnapshotStore(url: storage.snapshotURL)
         self.albumTitles = albumTitles
         self.enrichmentPort = enrichment
+        self.descriptionSource = descriptionSource
         self.imageManager = imageManager
     }
 
@@ -1559,8 +1562,11 @@ public final class PhotoLibrarySession {
         return result.groups
     }
 
-    private func libraryDescriptions(for uuids: [String]) async -> [String: Bool]? {
-        await enrichmentPort?.descriptions(for: uuids)
+    /// The enrichment port answers when present; otherwise `descriptionSource`
+    /// (iOS captions); otherwise nil — undetermined, which withholds the seed.
+    func libraryDescriptions(for uuids: [String]) async -> [String: Bool]? {
+        if let enrichmentPort { return await enrichmentPort.descriptions(for: uuids) }
+        return await descriptionSource?(uuids)
     }
 
     /// Groups whose surviving keeper no longer resolves in the LIVE library.
